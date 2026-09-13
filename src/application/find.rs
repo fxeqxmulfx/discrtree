@@ -73,7 +73,7 @@ impl Dup<'_> {
         let text = std::fs::read_to_string(file)
             .map_err(|e| crate::error::Error::new(format!("{}: {e}", file.display())))?;
         let mut out = Vec::new();
-        for scanned in lean_text::scan(&text) {
+        for scanned in lean_text::scan(&text).decls {
             // Prefer the indexed row: it has an elaborated type and real
             // constants. Fall back to what the scanner saw.
             let local = match self.repo.get(&scanned.name)? {

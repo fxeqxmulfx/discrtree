@@ -25,12 +25,21 @@ pub struct SourceReport {
 /// `known` decides which scanned identifiers count as dependencies. Passing the
 /// already-indexed corpus removes the bound variables and the notation that
 /// would otherwise fill every dependency list with noise.
+/// A text corpus as the scanner read it.
+pub struct Scanned {
+    pub decls: Vec<Decl>,
+    /// Declarations the source gives no name of its own. See
+    /// [`lean_text::Scan::anonymous`].
+    pub anonymous: usize,
+}
+
 pub fn scan_source(
     meta: &SourceMeta,
     files: &dyn SourceFiles,
     known: Option<&dyn DeclRepo>,
-) -> Result<Vec<Decl>> {
+) -> Result<Scanned> {
     let mut out = Vec::new();
+    let mut anonymous = 0usize;
     for (module, path) in files.list_modules(&meta.id)? {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -39,11 +48,13 @@ pub fn scan_source(
             Err(_) => continue,
         };
         let imported = lean_text::imports(&text);
-        for s in lean_text::scan(&text) {
+        let scan = lean_text::scan(&text);
+        anonymous += scan.anonymous;
+        for s in scan.decls {
             out.push(to_decl(meta, &module, s, &imported, known)?);
         }
     }
-    Ok(out)
+    Ok(Scanned { decls: out, anonymous })
 }
 
 fn to_decl(

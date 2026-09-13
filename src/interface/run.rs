@@ -56,7 +56,7 @@ impl App {
             Command::Fetch { source } => self.fetch(source.as_deref()),
             Command::Index { rebuild } => self.index(rebuild),
             Command::Status => self.status(),
-            Command::Show { name, import_only } => self.show(&name, import_only),
+            Command::Show { names, import_only } => self.show(&names, import_only),
             Command::Deps { name, depth } => self.deps(&name, &depth),
             Command::Add { name, write, force } => self.add(&name, write, force),
             Command::Find(args) => self.find(&args),
@@ -90,11 +90,29 @@ impl App {
         Ok(Box::new(JsonlRepo::open(&dumps)?))
     }
 
-    fn show(&self, name: &str, import_only: bool) -> Result<()> {
-        let shown =
-            Show { repo: self.repo()?.as_ref(), files: &self.files, workspace: &self.workspace }
-                .run(&DeclName::new(name))?;
-        print!("{}", render::show(&shown, import_only));
+    /// A batch is not all-or-nothing. `dt show A B C` exists so an agent can pay
+    /// for one round trip instead of three; failing the whole batch because one
+    /// name was misremembered would hand back three round trips again. Misses go
+    /// to stderr, so `--import-only` still redirects into a file cleanly, and an
+    /// empty batch is still an error.
+    fn show(&self, names: &[String], import_only: bool) -> Result<()> {
+        let repo = self.repo()?;
+        let show = Show { repo: repo.as_ref(), files: &self.files, workspace: &self.workspace };
+        let mut shown = Vec::new();
+        let mut missed = Vec::new();
+        for n in names {
+            match show.run(&DeclName::new(n.as_str())) {
+                Ok(s) => shown.push(s),
+                Err(e) => missed.push(e),
+            }
+        }
+        if shown.is_empty() {
+            return Err(missed.into_iter().next().expect("a batch has at least one name"));
+        }
+        print!("{}", render::show_all(&shown, import_only));
+        for e in &missed {
+            eprintln!("dt: {e}");
+        }
         Ok(())
     }
 
@@ -219,10 +237,15 @@ impl App {
         // bound variable.
         let mut db = SqliteIndex::open(&self.cfg.db_path())?;
         for s in self.select(source, |s| !s.elaborated())? {
-            let decls = index::scan_source(&s.meta(), &self.files, Some(&db))?;
+            let scan = index::scan_source(&s.meta(), &self.files, Some(&db))?;
             db.clear_source(&SourceId::new(s.name.clone()))?;
-            index::load(&mut db, &decls)?;
-            println!("{}: {} declarations scanned [text]", s.name, decls.len());
+            index::load(&mut db, &scan.decls)?;
+            println!(
+                "{}: {} declarations scanned [text]{}",
+                s.name,
+                scan.decls.len(),
+                anonymous_note(scan.anonymous)
+            );
         }
         db.finish()?;
         Ok(())
@@ -284,11 +307,12 @@ impl App {
                 eprintln!("{}: not on disk yet, skipping (`dt fetch {}`)", s.name, s.name);
                 continue;
             }
-            let decls = index::scan_source(&s.meta(), &self.files, Some(&sqlite))?;
+            let scan = index::scan_source(&s.meta(), &self.files, Some(&sqlite))?;
             let id = SourceId::new(s.name.clone());
             sqlite.clear_source(&id)?;
-            index::load(&mut sqlite, &decls)?;
-            report(&s.name, decls.len(), sqlite.count_source(&id)?, " [text]");
+            index::load(&mut sqlite, &scan.decls)?;
+            let tag = format!(" [text]{}", anonymous_note(scan.anonymous));
+            report(&s.name, scan.decls.len(), sqlite.count_source(&id)?, &tag);
         }
         sqlite.finish()?;
         println!("\nindex: {} ({} rows)", db.display(), sqlite.count()?);
@@ -379,6 +403,11 @@ fn query_of(a: &FindArgs) -> Result<Query> {
     q.no_sorry = a.no_sorry;
     q.limit = a.limit;
     Ok(q)
+}
+
+/// What was left out for having no name, said once rather than per file.
+fn anonymous_note(n: usize) -> String {
+    if n == 0 { String::new() } else { format!(", {n} anonymous") }
 }
 
 /// What a source contributed, and what became of it. `handed` and `stored`

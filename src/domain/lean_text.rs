@@ -40,9 +40,19 @@ const HEADERS: &[&str] = &[
     "opaque ",
 ];
 
-/// Modifiers that may precede a declaration header on the same line.
-const MODIFIERS: &[&str] =
-    &["private ", "protected ", "noncomputable ", "partial ", "unsafe ", "nonrec ", "@[simp] "];
+/// Modifiers that may precede a declaration header on the same line, in any
+/// order and any number. An attribute block is handled separately, since
+/// `@[simp, norm_cast]` and `@[to_additive existing]` cannot be enumerated.
+const MODIFIERS: &[&str] = &[
+    "private ",
+    "protected ",
+    "noncomputable ",
+    "partial ",
+    "unsafe ",
+    "nonrec ",
+    "scoped ",
+    "local ",
+];
 
 /// The modules a file imports. For a text corpus these are the only structural
 /// dependency information there is.
@@ -57,9 +67,23 @@ pub fn imports(text: &str) -> Vec<ModuleName> {
         .collect()
 }
 
+/// What a file turned out to contain.
+pub struct Scan {
+    pub decls: Vec<Scanned>,
+    /// Declarations with no name of their own: `instance : Foo Bar := ...`.
+    ///
+    /// Lean generates a name for these; nothing in the source says what it is,
+    /// so there is no honest key to index them under. They are counted rather
+    /// than dropped in silence, because 516 of FLT's 3743 declarations are of
+    /// this kind and a corpus that quietly omits a seventh of itself is a
+    /// corpus that lies about what it does not contain.
+    pub anonymous: usize,
+}
+
 /// Every declaration in a file.
-pub fn scan(text: &str) -> Vec<Scanned> {
+pub fn scan(text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
+    let mut anonymous = 0usize;
     let mut out: Vec<Scanned> = Vec::new();
     let mut namespaces: Vec<String> = Vec::new();
     let mut i = 0;
@@ -79,11 +103,9 @@ pub fn scan(text: &str) -> Vec<Scanned> {
             let body = lines[start..=end].join("\n");
             let base = first_token(after);
             let name = qualify(&namespaces, base);
-            // `instance : Foo Bar := ...` declares something the elaborator
-            // names for us and nobody writes down. There is no honest name to
-            // index it under, and inventing one puts a row in the index that
-            // no `dt show` can ever retrieve, so it is dropped here rather
-            // than at insert time.
+            if base.is_empty() {
+                anonymous += 1;
+            }
             if !base.is_empty() && !name.is_internal() {
                 out.push(Scanned {
                     name,
@@ -100,7 +122,7 @@ pub fn scan(text: &str) -> Vec<Scanned> {
         }
         i += 1;
     }
-    out
+    Scan { decls: out, anonymous }
 }
 
 /// A declaration header at column zero, returning its kind and what follows.
@@ -112,9 +134,33 @@ fn header(line: &str) -> Option<(&'static str, &str)> {
         if let Some(h) = HEADERS.iter().find(|h| rest.starts_with(**h)) {
             return Some((h.trim_end(), &rest[h.len()..]));
         }
+        if let Some(after) = attribute(rest) {
+            rest = after;
+            continue;
+        }
         let m = MODIFIERS.iter().find(|m| rest.starts_with(**m))?;
         rest = &rest[m.len()..];
     }
+}
+
+/// What follows an inline `@[...]` attribute block, if the line opens with one.
+/// Brackets nest: `@[to_additive (attr := simp)]` is one block.
+fn attribute(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("@[")?;
+    let mut depth = 1usize;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[i + 1..].trim_start());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A declaration runs until the next line at column zero that starts something
@@ -238,7 +284,7 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
 
     #[test]
     fn reads_one_flt_theorem() {
-        let d = scan(FLT);
+        let d = scan(FLT).decls;
         assert_eq!(d.len(), 1);
         let d = &d[0];
         assert_eq!(d.name.as_str(), "Algebra.norm_of_subsingleton");
@@ -267,7 +313,7 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
 
     #[test]
     fn identifiers_keep_the_global_ones_and_drop_bound_variables() {
-        let ids = scan(FLT)[0].idents.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        let ids = scan(FLT).decls[0].idents.iter().map(|i| i.to_string()).collect::<Vec<_>>();
         assert!(ids.contains(&"Algebra.norm".to_string()));
         assert!(ids.contains(&"CommRing".to_string()));
         assert!(!ids.contains(&"a".to_string()), "`a` is a bound variable");
@@ -276,7 +322,7 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
     #[test]
     fn namespaces_qualify_and_close() {
         let src = "namespace Foo\n\ntheorem bar : True := trivial\n\nend Foo\n\ntheorem baz : True := trivial\n";
-        let names: Vec<String> = scan(src).iter().map(|d| d.name.to_string()).collect();
+        let names: Vec<String> = scan(src).decls.iter().map(|d| d.name.to_string()).collect();
         assert_eq!(names, vec!["Foo.bar", "baz"]);
     }
 
@@ -287,33 +333,33 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
         // replaced the first in the index: 229 of FLT's declarations vanished
         // this way.
         let src = "namespace InverseLimit\ninstance : Add Nat := inferInstance\ninstance [Foo] : Mul Nat := inferInstance\ninstance named : Sub Nat := inferInstance\nend InverseLimit\n";
-        let names: Vec<String> = scan(src).iter().map(|d| d.name.to_string()).collect();
+        let names: Vec<String> = scan(src).decls.iter().map(|d| d.name.to_string()).collect();
         assert_eq!(names, vec!["InverseLimit.named"]);
     }
 
     #[test]
     fn modifiers_before_the_keyword_do_not_hide_a_declaration() {
         let src = "noncomputable def f : Nat := 0\nprivate theorem g : True := trivial\n";
-        let kinds: Vec<String> = scan(src).iter().map(|d| d.kind.clone()).collect();
+        let kinds: Vec<String> = scan(src).decls.iter().map(|d| d.kind.clone()).collect();
         assert_eq!(kinds, vec!["def", "theorem"]);
     }
 
     #[test]
     fn a_nested_declaration_inside_a_proof_is_not_a_declaration() {
         let src = "theorem outer : True := by\n  have inner : True := trivial\n  exact inner\n";
-        assert_eq!(scan(src).len(), 1);
+        assert_eq!(scan(src).decls.len(), 1);
     }
 
     #[test]
     fn sorry_is_detected_but_not_inside_a_longer_word() {
-        assert!(scan("theorem a : True := by\n  sorry\n")[0].has_sorry);
-        assert!(!scan("theorem a : True := by\n  exact sorryFree\n")[0].has_sorry);
+        assert!(scan("theorem a : True := by\n  sorry\n").decls[0].has_sorry);
+        assert!(!scan("theorem a : True := by\n  exact sorryFree\n").decls[0].has_sorry);
     }
 
     #[test]
     fn a_multi_declaration_file_gets_correct_line_ranges() {
         let src = "theorem a : True :=\n  trivial\n\ntheorem b : True :=\n  trivial\n";
-        let d = scan(src);
+        let d = scan(src).decls;
         assert_eq!(d.len(), 2);
         assert_eq!((d[0].line_start, d[0].line_end), (1, 2));
         assert_eq!((d[1].line_start, d[1].line_end), (4, 5));

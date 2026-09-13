@@ -54,7 +54,7 @@ row cannot answer that question and dropping the condition would be a lie.
 | `dt index` | build the SQLite + FTS5 index |
 | `dt status` | what is indexed, and whether it is elaborated |
 | `dt find <pattern>` | search by shape, name, constants, module or text |
-| `dt show <name>` | the declaration verbatim, and the import that provides it |
+| `dt show <name>...` | the declarations verbatim, and the imports that provide them |
 | `dt deps <name>` | what a proof rests on, level by level |
 | `dt add <name>` | materialize a declaration and its tree into the project |
 | `dt dup <file>` | is this already upstream? |
@@ -104,7 +104,10 @@ The measured effect on the real index — 225 508 declarations:
 
 What none of this buys is a round trip saved. That is the larger cost, and the
 reason `dt find` prints the module on the same line as the name: the module
-*is* the import, so a hit is actionable without a second call.
+*is* the import, so a hit is actionable without a second call. For the same
+reason `dt show` takes any number of names, prints each import line once, and
+reports a name it could not find on stderr rather than failing the batch — a
+misremembered name costs one line, not the other four lookups.
 
 ## Setup
 

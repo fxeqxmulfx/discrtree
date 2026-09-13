@@ -42,7 +42,7 @@ pub fn find(hits: &Hits, long: bool) -> String {
             d.kind,
             d.module
         ));
-        let ty = if long { d.ty.as_str() } else { first_line(&d.ty, 100) };
+        let ty = if long { d.ty.as_str().into() } else { first_line(&d.ty, 100) };
         if !ty.is_empty() {
             out.push_str(&format!("  {ty}\n"));
         }
@@ -60,6 +60,34 @@ pub fn find(hits: &Hits, long: bool) -> String {
         out.push_str(&format!("{} result(s)\n", hits.rows.len()));
     }
     out
+}
+
+/// Several declarations in one answer.
+///
+/// `--import-only` deduplicates: asking for four lemmas from one module must
+/// not produce the same import line four times, and the caller pasting the
+/// result should not have to notice.
+pub fn show_all(shown: &[Shown], import_only: bool) -> String {
+    if import_only {
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = String::new();
+        for s in shown {
+            let line = match &s.import {
+                Some(i) => i.clone(),
+                None => format!(
+                    "-- source `{}` is not importable; `dt add {}` copies it instead",
+                    s.decl.source, s.decl.name
+                ),
+            };
+            if !seen.contains(&line) {
+                out.push_str(&line);
+                out.push('\n');
+                seen.push(line);
+            }
+        }
+        return out;
+    }
+    shown.iter().map(|s| show(s, false)).collect::<Vec<_>>().join("\n")
 }
 
 pub fn show(s: &Shown, import_only: bool) -> String {
@@ -283,13 +311,18 @@ pub fn dup(dups: &[Duplicate]) -> String {
     out
 }
 
-/// The first line, cut to `width` on a character boundary.
-fn first_line(s: &str, width: usize) -> &str {
+/// The first line, cut to `width` on a character boundary, with the cut shown.
+///
+/// The ellipsis is not decoration. A type cut mid-expression that looks whole
+/// is read as the whole type, and the reader cannot tell that the part
+/// deciding whether the lemma applies was the part removed.
+fn first_line(s: &str, width: usize) -> std::borrow::Cow<'_, str> {
     let line = s.lines().next().unwrap_or("");
-    match line.char_indices().nth(width) {
+    let cut = match line.char_indices().nth(width) {
         Some((i, _)) => &line[..i],
-        None => line,
-    }
+        None => return line.into(),
+    };
+    format!("{cut}…").into()
 }
 
 #[cfg(test)]
@@ -380,6 +413,19 @@ mod tests {
     }
 
     #[test]
+    fn one_invocation_for_several_names_does_not_repeat_a_shared_import() {
+        let one = Shown {
+            decl: decl(true),
+            import: Some("import Mathlib.Analysis.Complex.Exponential".into()),
+            source_text: None,
+            note: None,
+        };
+        let two = Shown { decl: decl(true), ..one.clone() };
+        let r = show_all(&[one, two], true);
+        assert_eq!(r, "import Mathlib.Analysis.Complex.Exponential\n");
+    }
+
+    #[test]
     fn show_says_so_when_a_source_cannot_be_imported() {
         let s = Shown { decl: decl(false), import: None, source_text: None, note: None };
         assert!(show(&s, true).contains("not importable"));
@@ -388,7 +434,14 @@ mod tests {
     #[test]
     fn cutting_a_long_type_never_splits_a_character() {
         let wide = "≤".repeat(200);
-        assert_eq!(first_line(&wide, 10).chars().count(), 10);
+        let cut = first_line(&wide, 10);
+        assert_eq!(cut.chars().count(), 11, "ten characters and the mark that says so");
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn a_type_that_fits_is_not_marked_as_cut() {
+        assert_eq!(first_line("x ≤ y", 100), "x ≤ y");
     }
 
     #[test]

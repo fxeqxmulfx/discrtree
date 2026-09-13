@@ -69,9 +69,13 @@ pub enum Command {
     Status,
 
     /// Print a declaration and the import line that provides it.
+    ///
+    /// Several names at once cost one invocation instead of one each, which is
+    /// the expensive part when this is driven by a program.
     Show {
-        name: String,
-        /// Print only the import line.
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+        /// Print only the import lines, deduplicated.
         #[arg(long)]
         import_only: bool,
     },

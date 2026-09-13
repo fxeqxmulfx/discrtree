@@ -73,7 +73,7 @@ fn a_module_is_read_by_its_module_name_not_its_path() {
 #[test]
 fn scanning_finds_the_declarations_with_their_kinds_and_ranges() {
     let (_dir, files, meta) = corpus();
-    let decls = index::scan_source(&meta, &files, None).unwrap();
+    let decls = index::scan_source(&meta, &files, None).unwrap().decls;
     let names: Vec<String> = decls.iter().map(|d| d.name.to_string()).collect();
     assert_eq!(names, ["p2m_exact_reverting", "helper", "unfinished"], "got: {names:?}");
 
@@ -91,7 +91,7 @@ fn scanning_finds_the_declarations_with_their_kinds_and_ranges() {
 #[test]
 fn a_declaration_proved_by_sorry_is_flagged() {
     let (_dir, files, meta) = corpus();
-    let decls = index::scan_source(&meta, &files, None).unwrap();
+    let decls = index::scan_source(&meta, &files, None).unwrap().decls;
     let unfinished = decls.iter().find(|d| d.name.as_str() == "unfinished").unwrap();
     assert!(unfinished.has_sorry);
     assert!(!decls[0].has_sorry);
@@ -100,7 +100,7 @@ fn a_declaration_proved_by_sorry_is_flagged() {
 #[test]
 fn every_scanned_row_is_marked_as_not_elaborated_and_carries_no_shape() {
     let (_dir, files, meta) = corpus();
-    for d in index::scan_source(&meta, &files, None).unwrap() {
+    for d in index::scan_source(&meta, &files, None).unwrap().decls {
         assert!(!d.elaborated, "{} came from a scanner, not from Lean", d.name);
         assert!(
             !d.shaped(),
@@ -116,7 +116,7 @@ fn a_scanned_dependency_is_kept_only_when_the_index_knows_the_name() {
 
     // With nothing indexed there is nothing to resolve against, so no
     // identifier is promoted to a dependency.
-    let blind = index::scan_source(&meta, &files, None).unwrap();
+    let blind = index::scan_source(&meta, &files, None).unwrap().decls;
     assert!(blind[0].deps.is_empty());
 
     let mut db = SqliteIndex::in_memory().unwrap();
@@ -124,7 +124,7 @@ fn a_scanned_dependency_is_kept_only_when_the_index_knows_the_name() {
         .unwrap();
     db.finish().unwrap();
 
-    let resolved = index::scan_source(&meta, &files, Some(&db)).unwrap();
+    let resolved = index::scan_source(&meta, &files, Some(&db)).unwrap().decls;
     assert_eq!(resolved[0].deps, vec![DeclName::new("Real.exp")]);
 }
 
@@ -132,7 +132,7 @@ fn a_scanned_dependency_is_kept_only_when_the_index_knows_the_name() {
 fn a_text_corpus_is_searchable_by_name_and_text_but_not_by_shape() {
     let (_dir, files, meta) = corpus();
     let mut db = SqliteIndex::in_memory().unwrap();
-    let decls = index::scan_source(&meta, &files, None).unwrap();
+    let decls = index::scan_source(&meta, &files, None).unwrap().decls;
     index::load(&mut db, &decls).unwrap();
     db.finish().unwrap();
 

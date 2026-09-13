@@ -60,10 +60,19 @@ impl DeclName {
             || self.0.contains("._")
             || self.0.contains("_@.")
             || GENERATED.contains(&self.base())
-            || self.base().starts_with("proof_")
-            || self.base().starts_with("eq_")
-            || self.base().starts_with("match_")
+            || generated_with_index(self.base())
     }
+}
+
+/// `foo.eq_1`, `foo.proof_3`, `foo.match_2`: Lean numbers what it generates.
+///
+/// The number is the whole distinction. Matching the prefix alone also removes
+/// `eq_comm`, `eq_sub_iff_add_eq` and every other lemma a person named after
+/// the equation it is about — 703 of them in one corpus.
+fn generated_with_index(base: &str) -> bool {
+    ["eq_", "proof_", "match_"].iter().any(|p| {
+        base.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 impl fmt::Display for DeclName {
@@ -174,10 +183,30 @@ mod tests {
 
     #[test]
     fn recognises_generated_names() {
-        for n in ["Nat.rec", "Foo.casesOn", "Foo.proof_1", "_private.Mathlib.X", "Foo.injEq"] {
+        for n in [
+            "Nat.rec",
+            "Foo.casesOn",
+            "Foo.proof_1",
+            "_private.Mathlib.X",
+            "Foo.injEq",
+            "Foo.eq_1",
+            "Foo.eq_def",
+            "Foo.match_2",
+        ] {
             assert!(DeclName::new(n).is_internal(), "{n} should be internal");
         }
-        for n in ["Real.exp_le_exp", "Finset.sum_le_sum", "Nat"] {
+        // `eq_` is a prefix people use. Treating it as generated removed every
+        // lemma named after the equation it is about.
+        for n in [
+            "Real.exp_le_exp",
+            "Finset.sum_le_sum",
+            "Nat",
+            "eq_comm",
+            "eq_sub_iff_add_eq",
+            "Foo.eq_originIdeal_of_mem",
+            "Foo.match_left",
+            "proof_irrel",
+        ] {
             assert!(!DeclName::new(n).is_internal(), "{n} should be kept");
         }
     }
