@@ -13,17 +13,29 @@ pub struct Find<'a> {
     pub repo: &'a dyn DeclRepo,
 }
 
+/// What a search found, and whether the limit hid anything.
+///
+/// The flag is the cheaper half of the answer: it lets the caller tell
+/// "these are all the matches" from "these are the best few of many", which
+/// otherwise costs a second search with a larger limit.
+#[derive(Debug)]
+pub struct Hits {
+    pub rows: Vec<Decl>,
+    pub truncated: bool,
+}
+
 impl Find<'_> {
-    pub fn run(&self, query: &Query) -> Result<Vec<Decl>> {
+    pub fn run(&self, query: &Query) -> Result<Hits> {
         if query.is_empty() {
             bail!(
                 "nothing to search for: give a pattern, or one of --name, --concl, --uses, --in, --text"
             )
         }
-        let mut hits = self.repo.find(query)?;
-        hits.sort_by_key(|d| query::rank(query, d));
-        hits.truncate(query.limit);
-        Ok(hits)
+        let mut rows = self.repo.find(query)?;
+        rows.sort_by_key(|d| query::rank(query, d));
+        let truncated = rows.len() > query.limit;
+        rows.truncate(query.limit);
+        Ok(Hits { rows, truncated })
     }
 }
 

@@ -208,7 +208,7 @@ fn find_returns_at_most_the_limit() {
     let mut q = Query::new();
     q.name = Some("o".into());
     q.limit = 1;
-    assert_eq!(Find { repo: &repo }.run(&q).unwrap().len(), 1);
+    assert_eq!(Find { repo: &repo }.run(&q).unwrap().rows.len(), 1);
 }
 
 #[test]

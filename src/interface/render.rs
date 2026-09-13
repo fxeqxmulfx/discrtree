@@ -6,10 +6,11 @@
 
 use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
-use crate::application::find::Duplicate;
+use crate::application::find::{Duplicate, Hits};
 use crate::application::show::Shown;
 use crate::application::status::SourceStatus;
 use crate::domain::decl::Decl;
+use std::collections::BTreeMap;
 
 /// The marker every text row carries.
 pub fn mark(d: &Decl) -> &'static str {
@@ -20,14 +21,21 @@ fn sorry_mark(d: &Decl) -> &'static str {
     if d.has_sorry { "  [sorry]" } else { "" }
 }
 
-pub fn find(hits: &[Decl], long: bool) -> String {
-    if hits.is_empty() {
+/// A hit is two lines: what it is called, followed by what it says.
+///
+/// Nothing here is padded or separated by blank lines. This output is read far
+/// more often by a program than by a person, and alignment whitespace is paid
+/// for on every read while carrying no information. The docstring is the other
+/// half of that bargain: it is a quarter of the output and almost never the
+/// reason a search succeeds, so it waits for `--long`.
+pub fn find(hits: &Hits, long: bool) -> String {
+    if hits.rows.is_empty() {
         return "no match\n".into();
     }
     let mut out = String::new();
-    for d in hits {
+    for d in &hits.rows {
         out.push_str(&format!(
-            "{}{}{}\n  {}  {}\n",
+            "{}{}{}  {}  {}\n",
             d.name,
             mark(d),
             sorry_mark(d),
@@ -38,12 +46,19 @@ pub fn find(hits: &[Decl], long: bool) -> String {
         if !ty.is_empty() {
             out.push_str(&format!("  {ty}\n"));
         }
-        if let Some(s) = d.summary() {
-            out.push_str(&format!("  -- {}\n", first_line(s, 100)));
+        if long {
+            if let Some(s) = d.summary() {
+                out.push_str(&format!("  -- {}\n", first_line(s, 200)));
+            }
         }
-        out.push('\n');
     }
-    out.push_str(&format!("{} result(s)\n", hits.len()));
+    // Saying only the count leaves the reader unable to tell a complete answer
+    // from a truncated one without running the search again.
+    if hits.truncated {
+        out.push_str(&format!("{} shown, more match; refine or --limit\n", hits.rows.len()));
+    } else {
+        out.push_str(&format!("{} result(s)\n", hits.rows.len()));
+    }
     out
 }
 
@@ -101,10 +116,8 @@ pub fn deps(r: &DepsResult) -> String {
                 return out;
             }
             for (i, level) in levels.iter().enumerate() {
-                out.push_str(&format!("\ndepth {}  ({} declarations)\n", i + 1, level.len()));
-                for d in level {
-                    out.push_str(&format!("  {:<52} {}{}\n", d.name.as_str(), d.source, mark(d)));
-                }
+                out.push_str(&format!("depth {} ({})\n", i + 1, level.len()));
+                out.push_str(&by_source(level));
             }
         }
         DepsResult::Summary { root, stats, approximate } => {
@@ -117,11 +130,48 @@ pub fn deps(r: &DepsResult) -> String {
                 stats.total, stats.theorems
             ));
             for (source, n) in &stats.by_source {
-                out.push_str(&format!("  {source:<16} {n}\n"));
+                out.push_str(&format!("  {source} {n}\n"));
             }
             out.push_str("\nRe-run with --depth 1 or --depth 2 for the readable part.\n");
         }
     }
+    out
+}
+
+/// A level of the dependency tree, grouped by the source each name came from.
+///
+/// A dependency list is a set of names, not a table: one line per name with the
+/// source repeated beside it spends most of its width restating `mathlib`. The
+/// source is the thing that repeats, so it is said once and the names follow.
+fn by_source(level: &[Decl]) -> String {
+    let mut groups: BTreeMap<(&str, &str), Vec<&str>> = BTreeMap::new();
+    for d in level {
+        groups.entry((d.source.as_str(), mark(d))).or_default().push(d.name.as_str());
+    }
+    let mut out = String::new();
+    for ((source, text), names) in groups {
+        out.push_str(&wrapped(&format!("  {source}{text}:"), &names));
+    }
+    out
+}
+
+/// `head` followed by `items`, broken at `WIDTH` so a long level stays legible
+/// without one line per item.
+fn wrapped(head: &str, items: &[&str]) -> String {
+    const WIDTH: usize = 96;
+    let mut out = String::from(head);
+    let mut col = head.chars().count();
+    for it in items {
+        let n = it.chars().count() + 1;
+        if col + n > WIDTH {
+            out.push_str("\n   ");
+            col = 3;
+        }
+        out.push(' ');
+        out.push_str(it);
+        col += n;
+    }
+    out.push('\n');
     out
 }
 
@@ -155,12 +205,12 @@ pub fn add(r: &AddReport, written: bool) -> String {
         r.frontier.depth
     ));
     for (source, n) in &r.plan.by_source {
-        out.push_str(&format!("  {source:<16} {n}\n"));
+        out.push_str(&format!("  {source} {n}\n"));
     }
     out.push('\n');
     for f in &r.plan.files {
         out.push_str(&format!(
-            "  {:<58} {} decl(s), {} lines\n",
+            "  {} {} decl(s), {} lines\n",
             f.path.display(),
             f.decls.len(),
             f.lines()
@@ -247,6 +297,10 @@ mod tests {
     use super::*;
     use crate::domain::decl::Span;
 
+    fn hits(rows: Vec<Decl>) -> Hits {
+        Hits { rows, truncated: false }
+    }
+
     fn decl(elaborated: bool) -> Decl {
         let mut d =
             Decl::stub("Real.exp_le_exp", "mathlib", "Mathlib.Analysis.Complex.Exponential");
@@ -258,9 +312,57 @@ mod tests {
 
     #[test]
     fn every_text_row_is_marked_as_such() {
-        let rendered = find(&[decl(false)], false);
+        let rendered = find(&hits(vec![decl(false)]), false);
         assert!(rendered.contains("[text]"), "got: {rendered}");
-        assert!(!find(&[decl(true)], false).contains("[text]"));
+        assert!(!find(&hits(vec![decl(true)]), false).contains("[text]"));
+    }
+
+    #[test]
+    fn a_hit_costs_two_lines_and_no_padding() {
+        let r = find(&hits(vec![decl(true), decl(true)]), false);
+        assert_eq!(r.lines().count(), 5, "two hits, two lines each, one footer: {r}");
+        assert!(!r.contains("\n\n"), "blank separators are paid for on every read: {r}");
+        assert!(!r.contains("   "), "no run of padding: {r}");
+    }
+
+    #[test]
+    fn the_docstring_waits_for_long() {
+        let mut d = decl(true);
+        d.doc = Some("The exponential is monotone.".into());
+        assert!(!find(&hits(vec![d.clone()]), false).contains("monotone"));
+        assert!(find(&hits(vec![d]), true).contains("monotone"));
+    }
+
+    #[test]
+    fn a_truncated_search_says_so_instead_of_looking_complete() {
+        let full = find(&hits(vec![decl(true)]), false);
+        let cut = find(&Hits { rows: vec![decl(true)], truncated: true }, false);
+        assert!(full.contains("1 result"));
+        assert!(cut.contains("more match"), "got: {cut}");
+    }
+
+    #[test]
+    fn a_dependency_level_names_its_source_once() {
+        let level: Vec<Decl> = ["LE.le", "Real", "Real.exp_monotone"]
+            .iter()
+            .map(|n| Decl::stub(n, "mathlib", "Mathlib.Order.Defs"))
+            .collect();
+        let r = by_source(&level);
+        assert_eq!(r, "  mathlib: LE.le Real Real.exp_monotone\n");
+        assert_eq!(r.matches("mathlib").count(), 1);
+    }
+
+    #[test]
+    fn a_long_dependency_level_wraps_instead_of_running_off() {
+        let names: Vec<String> = (0..40).map(|i| format!("Mathlib.Order.Thing{i}")).collect();
+        let level: Vec<Decl> =
+            names.iter().map(|n| Decl::stub(n, "mathlib", "Mathlib.Order.Defs")).collect();
+        let r = by_source(&level);
+        assert!(r.lines().count() > 1, "40 names must not be one line");
+        assert!(r.lines().all(|l| l.chars().count() <= 96), "{r}");
+        for n in &names {
+            assert!(r.contains(n.as_str()), "{n} was dropped");
+        }
     }
 
     #[test]
@@ -291,6 +393,6 @@ mod tests {
 
     #[test]
     fn an_empty_result_says_so_rather_than_printing_nothing() {
-        assert_eq!(find(&[], false), "no match\n");
+        assert_eq!(find(&hits(vec![]), false), "no match\n");
     }
 }

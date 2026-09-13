@@ -31,7 +31,11 @@ pub struct Query {
     pub limit: usize,
 }
 
-pub const DEFAULT_LIMIT: usize = 40;
+/// Ten, not forty. A search is read in full by whoever asked it, and the
+/// eleventh hit for a query worth answering is almost never the one that was
+/// wanted — a query that needs forty rows needs refining, and `dt find` says so
+/// when the limit hid something.
+pub const DEFAULT_LIMIT: usize = 10;
 
 impl Query {
     pub fn new() -> Query {

@@ -6,10 +6,8 @@ with what it rests on and the `import` line that actually provides it.
 
 ```
 $ dt find 'Real.exp _ ≤ Real.exp _'
-Real.exp_le_exp_of_le
-  theorem  Mathlib.Analysis.Complex.Exponential
+Real.exp_le_exp_of_le  theorem  Mathlib.Analysis.Complex.Exponential
   ∀ {x y : ℝ}, x ≤ y → Real.exp x ≤ Real.exp y
-
 1 result(s)
 
 $ dt show Real.exp_le_exp_of_le --import-only
@@ -70,6 +68,43 @@ Dependency closures collapse at the **importable frontier**: an importable
 dependency becomes one `import` line and its entire subtree disappears. That is
 not a depth cap — it is the reason the answer for a Mathlib lemma is one line
 rather than 5000 declarations.
+
+## Output is priced per read
+
+`dt` is read by an agent at least as often as by a person, and an agent pays
+for every byte twice: once to receive the answer and again on every later turn
+that carries it. The output is shaped accordingly.
+
+* **No alignment padding.** A column of names padded to a fixed width is more
+  than half whitespace, and the whitespace says nothing. `dt deps` used to
+  spend 61% of its output on it.
+* **No blank separators.** Records end where the next one begins.
+* **The repeating field is said once.** A dependency level is a set of names
+  grouped under its source, not one row per name with `mathlib` restated
+  beside each.
+* **Ten results, not forty.** The eleventh hit for a query worth asking is
+  rarely the wanted one. When the limit hides something the footer says
+  `10 shown, more match` rather than letting a truncated answer look complete.
+* **The docstring waits for `--long`.** It was a quarter of `dt find` and
+  almost never the reason a search succeeded.
+
+Two things it deliberately does *not* do. It does not elide the shared
+`Mathlib.` prefix from module names: the module is what gets copied into an
+`import` line, and a name that has to be reconstructed is a name that can be
+reconstructed wrongly. And there is no `--json`: braces, quotes and repeated
+field names cost more than the terse text they would replace.
+
+The measured effect on the real index — 225 508 declarations:
+
+| | before | after |
+| --- | ---: | ---: |
+| `dt find --name exp` (default limit) | 3952 B | 688 B |
+| `dt find --name exp --limit 40` | 3952 B | 2866 B |
+| `dt deps Real.exp_le_exp_of_le` | 301 B | 86 B |
+
+What none of this buys is a round trip saved. That is the larger cost, and the
+reason `dt find` prints the module on the same line as the name: the module
+*is* the import, so a hit is actionable without a second call.
 
 ## Setup
 
