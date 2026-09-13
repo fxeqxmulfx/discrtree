@@ -79,12 +79,18 @@ def declKind (env : Environment) (ci : ConstantInfo) : String :=
 /-- Names a human would never search for, dropped from dependency lists. -/
 def keepDep (n : Name) : Bool := keep n
 
-/-- A dependency list: deduplicated, sorted, internals dropped. -/
+/-- A dependency list: deduplicated, sorted, internals dropped.
+
+`getUsedConstants` already visits each constant once, so all that is left is
+the order. Sorting the names by `toString` rebuilds the string at every
+comparison — `k log k` of them per declaration, over three hundred thousand
+declarations, twice each. Building every string once and sorting those is the
+same answer for `k`. -/
 def depsOf (e : Expr) : Array String :=
-  let used := e.getUsedConstants.filter keepDep
-  let sorted := used.qsort (·.toString < ·.toString)
-  sorted.foldl (init := #[]) fun acc n =>
-    let s := n.toString
+  let used := e.getUsedConstants.filterMap fun n =>
+    if keepDep n then some n.toString else none
+  let sorted := used.qsort (· < ·)
+  sorted.foldl (init := #[]) fun acc s =>
     if acc.back? == some s then acc else acc.push s
 
 /-- Drop leading and trailing spaces. `String.trim` is deprecated in 4.33 and
@@ -98,6 +104,11 @@ def matchesPrefix (prefixes : Array String) (m : Name) : Bool :=
   else
     let s := m.toString
     prefixes.any fun p => s == p || s.startsWith (p ++ ".")
+
+/-- The module a declaration was declared in. -/
+def moduleOf (env : Environment) (n : Name) : Option Name := do
+  let idx ← env.getModuleIdxFor? n
+  env.header.moduleNames[idx.toNat]?
 
 /-- One JSONL row. Field names match `discrtree::model::Decl`. -/
 def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
@@ -135,10 +146,77 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     ("elaborated", Json.bool true)
   ]
 
-/-- The module a declaration was declared in. -/
-def moduleOf (env : Environment) (n : Name) : Option Name := do
-  let idx ← env.getModuleIdxFor? n
-  env.header.moduleNames[idx.toNat]?
+/-- Declarations this dump will write, paired with the module they came from.
+
+Collected up front rather than walked in place: the walk is the only part that
+has to be serial, and it is the cheap part. -/
+def workList (env : Environment) (prefixes : Array String) :
+    Array (Name × Name × ConstantInfo) :=
+  env.constants.fold (init := #[]) fun acc name ci =>
+    if !keep name then acc
+    else match moduleOf env name with
+      | none   => acc
+      | some m => if matchesPrefix prefixes m then acc.push (name, m, ci) else acc
+
+/-- Threads to dump on. `DISCRTREE_JOBS` overrides.
+
+The environment is shared and read-only here, so a thread costs its own
+elaboration caches and nothing else — which is why this is worth doing in one
+process rather than by splitting the library over several, where every one of
+them would pay `import Mathlib` again at seven gigabytes. -/
+def jobCount : IO Nat := do
+  match (← IO.getEnv "DISCRTREE_JOBS").bind String.toNat? with
+  | some n => return max n 1
+  | none =>
+    let hw := (System.Platform.Internal.getHardwareConcurrency ()).toNat
+    return if hw == 0 then 4 else hw
+
+/-- Declarations elaborated before the state is thrown away. `ppExpr` fills the
+instance and `whnf` caches, and a share of thirty thousand declarations would
+otherwise carry every entry to the end. -/
+def batchSize : Nat := 2000
+
+/-- One thread's share, written to its own file.
+
+Each thread starts from the same `Core.State`, which holds the environment, and
+its result state is dropped: nothing here adds a declaration, so there is
+nothing to merge back. -/
+def dumpShare (source : String) (withDeps : Bool) (out : String)
+    (work : Array (Name × Name × ConstantInfo))
+    (ctxCore : Core.Context) (sCore : Core.State) : IO (Nat × Nat) := do
+  let h ← IO.FS.Handle.mk out IO.FS.Mode.write
+  let mut written := 0
+  let mut skipped := 0
+  let mut i := 0
+  while i < work.size do
+    let stop := min (i + batchSize) work.size
+    let act : MetaM (Nat × Nat) := do
+      let mut w := 0
+      let mut s := 0
+      for j in [i:stop] do
+        let (name, module, ci) := work[j]!
+        match ← (try (some <$> rowOf source withDeps name ci module)
+                  catch _ => pure none) with
+        | some row => h.putStrLn row.compress; w := w + 1
+        | none     => s := s + 1
+      pure (w, s)
+    let ((w, s), _, _) ← act.toIO ctxCore sCore
+    written := written + w
+    skipped := skipped + s
+    i := stop
+  h.flush
+  IO.eprintln s!"discrtree: {written} declarations into {out}"
+  return (written, skipped)
+
+/-- Append `part` to `h` and delete it. Bytes, not lines: the parts are tens of
+megabytes and have already been validated on the way out. -/
+def appendPart (h : IO.FS.Handle) (part : String) : IO Unit := do
+  let hp ← IO.FS.Handle.mk part IO.FS.Mode.read
+  let mut buf ← hp.read 1048576
+  while !buf.isEmpty do
+    h.write buf
+    buf ← hp.read 1048576
+  IO.FS.removeFile part
 
 def dumpAll : MetaM Unit := do
   let out ← match (← IO.getEnv "DISCRTREE_OUT") with
@@ -152,27 +230,38 @@ def dumpAll : MetaM Unit := do
     | none   => #[]
   let env ← getEnv
   -- Imported declarations only: the file being elaborated declares nothing.
-  let written ← IO.mkRef 0
-  let skipped ← IO.mkRef 0
+  let work := workList env prefixes
+  let jobs := min (← jobCount) (max work.size 1)
+  -- Round robin rather than contiguous blocks. What a declaration costs is the
+  -- size of its proof term, and those cluster by file: contiguous shares leave
+  -- one thread on `Mathlib.Analysis` long after the rest have finished.
+  let shares : Array (Array (Name × Name × ConstantInfo)) := Id.run do
+    let mut acc := Array.replicate jobs #[]
+    for k in [0:work.size] do
+      acc := acc.modify (k % jobs) (·.push work[k]!)
+    pure acc
+  IO.eprintln s!"discrtree: {work.size} declarations on {jobs} threads"
+  let ctxCore ← readThe Core.Context
+  let sCore ← getThe Core.State
+  let mut tasks := #[]
+  for i in [0:jobs] do
+    tasks := tasks.push (← IO.asTask
+      (dumpShare source withDeps s!"{out}.part{i}" shares[i]! ctxCore sCore)
+      Task.Priority.dedicated)
+  let mut written := 0
+  let mut skipped := 0
+  for t in tasks do
+    match t.get with
+    | .ok (w, s) => written := written + w; skipped := skipped + s
+    | .error e   => throwError e.toString
+  -- Joined in share order, so the dump is one file and the same file however
+  -- many threads wrote it.
   let h ← IO.FS.Handle.mk out IO.FS.Mode.write
-  env.constants.forM fun name ci => do
-    unless keep name do
-      return ()
-    let some module := moduleOf env name | return ()
-    unless matchesPrefix prefixes module do
-      return ()
-    match ← (try (some <$> rowOf source withDeps name ci module)
-              catch _ => pure none) with
-    | some row =>
-      h.putStrLn row.compress
-      let n ← written.modifyGet fun n => (n + 1, n + 1)
-      if n % 50000 == 0 then IO.eprintln s!"discrtree: {n} declarations..."
-    | none     => skipped.modify (· + 1)
+  for i in [0:jobs] do
+    appendPart h s!"{out}.part{i}"
   h.flush
-  let w ← written.get
-  let s ← skipped.get
-  IO.eprintln s!"discrtree: {w} declarations written to {out}\
-    {if s == 0 then "" else s!", {s} skipped (elaboration errors)"}"
+  IO.eprintln s!"discrtree: {written} declarations written to {out}\
+    {if skipped == 0 then "" else s!", {skipped} skipped (elaboration errors)"}"
 
 end Discrtree
 
