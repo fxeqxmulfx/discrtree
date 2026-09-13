@@ -5,7 +5,7 @@
 //! SQLite adapter translates this into a query, the JSONL adapter evaluates it
 //! directly, and the tests check the rule itself.
 
-use crate::domain::decl::{Decl, DeclKind, Shape};
+use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::name::DeclName;
 use crate::domain::source::SourceId;
 
@@ -53,6 +53,57 @@ impl Query {
             && self.source.is_none()
             && self.kind.is_none()
             && self.text.is_none()
+    }
+
+    /// The query's conditions, each on its own, for explaining an empty result.
+    ///
+    /// "No match" has two causes that need opposite repairs. Either one
+    /// condition matches nothing in the corpus at all — a misspelled constant,
+    /// a module prefix that is not a prefix, a source that does not exist — and
+    /// the fix is to edit that flag; or every condition matches something and
+    /// no row satisfies all of them, and the fix is to drop one. A caller told
+    /// only "no match" cannot tell which, and guessing costs a round trip
+    /// either way, which is the expensive kind of waste.
+    ///
+    /// Each probe asks for one row, so the whole diagnosis costs about as much
+    /// as the search that failed.
+    pub fn conditions(&self) -> Vec<(String, Query)> {
+        let one = |q: Query| Query { limit: 1, ..q };
+        let mut out = Vec::new();
+        if let Some(n) = &self.name {
+            out.push((format!("--name {n}"), one(Query { name: Some(n.clone()), ..Query::new() })));
+        }
+        if let Some(c) = &self.shape.concl {
+            let shape = Shape { concl: Some(c.clone()), args: Vec::new() };
+            out.push((format!("--concl {c}"), one(Query { shape, ..Query::new() })));
+        }
+        // An argument head is written inside the pattern, not as a flag, so it
+        // is named the way the user wrote it rather than the way it is stored.
+        for a in &self.shape.args {
+            if let ArgHead::Named(n) = a {
+                let shape = Shape { concl: None, args: vec![ArgHead::Named(n.clone())] };
+                out.push((format!("`{n}` in the pattern"), one(Query { shape, ..Query::new() })));
+            }
+        }
+        for c in &self.uses {
+            out.push((format!("--uses {c}"), one(Query { uses: vec![c.clone()], ..Query::new() })));
+        }
+        if let Some(m) = &self.module {
+            out.push((format!("--in {m}"), one(Query { module: Some(m.clone()), ..Query::new() })));
+        }
+        if let Some(s) = &self.source {
+            out.push((
+                format!("--source {s}"),
+                one(Query { source: Some(s.clone()), ..Query::new() }),
+            ));
+        }
+        if let Some(k) = &self.kind {
+            out.push((format!("--kind {k}"), one(Query { kind: Some(k.clone()), ..Query::new() })));
+        }
+        if let Some(x) = &self.text {
+            out.push((format!("--text {x}"), one(Query { text: Some(x.clone()), ..Query::new() })));
+        }
+        out
     }
 
     /// Whether answering the query requires elaborated rows. Asking for a shape

@@ -13,15 +13,34 @@ pub struct Find<'a> {
     pub repo: &'a dyn DeclRepo,
 }
 
-/// What a search found, and whether the limit hid anything.
+/// Why a search came back empty. The three cases need different repairs, and
+/// telling them apart from outside costs another search each.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Empty {
+    /// A single condition matched nothing. There is nothing left to say: the
+    /// condition that failed is the one that was asked.
+    Plain,
+    /// These conditions match nothing in the index even on their own — a
+    /// misspelled constant, a module prefix that is not a prefix. Edit them.
+    Barren(Vec<String>),
+    /// Every condition matches something; no row satisfies all of them. Drop
+    /// one rather than correcting any.
+    Combination,
+}
+
+/// What a search found, and the two things about it a caller would otherwise
+/// have to spend another search to learn.
 ///
-/// The flag is the cheaper half of the answer: it lets the caller tell
-/// "these are all the matches" from "these are the best few of many", which
-/// otherwise costs a second search with a larger limit.
+/// `truncated` tells "these are all the matches" from "these are the best few
+/// of many". `empty` says which repair an empty result needs. Both are nearly
+/// free here and cost a round trip to discover from outside, which is the
+/// expensive kind of waste.
 #[derive(Debug)]
 pub struct Hits {
     pub rows: Vec<Decl>,
     pub truncated: bool,
+    /// `None` when something matched.
+    pub empty: Option<Empty>,
 }
 
 impl Find<'_> {
@@ -35,7 +54,24 @@ impl Find<'_> {
         rows.sort_by_key(|d| query::rank(query, d));
         let truncated = rows.len() > query.limit;
         rows.truncate(query.limit);
-        Ok(Hits { rows, truncated })
+        let empty = if rows.is_empty() { Some(self.diagnose(query)?) } else { None };
+        Ok(Hits { rows, truncated, empty })
+    }
+
+    /// Ask each condition on its own. One row each, so the diagnosis costs
+    /// about as much as the search that failed.
+    fn diagnose(&self, query: &Query) -> Result<Empty> {
+        let conditions = query.conditions();
+        if conditions.len() < 2 {
+            return Ok(Empty::Plain);
+        }
+        let mut barren = Vec::new();
+        for (label, probe) in conditions {
+            if self.repo.find(&probe)?.is_empty() {
+                barren.push(label);
+            }
+        }
+        Ok(if barren.is_empty() { Empty::Combination } else { Empty::Barren(barren) })
     }
 }
 

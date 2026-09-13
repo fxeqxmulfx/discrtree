@@ -90,6 +90,28 @@ impl App {
         Ok(Box::new(JsonlRepo::open(&dumps)?))
     }
 
+    /// Two ways to ask for something that cannot exist, both worth refusing
+    /// before the search rather than answering `no match` afterwards. A source
+    /// name is a closed set, so a wrong one can be corrected in the error
+    /// instead of merely reported. And a shape cannot be asked of a text
+    /// source at all: a scanned row has no conclusion head symbol, so that
+    /// search is not empty, it is unanswerable — and the two look identical
+    /// from outside.
+    fn check_source(&self, query: &Query) -> Result<()> {
+        let Some(s) = &query.source else { return Ok(()) };
+        if self.workspace.sources.get(s).is_none() {
+            let known: Vec<&str> = self.workspace.sources.iter().map(|m| m.id.as_str()).collect();
+            bail!("no source `{s}`; configured sources are {}", known.join(", "))
+        }
+        if query.needs_shape() && !self.workspace.sources.elaborated(s) {
+            bail!(
+                "source `{s}` is text, and a shape can only be matched against elaborated rows; \
+                 search it by --name, --text, --in or --uses instead"
+            )
+        }
+        Ok(())
+    }
+
     /// A batch is not all-or-nothing. `dt show A B C` exists so an agent can pay
     /// for one round trip instead of three; failing the whole batch because one
     /// name was misremembered would hand back three round trips again. Misses go
@@ -132,6 +154,7 @@ impl App {
 
     fn find(&self, args: &FindArgs) -> Result<()> {
         let query = query_of(args)?;
+        self.check_source(&query)?;
         if self.verbose {
             if let Some(p) = &args.pattern {
                 let parsed = pattern::parse(p);

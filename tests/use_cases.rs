@@ -7,7 +7,7 @@ mod support;
 
 use discrtree::application::add::Add;
 use discrtree::application::deps::{Deps, DepsResult};
-use discrtree::application::find::{Dup, Find};
+use discrtree::application::find::{Dup, Empty, Find};
 use discrtree::application::ports::Workspace;
 use discrtree::application::show::Show;
 use discrtree::application::status::Status;
@@ -209,6 +209,51 @@ fn find_returns_at_most_the_limit() {
     q.name = Some("o".into());
     q.limit = 1;
     assert_eq!(Find { repo: &repo }.run(&q).unwrap().rows.len(), 1);
+}
+
+/// The two empty results need opposite repairs, so they must not read alike.
+/// A condition that matches nothing on its own is a typo to be edited; a
+/// combination that matches nothing is a condition to be dropped. Telling them
+/// apart from outside costs a search each, which is the whole reason the use
+/// case answers it.
+#[test]
+fn an_empty_search_says_which_condition_is_impossible() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("top".into());
+    q.module = Some("Nowhere".into());
+    match (Find { repo: &repo }).run(&q).unwrap().empty {
+        Some(Empty::Barren(c)) => assert_eq!(c, vec!["--in Nowhere".to_string()]),
+        other => panic!("expected the module condition to be blamed, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
+    let repo = repo();
+    let mut q = Query::new();
+    // `Other.top` exists and `Mathlib.Analysis.Exp` exists; nothing is both.
+    q.name = Some("top".into());
+    q.module = Some("Mathlib.Analysis.Exp".into());
+    assert_eq!(Find { repo: &repo }.run(&q).unwrap().empty, Some(Empty::Combination));
+}
+
+/// With one condition there is nothing to diagnose, and probing it would only
+/// repeat the query back. The probes are skipped rather than answered.
+#[test]
+fn a_single_condition_is_not_diagnosed() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("zzz".into());
+    assert_eq!(Find { repo: &repo }.run(&q).unwrap().empty, Some(Empty::Plain));
+}
+
+#[test]
+fn a_search_that_matches_is_not_diagnosed_at_all() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("top".into());
+    assert_eq!(Find { repo: &repo }.run(&q).unwrap().empty, None);
 }
 
 #[test]

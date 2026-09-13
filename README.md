@@ -109,6 +109,37 @@ reason `dt show` takes any number of names, prints each import line once, and
 reports a name it could not find on stderr rather than failing the batch — a
 misremembered name costs one line, not the other four lookups.
 
+## An empty answer says which repair it needs
+
+`no match` is the most expensive line `dt` can print, because on its own it
+does not say what to do next. Three situations produce it and they need
+opposite repairs:
+
+```
+$ dt find --name exp --in Analysis
+no match: --in Analysis matches nothing on its own
+
+$ dt find --name exp --uses Finset.sum --in Mathlib.Order
+no match: every condition matches on its own; drop one
+```
+
+The first is a condition to edit — Mathlib's modules begin `Mathlib.`, so
+`Analysis` is not a prefix of any of them. The second is a condition to drop.
+Guessing between them costs a search either way; asking each condition on its
+own costs one row each, and only when the search has already failed.
+
+Two asks are refused outright rather than answered with an empty result, because
+a closed set can name what was meant and a contradiction is not an absence:
+
+```
+$ dt find --name exp --source Mathlib
+dt: no source `Mathlib`; configured sources are project, mathlib, flt
+
+$ dt find 'Real.exp _ ≤ _' --source flt
+dt: source `flt` is text, and a shape can only be matched against elaborated
+    rows; search it by --name, --text, --in or --uses instead
+```
+
 ## Setup
 
 ```

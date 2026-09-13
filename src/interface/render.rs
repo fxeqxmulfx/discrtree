@@ -6,7 +6,7 @@
 
 use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
-use crate::application::find::{Duplicate, Hits};
+use crate::application::find::{Duplicate, Empty, Hits};
 use crate::application::show::Shown;
 use crate::application::status::SourceStatus;
 use crate::domain::decl::Decl;
@@ -30,7 +30,21 @@ fn sorry_mark(d: &Decl) -> &'static str {
 /// reason a search succeeds, so it waits for `--long`.
 pub fn find(hits: &Hits, long: bool) -> String {
     if hits.rows.is_empty() {
-        return "no match\n".into();
+        // Which repair to make is the whole question, and it is already known
+        // here. Saying only "no match" makes the caller guess between editing a
+        // condition and dropping one, and a wrong guess costs another search.
+        return match &hits.empty {
+            Some(Empty::Barren(c)) if c.len() == 1 => {
+                format!("no match: {} matches nothing on its own\n", c[0])
+            }
+            Some(Empty::Barren(c)) => {
+                format!("no match: {} match nothing on their own\n", c.join(", "))
+            }
+            Some(Empty::Combination) => {
+                "no match: every condition matches on its own; drop one\n".into()
+            }
+            _ => "no match\n".into(),
+        };
     }
     let mut out = String::new();
     for d in &hits.rows {
@@ -331,7 +345,7 @@ mod tests {
     use crate::domain::decl::Span;
 
     fn hits(rows: Vec<Decl>) -> Hits {
-        Hits { rows, truncated: false }
+        Hits { rows, truncated: false, empty: None }
     }
 
     fn decl(elaborated: bool) -> Decl {
@@ -369,7 +383,7 @@ mod tests {
     #[test]
     fn a_truncated_search_says_so_instead_of_looking_complete() {
         let full = find(&hits(vec![decl(true)]), false);
-        let cut = find(&Hits { rows: vec![decl(true)], truncated: true }, false);
+        let cut = find(&Hits { rows: vec![decl(true)], truncated: true, empty: None }, false);
         assert!(full.contains("1 result"));
         assert!(cut.contains("more match"), "got: {cut}");
     }
