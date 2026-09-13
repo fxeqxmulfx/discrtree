@@ -50,14 +50,11 @@ CREATE TABLE IF NOT EXISTS uses (
   decl_id INTEGER NOT NULL REFERENCES decl(id) ON DELETE CASCADE,
   const   TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS uses_const ON uses(const, decl_id);
-CREATE INDEX IF NOT EXISTS uses_decl  ON uses(decl_id);
 
 CREATE TABLE IF NOT EXISTS dep (
   decl_id INTEGER NOT NULL REFERENCES decl(id) ON DELETE CASCADE,
   name    TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS dep_decl ON dep(decl_id);
 
 -- What each source was when it was indexed. Without this the index cannot
 -- answer the two questions that decide whether it can be trusted: has the
@@ -81,6 +78,34 @@ CREATE TABLE IF NOT EXISTS source (
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
 const SCHEMA_VERSION: i64 = 1;
+
+/// The indexes over the side tables. Nothing indexing does needs them and every
+/// query does, so a bulk load drops them and [`SqliteIndex::finish`] builds them
+/// again.
+///
+/// They are the larger half of the file — 219 MB, 85 MB and 130 MB against a
+/// 1.36 GB index — and a rebuild inserts 16 million rows into them at random
+/// positions, a page fault apiece once the B-tree outgrows the page cache. The
+/// same index built in one pass over rows already on disk is sorted work.
+const SIDE_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS uses_const ON uses(const, decl_id);
+CREATE INDEX IF NOT EXISTS uses_decl  ON uses(decl_id);
+CREATE INDEX IF NOT EXISTS dep_decl   ON dep(decl_id);
+"#;
+
+const DROP_SIDE_INDEXES: &str = r#"
+DROP INDEX IF EXISTS uses_const;
+DROP INDEX IF EXISTS uses_decl;
+DROP INDEX IF EXISTS dep_decl;
+"#;
+
+/// Page cache for the duration of a bulk load, in KiB as a negative number,
+/// which is how SQLite spells "bytes, not pages". The default is 2 MB, which is
+/// not enough to hold the b-tree pages a batch of eight thousand rows touches.
+///
+/// 64 MB is where it stops mattering: 256 MB measured the same wall time and
+/// three times the resident set.
+const BULK_CACHE_KIB: i64 = -65_536;
 
 const FTS: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS decl_fts
@@ -107,6 +132,8 @@ fn check_version(conn: &Connection) -> Result<()> {
 
 pub struct SqliteIndex {
     conn: Connection,
+    /// Whether the side indexes are currently dropped. See [`SIDE_INDEXES`].
+    bulk: bool,
 }
 
 impl SqliteIndex {
@@ -129,8 +156,11 @@ impl SqliteIndex {
         // FTS5 is a compile-time option. Without it everything except free-text
         // search still works, so a missing module is not fatal.
         let _ = conn.execute_batch(FTS);
+        // A run that died mid-load left the side indexes dropped. Creating them
+        // here is what makes that self-healing.
+        conn.execute_batch(SIDE_INDEXES)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(SqliteIndex { conn })
+        Ok(SqliteIndex { conn, bulk: false })
     }
 
     /// What the source was when it was last indexed.
@@ -148,6 +178,28 @@ impl SqliteIndex {
             })
             .optional()?;
         Ok(row)
+    }
+
+    /// Take the side indexes down for a load. Idempotent: the first `put`
+    /// calls it, every later one is a bool test.
+    fn enter_bulk(&mut self) -> Result<()> {
+        if self.bulk {
+            return Ok(());
+        }
+        self.conn.execute_batch(DROP_SIDE_INDEXES)?;
+        self.conn.pragma_update(None, "cache_size", BULK_CACHE_KIB)?;
+        self.bulk = true;
+        Ok(())
+    }
+
+    /// Put them back. Nothing may query the side tables until this has run.
+    fn exit_bulk(&mut self) -> Result<()> {
+        if !self.bulk {
+            return Ok(());
+        }
+        self.conn.execute_batch(SIDE_INDEXES)?;
+        self.bulk = false;
+        Ok(())
     }
 
     fn has_fts(&self) -> bool {
@@ -480,6 +532,7 @@ impl DeclSink for SqliteIndex {
     }
 
     fn put(&mut self, decls: &[Decl]) -> Result<()> {
+        self.enter_bulk()?;
         let tx = self.conn.transaction()?;
         {
             let mut insert = tx.prepare_cached(
@@ -492,8 +545,6 @@ impl DeclSink for SqliteIndex {
                 tx.prepare_cached("INSERT INTO uses (decl_id, const) VALUES (?1, ?2)")?;
             let mut insert_dep =
                 tx.prepare_cached("INSERT INTO dep (decl_id, name) VALUES (?1, ?2)")?;
-            let mut clear_use = tx.prepare_cached("DELETE FROM uses WHERE decl_id = ?1")?;
-            let mut clear_dep = tx.prepare_cached("DELETE FROM dep WHERE decl_id = ?1")?;
             for d in decls {
                 let args: Vec<&str> = d.shape.args.iter().map(ArgHead::as_str).collect();
                 insert.execute(params![
@@ -510,9 +561,12 @@ impl DeclSink for SqliteIndex {
                     d.span.map(|s| s.end),
                     d.elaborated as i64,
                 ])?;
+                // A replaced row is deleted and re-inserted, so this id is
+                // always fresh and its side rows are always new. Clearing them
+                // per row deleted nothing and, with `uses_decl` dropped, would
+                // scan six million rows to do it. Replacing a source is
+                // `clear_source`'s job.
                 let id = tx.last_insert_rowid();
-                clear_use.execute(params![id])?;
-                clear_dep.execute(params![id])?;
                 for c in &d.consts {
                     insert_use.execute(params![id, c.as_str()])?;
                 }
@@ -526,6 +580,7 @@ impl DeclSink for SqliteIndex {
     }
 
     fn finish(&mut self) -> Result<()> {
+        self.exit_bulk()?;
         // The text index is built once at the end: maintaining it row by row
         // roughly doubles the load time for half a million rows.
         if self.has_fts() {
