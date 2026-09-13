@@ -2,10 +2,41 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## `find`, `show` and `deps` answer from a stale source without saying so
+
+Found 2026-09-13, dt 0.5.0, on a Lean project of my own. The other half of the
+entry below, which `dt status` alone does not cover.
+
+`dt status` now names a stale `local` source, and the revision moves in both
+directions — touching one `.olean` marks it `stale`, restoring the mtime clears
+it. The searches do not consult that:
+
+    $ touch .lake/build/lib/lean/Transformer/ALM/SoftmaxIndex.olean
+    $ dt status | grep project
+    project  local  true  true  784  4m ago  62fdf15 stale
+    $ dt find --name hullProbe --source project
+    Transformer.ALM.hullProbe  def  Transformer.ALM.HullIndex
+    ...
+
+Four results, nothing on stderr, exit 0. `show` is the same. So the check exists
+in the command nobody runs before a search, and is absent from the three that
+produce the wrong answer — which is the shape the original entry was about: a
+stale index answers confidently, and the confidence is what does the damage.
+
+One line on stderr is enough, and stderr specifically, so that piping a result
+list into anything is unaffected:
+
+    dt: project is stale (indexed at 62fdf15, now 9ab0d31); dt dump project && dt index
+
+It belongs on any command that reads rows from a source — `find`, `show`,
+`deps`, `dup`, `add` — and should name only the sources the answer actually came
+from, since a Mathlib search is not compromised by a stale project.
+
 ## `dt status` cannot tell that a `local` source has gone stale
 
 Found 2026-09-13, dt 0.4.0, on a Lean project of my own. Fixed 2026-09-13 in
-dt 0.5.0.
+dt 0.5.0, for `dt status`; the searches still do not consult it, which is the
+entry above.
 
 `dt status --help` says each source "reports the revision it was indexed from
 next to the one it is at now. A source that has moved since is named, because a
