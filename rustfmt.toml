@@ -1,0 +1,4 @@
+# The code is written at 100 columns: narrower turns short, readable calls into
+# four-line blocks for no gain.
+max_width = 100
+use_small_heuristics = "Max"

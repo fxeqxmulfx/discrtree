@@ -1,0 +1,26 @@
+[package]
+name = "discrtree"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Find Lean declarations by shape and lift them into a proof"
+repository = "https://github.com/misha/discrtree"
+keywords = ["lean", "lean4", "mathlib", "search", "proof"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "dt"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

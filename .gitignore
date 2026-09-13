@@ -1,0 +1,5 @@
+/target
+
+# The index and the raw dumps: derived from the corpora, large, and rebuilt by
+# `dt dump` && `dt index`.
+.discrtree/
