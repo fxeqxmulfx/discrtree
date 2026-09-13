@@ -290,6 +290,43 @@ fn re_indexing_replaces_the_provenance() {
 /// `CREATE TABLE IF NOT EXISTS` would open a database written by an older
 /// build, change nothing, and let every later query read a shape that is not
 /// there. Refusing is the only answer that cannot silently be wrong.
+/// Replacing a source deletes its side rows in the middle of a load, when the
+/// one droppable index is down. The delete therefore has to search by
+/// something no load can take away: the `WITHOUT ROWID` primary key, which is
+/// the table itself rather than an index beside it.
+///
+/// The first version of the bulk load dropped an index this delete needed, and
+/// re-indexing one source in place went from two minutes to over eighteen. The
+/// query plan is where that shows up before the wall clock does.
+#[test]
+fn replacing_a_source_searches_by_a_key_no_load_can_drop() {
+    let dir = TempDir::new("dt-plan");
+    let path = dir.path().join("index.db");
+    let mut db = SqliteIndex::open(&path).unwrap();
+    // Loading is what takes the index down, and `clear_source` runs after it.
+    index::load(&mut db, &[theorem("A", "mathlib", "M", "Eq", &["Real.exp"])]).unwrap();
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in ["uses", "dep"] {
+        let sql = format!(
+            "EXPLAIN QUERY PLAN DELETE FROM {table} \
+             WHERE decl_id IN (SELECT id FROM decl WHERE source = 'mathlib')"
+        );
+        let plan = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+            .join("; ");
+        assert!(
+            plan.contains(&format!("SEARCH {table} USING PRIMARY KEY")),
+            "the delete over `{table}` must not scan: {plan}"
+        );
+    }
+}
+
 #[test]
 fn an_index_from_another_schema_is_refused_rather_than_misread() {
     let dir = TempDir::new("dt-schema");

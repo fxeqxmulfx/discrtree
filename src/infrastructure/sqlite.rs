@@ -46,15 +46,25 @@ CREATE INDEX        IF NOT EXISTS decl_source ON decl(source);
 
 -- Constants of the type. A side table rather than a string column so that
 -- `--uses a,b` is two index lookups instead of two substring scans.
+--
+-- `WITHOUT ROWID` makes the primary key the table rather than an index beside
+-- it, so both side tables are stored in `decl_id` order. Everything that reads
+-- them does so by declaration, and so does the delete that replaces a source:
+-- all of it is a range scan over rows that are already together, with no
+-- secondary index on `decl_id` to build, maintain or store. A load writes them
+-- in increasing `decl_id` too, so the rows arrive at the right edge of the
+-- tree and in order.
 CREATE TABLE IF NOT EXISTS uses (
   decl_id INTEGER NOT NULL REFERENCES decl(id) ON DELETE CASCADE,
-  const   TEXT NOT NULL
-);
+  const   TEXT NOT NULL,
+  PRIMARY KEY (decl_id, const)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS dep (
   decl_id INTEGER NOT NULL REFERENCES decl(id) ON DELETE CASCADE,
-  name    TEXT NOT NULL
-);
+  name    TEXT NOT NULL,
+  PRIMARY KEY (decl_id, name)
+) WITHOUT ROWID;
 
 -- What each source was when it was indexed. Without this the index cannot
 -- answer the two questions that decide whether it can be trusted: has the
@@ -77,26 +87,27 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
-/// The indexes over the side tables. Nothing indexing does needs them and every
-/// query does, so a bulk load drops them and [`SqliteIndex::finish`] builds them
-/// again.
+/// The one index the side tables have, and the one thing a load does not need.
 ///
-/// They are the larger half of the file — 219 MB, 85 MB and 130 MB against a
-/// 1.36 GB index — and a rebuild inserts 16 million rows into them at random
-/// positions, a page fault apiece once the B-tree outgrows the page cache. The
-/// same index built in one pass over rows already on disk is sorted work.
+/// `uses` is stored in `decl_id` order, so this is the only way to ask the
+/// opposite question — which declarations mention a constant — and `--uses`
+/// asks exactly that. A load drops it and [`SqliteIndex::finish`] builds it
+/// again: six million rows written in `decl_id` order land in this tree at
+/// positions that order says nothing about, a page fault apiece once it
+/// outgrows the page cache, whereas the same index built in one pass over rows
+/// already on disk is sorted work.
+///
+/// Dropping it must not make anything else slow. That is why both side tables
+/// are clustered on `decl_id` rather than indexed on it: `clear_source` runs
+/// in the middle of a load, and an index it depended on would be gone.
 const SIDE_INDEXES: &str = r#"
 CREATE INDEX IF NOT EXISTS uses_const ON uses(const, decl_id);
-CREATE INDEX IF NOT EXISTS uses_decl  ON uses(decl_id);
-CREATE INDEX IF NOT EXISTS dep_decl   ON dep(decl_id);
 "#;
 
 const DROP_SIDE_INDEXES: &str = r#"
 DROP INDEX IF EXISTS uses_const;
-DROP INDEX IF EXISTS uses_decl;
-DROP INDEX IF EXISTS dep_decl;
 "#;
 
 /// Page cache for the duration of a bulk load, in KiB as a negative number,
@@ -156,7 +167,7 @@ impl SqliteIndex {
         // FTS5 is a compile-time option. Without it everything except free-text
         // search still works, so a missing module is not fatal.
         let _ = conn.execute_batch(FTS);
-        // A run that died mid-load left the side indexes dropped. Creating them
+        // A run that died mid-load left the side index dropped. Creating it
         // here is what makes that self-healing.
         conn.execute_batch(SIDE_INDEXES)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -180,8 +191,8 @@ impl SqliteIndex {
         Ok(row)
     }
 
-    /// Take the side indexes down for a load. Idempotent: the first `put`
-    /// calls it, every later one is a bool test.
+    /// Take [`SIDE_INDEXES`] down for a load and give SQLite room to work.
+    /// Idempotent: the first `put` calls it, every later one is a bool test.
     fn enter_bulk(&mut self) -> Result<()> {
         if self.bulk {
             return Ok(());
@@ -192,7 +203,7 @@ impl SqliteIndex {
         Ok(())
     }
 
-    /// Put them back. Nothing may query the side tables until this has run.
+    /// Put it back. `--uses` is a table scan until this has run.
     fn exit_bulk(&mut self) -> Result<()> {
         if !self.bulk {
             return Ok(());
@@ -208,6 +219,10 @@ impl SqliteIndex {
 
     /// Drop everything from one source, so a re-index replaces rather than
     /// duplicates.
+    ///
+    /// Called between loads, which means the side indexes may be down — so
+    /// these deletes are written to need only what a `WITHOUT ROWID` table
+    /// gives them for free, which is its own `decl_id` order.
     pub fn clear_source(&self, source: &SourceId) -> Result<usize> {
         let tx = &self.conn;
         tx.execute(
@@ -541,10 +556,16 @@ impl DeclSink for SqliteIndex {
                   line_start, line_end, elaborated)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?;
+            // `OR IGNORE` because the side tables are keyed on (decl_id, value)
+            // now. Both producers already deduplicate — the dumper because
+            // `getUsedConstants` visits a constant once, the scanner because it
+            // checks before it pushes — so this discards nothing. It is here so
+            // that a producer which stops deduplicating loses a duplicate row
+            // rather than the whole load.
             let mut insert_use =
-                tx.prepare_cached("INSERT INTO uses (decl_id, const) VALUES (?1, ?2)")?;
+                tx.prepare_cached("INSERT OR IGNORE INTO uses (decl_id, const) VALUES (?1, ?2)")?;
             let mut insert_dep =
-                tx.prepare_cached("INSERT INTO dep (decl_id, name) VALUES (?1, ?2)")?;
+                tx.prepare_cached("INSERT OR IGNORE INTO dep (decl_id, name) VALUES (?1, ?2)")?;
             for d in decls {
                 let args: Vec<&str> = d.shape.args.iter().map(ArgHead::as_str).collect();
                 insert.execute(params![
@@ -563,8 +584,7 @@ impl DeclSink for SqliteIndex {
                 ])?;
                 // A replaced row is deleted and re-inserted, so this id is
                 // always fresh and its side rows are always new. Clearing them
-                // per row deleted nothing and, with `uses_decl` dropped, would
-                // scan six million rows to do it. Replacing a source is
+                // per row deleted nothing. Replacing a source is
                 // `clear_source`'s job.
                 let id = tx.last_insert_rowid();
                 for c in &d.consts {
