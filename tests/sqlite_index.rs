@@ -5,7 +5,7 @@
 mod support;
 
 use discrtree::application::index;
-use discrtree::application::ports::{DeclRepo, DeclSink};
+use discrtree::application::ports::{DeclRepo, DeclSink, Provenance};
 use discrtree::domain::decl::{ArgHead, DeclKind, Shape, Span};
 use discrtree::domain::name::DeclName;
 use discrtree::domain::query::Query;
@@ -245,4 +245,71 @@ fn a_named_argument_is_found_past_the_over_fetch_cap() {
         hits.iter().map(|d| d.name.to_string()).collect::<Vec<_>>(),
         ["Real.exp_le_exp_of_le"]
     );
+}
+
+/// Provenance is what makes an incremental `dt index` possible and a stale
+/// index visible. It has to survive being closed and reopened, because that is
+/// the only case that matters: within one run the answer is already in hand.
+#[test]
+fn provenance_survives_a_reopen() {
+    let dir = TempDir::new("dt-provenance");
+    let path = dir.path().join("index.db");
+    let id = SourceId::new("mathlib");
+    let was = Provenance {
+        revision: Some("0df444a360ea".into()),
+        stamp: Some("12345:1700000000".into()),
+        indexed_at: 1_700_000_000,
+        decls: 225_508,
+    };
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        db.record(&id, &was).unwrap();
+    }
+    let db = SqliteIndex::open(&path).unwrap();
+    assert_eq!(db.provenance(&id).unwrap(), Some(was));
+    assert_eq!(db.provenance(&SourceId::new("flt")).unwrap(), None);
+}
+
+/// A second recording replaces the first. A source has one provenance, not a
+/// history: what matters is what is in the index now.
+#[test]
+fn re_indexing_replaces_the_provenance() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let id = SourceId::new("flt");
+    let stamp = |rev: &str| Provenance {
+        revision: Some(rev.into()),
+        stamp: Some(rev.into()),
+        indexed_at: 1,
+        decls: 1,
+    };
+    db.record(&id, &stamp("aaaaaaa")).unwrap();
+    db.record(&id, &stamp("bbbbbbb")).unwrap();
+    assert_eq!(db.provenance(&id).unwrap().unwrap().revision.as_deref(), Some("bbbbbbb"));
+}
+
+/// `CREATE TABLE IF NOT EXISTS` would open a database written by an older
+/// build, change nothing, and let every later query read a shape that is not
+/// there. Refusing is the only answer that cannot silently be wrong.
+#[test]
+fn an_index_from_another_schema_is_refused_rather_than_misread() {
+    let dir = TempDir::new("dt-schema");
+    let path = dir.path().join("index.db");
+    SqliteIndex::open(&path).unwrap();
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 99i64).unwrap();
+    let err = match SqliteIndex::open(&path) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an index from schema 99 must not open"),
+    };
+    assert!(err.contains("different version of dt"), "got: {err}");
+    assert!(err.contains("--rebuild"), "the error has to say what to do: {err}");
+}
+
+/// A file with nothing in it is new, not foreign. Refusing to create an index
+/// would make the tool unusable on first run.
+#[test]
+fn an_empty_file_is_a_new_index() {
+    let dir = TempDir::new("dt-fresh");
+    let path = dir.path().join("index.db");
+    std::fs::write(&path, b"").unwrap();
+    assert!(SqliteIndex::open(&path).is_ok());
 }

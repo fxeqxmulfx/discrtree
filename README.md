@@ -140,6 +140,55 @@ dt: source `flt` is text, and a shape can only be matched against elaborated
     rows; search it by --name, --text, --in or --uses instead
 ```
 
+## Staying current
+
+An index is a snapshot, and the dangerous failure is not a stale answer but a
+confident one: an `import` line for a module that was renamed two Mathlib bumps
+ago looks exactly like a correct answer. So every source records what it was
+built from, and `dt status` reports both that and where the source is now.
+
+```
+source         kind    elaborated   importable   declarations  indexed  revision
+project        local   true         true                  470  2h ago   -
+mathlib        lake    true         true               225508  2h ago   0000000 stale
+flt            git     false        false               58674  2h ago   aa2d8b3
+
+behind the checkout: mathlib — re-run `dt fetch`, `dt dump` and `dt index`
+```
+
+A compiled source's revision comes from `lake-manifest.json`, which is what the
+next `lake build` will honour, and a text source's from the checkout's `HEAD`.
+A source with no revision to read is reported as `-` and never as stale: a
+warning that is always on is a warning nobody reads.
+
+`dt index` leaves alone any source whose input has not changed since it was
+indexed. The input is the dump for a compiled source and the checkout for a
+text one, fingerprinted by size and mtime in the first case and by revision in
+the second — so a Mathlib bump that has not been dumped again changes nothing,
+which is correct, because the index is built from the dump.
+
+| | |
+| --- | ---: |
+| `dt index` with nothing changed | 0.03 s |
+| `dt index` after one source moved | 125 s |
+| `dt index --rebuild` | 93 s |
+
+Re-indexing one large source in place costs *more* than starting over, because
+the rows have to be deleted before they are written and the text index is
+rebuilt either way. That is worth knowing rather than hiding: when Mathlib
+moves, `--rebuild`; the incremental path is for the common case, which is that
+nothing moved at all and the whole command is free.
+
+`--force` re-indexes everything without deleting the file. `--rebuild` deletes
+it, which is also what a schema change requires — the index carries a version,
+and a database written by a different build is refused rather than read wrong:
+
+```
+$ dt status
+dt: this index was written by a different version of dt (schema 0, this build
+    expects 1); run `dt index --rebuild`
+```
+
 ## Setup
 
 ```

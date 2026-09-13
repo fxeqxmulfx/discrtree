@@ -6,6 +6,7 @@ pub mod git;
 pub mod jsonl;
 pub mod lake;
 pub mod project;
+pub mod revision;
 pub mod sqlite;
 
 pub use config::Config;

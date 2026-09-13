@@ -2,12 +2,12 @@
 //! the conclusion head and a side table for constants, so conditions combine
 //! with `AND` and a query is milliseconds rather than a scan.
 
-use crate::application::ports::{DeclRepo, DeclSink};
+use crate::application::ports::{DeclRepo, DeclSink, Provenance};
 use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
-use crate::error::Result;
+use crate::error::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
 use std::path::Path;
 
@@ -58,12 +58,52 @@ CREATE TABLE IF NOT EXISTS dep (
   name    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS dep_decl ON dep(decl_id);
+
+-- What each source was when it was indexed. Without this the index cannot
+-- answer the two questions that decide whether it can be trusted: has the
+-- input changed since, and is the input itself behind upstream.
+CREATE TABLE IF NOT EXISTS source (
+  id         TEXT PRIMARY KEY,
+  revision   TEXT,
+  stamp      TEXT,
+  indexed_at INTEGER NOT NULL,
+  decls      INTEGER NOT NULL
+);
 "#;
+
+/// The shape of the database this code expects.
+///
+/// `CREATE TABLE IF NOT EXISTS` is not a migration: against a database written
+/// by an older build it succeeds, changes nothing, and leaves every later query
+/// reading columns that are not there — or worse, reading columns that are
+/// there and mean something else. Refusing to open is the only honest answer,
+/// and rebuilding costs minutes, which is what it would have cost to notice.
+///
+/// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
+const SCHEMA_VERSION: i64 = 1;
 
 const FTS: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS decl_fts
   USING fts5(name, type, doc, content='decl', content_rowid='id', tokenize='unicode61');
 "#;
+
+/// Refuse a database written by a different build rather than silently reading
+/// it wrong. A file with no version and no tables is simply new.
+fn check_version(conn: &Connection) -> Result<()> {
+    let found: i64 =
+        conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or_default();
+    let populated: bool = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'decl'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false);
+    if !populated || found == SCHEMA_VERSION {
+        return Ok(());
+    }
+    bail!(
+        "this index was written by a different version of dt (schema {found}, this build \
+         expects {SCHEMA_VERSION}); run `dt index --rebuild`"
+    )
+}
 
 pub struct SqliteIndex {
     conn: Connection,
@@ -84,11 +124,30 @@ impl SqliteIndex {
     }
 
     fn init(conn: Connection) -> Result<SqliteIndex> {
+        check_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
         // FTS5 is a compile-time option. Without it everything except free-text
         // search still works, so a missing module is not fatal.
         let _ = conn.execute_batch(FTS);
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(SqliteIndex { conn })
+    }
+
+    /// What the source was when it was last indexed.
+    pub fn provenance_of(&self, source: &SourceId) -> Result<Option<Provenance>> {
+        let row = self
+            .conn
+            .prepare_cached("SELECT revision, stamp, indexed_at, decls FROM source WHERE id = ?1")?
+            .query_row(params![source.as_str()], |r| {
+                Ok(Provenance {
+                    revision: r.get(0)?,
+                    stamp: r.get(1)?,
+                    indexed_at: r.get::<_, i64>(2)? as u64,
+                    decls: r.get::<_, i64>(3)? as usize,
+                })
+            })
+            .optional()?;
+        Ok(row)
     }
 
     fn has_fts(&self) -> bool {
@@ -269,6 +328,10 @@ impl DeclRepo for SqliteIndex {
         Ok(out)
     }
 
+    fn provenance(&self, source: &SourceId) -> Result<Option<Provenance>> {
+        self.provenance_of(source)
+    }
+
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {
         let mut stmt = self
             .conn
@@ -373,6 +436,22 @@ fn fts_query(text: &str) -> String {
 }
 
 impl DeclSink for SqliteIndex {
+    fn record(&mut self, source: &SourceId, was: &Provenance) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO source (id, revision, stamp, indexed_at, decls) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                source.as_str(),
+                was.revision.as_deref(),
+                was.stamp.as_deref(),
+                was.indexed_at as i64,
+                was.decls as i64
+            ])?;
+        Ok(())
+    }
+
     fn put(&mut self, decls: &[Decl]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {

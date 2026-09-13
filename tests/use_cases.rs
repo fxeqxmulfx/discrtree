@@ -16,7 +16,7 @@ use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
 use std::path::PathBuf;
-use support::{FakeFiles, FakeRepo, FakeWriter, sources, theorem};
+use support::{FakeFiles, FakeRepo, FakeRevisions, FakeWriter, sources, theorem};
 
 fn workspace() -> Workspace {
     Workspace {
@@ -278,11 +278,29 @@ fn dup_reports_a_local_declaration_upstream_already_has() {
 #[test]
 fn status_shows_a_configured_source_that_has_nothing_indexed() {
     let (repo, ws) = (repo(), workspace());
-    let rows = Status { repo: &repo, workspace: &ws }.run().unwrap();
+    let revs = FakeRevisions::default();
+    let rows = Status { repo: &repo, revisions: &revs, workspace: &ws, now: 0 }.run().unwrap();
     assert_eq!(rows.len(), 3);
     let mathlib = rows.iter().find(|r| r.name == "mathlib").unwrap();
     assert!(mathlib.elaborated && mathlib.importable);
     assert_eq!(mathlib.decls, 2);
     let flt = rows.iter().find(|r| r.name == "flt").unwrap();
     assert!(!flt.elaborated && !flt.importable);
+}
+
+/// A source is stale when the index remembers one revision and the checkout is
+/// at another. A revision nobody can read is not a mismatch: a source with no
+/// VCS would otherwise be reported as behind on every run, and a warning that
+/// is always on is a warning nobody reads.
+#[test]
+fn status_reports_a_source_the_checkout_has_moved_past() {
+    let (repo, ws) = (repo(), workspace());
+    let revs = FakeRevisions::at(&[("mathlib", "bbbbbbb"), ("flt", "ccccccc")]);
+    let rows = Status { repo: &repo, revisions: &revs, workspace: &ws, now: 0 }.run().unwrap();
+    // The fake repo remembers nothing, so nothing can be behind anything.
+    assert!(!rows.iter().any(|r| r.stale()), "nothing recorded cannot be stale");
+    assert_eq!(
+        rows.iter().find(|r| r.name == "mathlib").unwrap().current_rev.as_deref(),
+        Some("bbbbbbb")
+    );
 }

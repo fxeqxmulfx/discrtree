@@ -8,7 +8,7 @@ use crate::application::add::Add;
 use crate::application::deps::Deps;
 use crate::application::find::{Dup, Find};
 use crate::application::index;
-use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Workspace};
+use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
 use crate::application::ship::Fetch;
 use crate::application::show::Show;
 use crate::application::status::Status;
@@ -22,6 +22,7 @@ use crate::infrastructure::git::Git;
 use crate::infrastructure::jsonl::{self, JsonlRepo};
 use crate::infrastructure::lake::{self, LakeElaborator};
 use crate::infrastructure::project::{Files, Project};
+use crate::infrastructure::revision::{self, OnDisk};
 use crate::infrastructure::sqlite::SqliteIndex;
 use crate::interface::cli::{Cli, Command, FindArgs};
 use crate::interface::render;
@@ -54,7 +55,7 @@ impl App {
             Command::Dump { source, no_deps } => self.dump(source.as_deref(), !no_deps),
             Command::Scan { source } => self.scan(source.as_deref()),
             Command::Fetch { source } => self.fetch(source.as_deref()),
-            Command::Index { rebuild } => self.index(rebuild),
+            Command::Index { rebuild, force } => self.index(rebuild, force),
             Command::Status => self.status(),
             Command::Show { names, import_only } => self.show(&names, import_only),
             Command::Deps { name, depth } => self.deps(&name, &depth),
@@ -172,7 +173,14 @@ impl App {
     }
 
     fn status(&self) -> Result<()> {
-        let rows = Status { repo: self.repo()?.as_ref(), workspace: &self.workspace }.run()?;
+        let revs = OnDisk::read(&self.cfg);
+        let rows = Status {
+            repo: self.repo()?.as_ref(),
+            revisions: &revs,
+            workspace: &self.workspace,
+            now: now(),
+        }
+        .run()?;
         print!("{}", render::status(&rows, &self.cfg.db_path()));
         Ok(())
     }
@@ -259,10 +267,21 @@ impl App {
         // needs the already-indexed corpus to tell a real constant from a
         // bound variable.
         let mut db = SqliteIndex::open(&self.cfg.db_path())?;
+        let revs = OnDisk::read(&self.cfg);
         for s in self.select(source, |s| !s.elaborated())? {
             let scan = index::scan_source(&s.meta(), &self.files, Some(&db))?;
-            db.clear_source(&SourceId::new(s.name.clone()))?;
+            let id = SourceId::new(s.name.clone());
+            db.clear_source(&id)?;
             index::load(&mut db, &scan.decls)?;
+            // `dt scan` was asked for, so it is not skipped — but it still has
+            // to leave the provenance behind, or the next `dt index` would
+            // redo the work it just did.
+            let revision = revs.current(&id)?;
+            let decls = db.count_source(&id)?;
+            db.record(
+                &id,
+                &Provenance { stamp: revision.clone(), revision, indexed_at: now(), decls },
+            )?;
             println!(
                 "{}: {} declarations scanned [text]{}",
                 s.name,
@@ -299,7 +318,7 @@ impl App {
         Ok(())
     }
 
-    fn index(&self, rebuild: bool) -> Result<()> {
+    fn index(&self, rebuild: bool, force: bool) -> Result<()> {
         let db = self.cfg.db_path();
         if rebuild && db.exists() {
             std::fs::remove_file(&db)?;
@@ -308,6 +327,8 @@ impl App {
             std::fs::create_dir_all(parent)?;
         }
         let mut sqlite = SqliteIndex::open(&db)?;
+        let revs = OnDisk::read(&self.cfg);
+        let mut changed = false;
 
         // Compiled sources first: the text scanner resolves its identifiers
         // against what is already indexed, so an empty index would leave every
@@ -318,11 +339,27 @@ impl App {
                 eprintln!("{}: not dumped yet, skipping (`dt dump {}`)", s.name, s.name);
                 continue;
             }
-            let decls = jsonl::read_parallel(&path)?;
             let id = SourceId::new(s.name.clone());
+            // The input to indexing a compiled source is the dump, not the
+            // library: a Mathlib bump that has not been dumped again changes
+            // nothing here, and re-reading 700 MB to discover that is the work
+            // this avoids.
+            let was = Provenance {
+                revision: revs.current(&id)?,
+                stamp: revision::file_stamp(&path),
+                indexed_at: now(),
+                decls: 0,
+            };
+            if self.up_to_date(&sqlite, &id, &was, force)? {
+                continue;
+            }
+            let decls = jsonl::read_parallel(&path)?;
             sqlite.clear_source(&id)?;
             index::load(&mut sqlite, &decls)?;
-            report(&s.name, decls.len(), sqlite.count_source(&id)?, "");
+            let stored = sqlite.count_source(&id)?;
+            sqlite.record(&id, &Provenance { decls: stored, ..was })?;
+            changed = true;
+            report(&s.name, decls.len(), stored, "");
         }
         for s in self.cfg.sources.iter().filter(|s| !s.elaborated()) {
             let dir = self.cfg.source_dir(s);
@@ -330,16 +367,53 @@ impl App {
                 eprintln!("{}: not on disk yet, skipping (`dt fetch {}`)", s.name, s.name);
                 continue;
             }
-            let scan = index::scan_source(&s.meta(), &self.files, Some(&sqlite))?;
             let id = SourceId::new(s.name.clone());
+            // A text source is read from the checkout, so its revision is also
+            // its fingerprint. A directory that is not a checkout has neither,
+            // and is read again every time.
+            let revision = revs.current(&id)?;
+            let was = Provenance { stamp: revision.clone(), revision, indexed_at: now(), decls: 0 };
+            if self.up_to_date(&sqlite, &id, &was, force)? {
+                continue;
+            }
+            let scan = index::scan_source(&s.meta(), &self.files, Some(&sqlite))?;
             sqlite.clear_source(&id)?;
             index::load(&mut sqlite, &scan.decls)?;
+            let stored = sqlite.count_source(&id)?;
+            sqlite.record(&id, &Provenance { decls: stored, ..was })?;
+            changed = true;
             let tag = format!(" [text]{}", anonymous_note(scan.anonymous));
-            report(&s.name, scan.decls.len(), sqlite.count_source(&id)?, &tag);
+            report(&s.name, scan.decls.len(), stored, &tag);
         }
-        sqlite.finish()?;
+        // Rebuilding the text index is minutes over 284 652 rows. Nothing
+        // moved means nothing to rebuild.
+        if changed {
+            sqlite.finish()?;
+        }
         println!("\nindex: {} ({} rows)", db.display(), sqlite.count()?);
         Ok(())
+    }
+
+    /// Whether this source can be left alone. Only when its input carries a
+    /// fingerprint, that fingerprint is the one already recorded, and the rows
+    /// are actually there — a recorded provenance over an empty table would
+    /// make `dt index` skip its way to an empty index.
+    fn up_to_date(
+        &self,
+        db: &SqliteIndex,
+        id: &SourceId,
+        now: &Provenance,
+        force: bool,
+    ) -> Result<bool> {
+        if force || now.stamp.is_none() {
+            return Ok(false);
+        }
+        let Some(was) = db.provenance_of(id)? else { return Ok(false) };
+        if was.stamp != now.stamp || db.count_source(id)? == 0 {
+            return Ok(false);
+        }
+        println!("{id}: unchanged, {} declarations kept", was.decls);
+        Ok(true)
     }
 
     /// The sources a command applies to: the one named, or every source the
@@ -426,6 +500,12 @@ fn query_of(a: &FindArgs) -> Result<Query> {
     q.no_sorry = a.no_sorry;
     q.limit = a.limit;
     Ok(q)
+}
+
+/// Seconds since the Unix epoch. A clock that is before the epoch is a clock
+/// problem, not an index problem; it reads as "just now" rather than failing.
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// What was left out for having no name, said once rather than per file.

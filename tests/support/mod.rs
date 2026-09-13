@@ -184,3 +184,20 @@ impl ProjectWriter for FakeWriter {
         Ok(modules.to_vec())
     }
 }
+
+/// Revisions a test decides on, so staleness can be exercised without a
+/// checkout: a source is at whatever the map says, and at nothing otherwise.
+#[derive(Default)]
+pub struct FakeRevisions(pub std::collections::BTreeMap<String, String>);
+
+impl FakeRevisions {
+    pub fn at(pairs: &[(&str, &str)]) -> FakeRevisions {
+        FakeRevisions(pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect())
+    }
+}
+
+impl discrtree::application::ports::Revisions for FakeRevisions {
+    fn current(&self, source: &SourceId) -> discrtree::error::Result<Option<String>> {
+        Ok(self.0.get(source.as_str()).cloned())
+    }
+}

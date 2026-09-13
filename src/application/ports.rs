@@ -22,6 +22,11 @@ pub trait DeclRepo {
     fn contains(&self, name: &DeclName) -> Result<bool> {
         Ok(self.get(name)?.is_some())
     }
+
+    /// What the source was when it was indexed, if the store remembers.
+    fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
+        Ok(None)
+    }
 }
 
 /// Writing the index.
@@ -29,6 +34,44 @@ pub trait DeclSink {
     fn put(&mut self, decls: &[Decl]) -> Result<()>;
     /// Called once when every row is in: the moment to build the text index.
     fn finish(&mut self) -> Result<()>;
+
+    /// Record what the source was when it was indexed. A sink that cannot
+    /// remember — the JSONL writer — simply does not, and the caller then has
+    /// to do the work every time, which is correct if wasteful.
+    fn record(&mut self, _source: &SourceId, _was: &Provenance) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// What a source was at the moment it went into the index.
+///
+/// Two different questions are answered from this, and conflating them is how
+/// an index goes quietly stale. `stamp` fingerprints the *input* — the JSONL a
+/// compiled source was dumped to, the checkout a text source was read from —
+/// and deciding whether `dt index` has anything to do is exactly comparing it.
+/// `revision` names the *upstream* the input itself came from, which is what
+/// tells you the dump is older than the Mathlib you are now building against.
+/// An index can be perfectly current with respect to its input and months
+/// behind the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    pub revision: Option<String>,
+    /// `None` when the input cannot be fingerprinted cheaply — a text source
+    /// that is a plain directory rather than a checkout. The work is then done
+    /// every time, which is wasteful and correct; guessing would be neither.
+    pub stamp: Option<String>,
+    /// Seconds since the Unix epoch. Stored as an instant and reported as an
+    /// age, because "three days old" answers the question and a timestamp
+    /// makes the reader do the subtraction.
+    pub indexed_at: u64,
+    pub decls: usize,
+}
+
+/// The revision a source is at on disk right now, as opposed to the one the
+/// index remembers. Git answers by `rev-parse`; a lake dependency answers from
+/// the manifest the build resolved.
+pub trait Revisions {
+    fn current(&self, source: &SourceId) -> Result<Option<String>>;
 }
 
 /// Reading the corpora on disk.

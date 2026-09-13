@@ -59,10 +59,17 @@ pub enum Command {
     },
 
     /// Build the search index from whatever has been dumped and scanned.
+    ///
+    /// A source whose input has not changed since it was indexed is left
+    /// alone. Re-reading a 700 MB dump to discover that it is the same dump is
+    /// the slowest way to do nothing.
     Index {
-        /// Rebuild from scratch instead of replacing source by source.
+        /// Delete the index and start over. Needed when the schema changes.
         #[arg(long)]
         rebuild: bool,
+        /// Re-index every source, including the ones that have not changed.
+        #[arg(long)]
+        force: bool,
     },
 
     /// What is indexed, and whether it is elaborated.

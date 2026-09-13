@@ -282,17 +282,19 @@ pub fn add(r: &AddReport, written: bool) -> String {
 pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
     let mut out = format!("index: {}\n\n", db.display());
     out.push_str(&format!(
-        "{:<14} {:<7} {:<12} {:<12} {:>10}\n",
-        "source", "kind", "elaborated", "importable", "declarations"
+        "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<10}\n",
+        "source", "kind", "elaborated", "importable", "declarations", "indexed", "revision"
     ));
     for r in rows {
         out.push_str(&format!(
-            "{:<14} {:<7} {:<12} {:<12} {:>10}\n",
+            "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<10}\n",
             r.name,
             r.kind.as_str(),
             r.elaborated,
             r.importable,
-            r.decls
+            r.decls,
+            r.age.map_or_else(|| "never".into(), age),
+            revision(r),
         ));
     }
     let total: usize = rows.iter().map(|r| r.decls).sum();
@@ -300,7 +302,39 @@ pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
     if rows.iter().any(|r| r.decls == 0) {
         out.push_str("\nA source with no declarations has not been dumped or scanned yet.\n");
     }
+    // The one line worth spending on: an index that has fallen behind answers
+    // with confidence and is wrong, which is the failure this tool exists to
+    // prevent, not to commit.
+    let stale: Vec<&str> = rows.iter().filter(|r| r.stale()).map(|r| r.name.as_str()).collect();
+    if !stale.is_empty() {
+        out.push_str(&format!(
+            "\nbehind the checkout: {} — re-run `dt fetch`, `dt dump` and `dt index`\n",
+            stale.join(", ")
+        ));
+    }
     out
+}
+
+/// The revision the index was built from, marked when the source has moved
+/// since. Seven characters is what a person pastes into `git show`.
+fn revision(r: &SourceStatus) -> String {
+    let short = |s: &String| s.chars().take(7).collect::<String>();
+    match (&r.indexed_rev, r.stale()) {
+        (Some(v), true) => format!("{} stale", short(v)),
+        (Some(v), false) => short(v),
+        (None, _) => "-".into(),
+    }
+}
+
+/// An age, not a timestamp: the reader wants to know whether to re-index, and
+/// a date makes them do the subtraction first.
+fn age(secs: u64) -> String {
+    match secs {
+        s if s < 90 => "just now".into(),
+        s if s < 5400 => format!("{}m ago", s / 60),
+        s if s < 172_800 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
 }
 
 pub fn dup(dups: &[Duplicate]) -> String {
