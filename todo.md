@@ -4,8 +4,9 @@ Shortcomings found while using `dt` on real work. Newest first.
 
 ## `find`, `show` and `deps` answer from a stale source without saying so
 
-Found 2026-09-13, dt 0.5.0, on a Lean project of my own. The other half of the
-entry below, which `dt status` alone does not cover.
+Found 2026-09-13, dt 0.5.0, on a Lean project of my own. Fixed 2026-09-13 in
+dt 0.5.0. The other half of the entry below, which `dt status` alone does not
+cover, and which the entry below records the repair for.
 
 `dt status` now names a stale `local` source, and the revision moves in both
 directions — touching one `.olean` marks it `stale`, restoring the mtime clears
