@@ -2,6 +2,41 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## `dt status` cannot tell that a `local` source has gone stale
+
+Found 2026-09-13, dt 0.4.0, on a Lean project of my own.
+
+`dt status --help` says each source "reports the revision it was indexed from
+next to the one it is at now. A source that has moved since is named, because a
+stale index answers confidently and wrongly." That holds for `git` and `lake`
+sources, which have a revision. A `local` source has none, so its revision
+column is `-` and nothing is ever compared:
+
+    source   kind   elaborated  importable  declarations  indexed  revision
+    project  local  true        true                 718  2m ago   -
+
+The project had 784 declarations at that moment. Six modules committed since the
+last `dt dump` were missing, and `dt find --name hullProbe` answered `no match`
+— the exact failure the help text names, and the one source where it is
+guaranteed to happen, because the local source is the one that changes every
+commit. The remote corpora, which change monthly, are the ones being watched.
+
+`no match` is worse here than a wrong hit: it reads as "Mathlib has no such
+lemma, write it yourself", and the name searched for was in the project all
+along.
+
+A revision for a `local` source need not involve Lean. The dump already walks
+the `.olean` tree; the newest mtime in it, or a hash of (module path, mtime,
+size) over that walk, is a revision in the same sense as a git SHA — cheap to
+recompute at status time, and it moves exactly when a rebuild has happened:
+
+    project  local  true  true  784  1h ago  4f21c8e (now 9ab0d31, stale)
+
+The same comparison belongs in `find`, `show` and `deps` as a one-line warning
+on stderr when the source a result came from is stale, since those are the
+commands whose answer the staleness corrupts, and nobody runs `dt status`
+before every search.
+
 ## `dt show` prints the sibling's attribute block for `to_additive` declarations
 
 Found 2026-09-13, dt 0.2.0, on Mathlib. Fixed 2026-09-13 in dt 0.3.0.
