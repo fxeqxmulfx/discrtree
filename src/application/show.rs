@@ -34,7 +34,7 @@ pub enum Source {
     /// `theorem prod_image`, and a structure field gets the field line. Printing
     /// those lines as the declaration is worse than printing nothing, because
     /// they read like an answer and stop exactly where the useful part starts.
-    /// 36 266 of Mathlib's 225 508 rows are in this position.
+    /// 57 443 of Mathlib's 325 936 rows have a range inside another's.
     Generated {
         /// The declaration whose range contains this one, when there is one.
         /// That is the declaration that generated it, and the one whose source

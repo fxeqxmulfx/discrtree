@@ -120,7 +120,7 @@ Two things it deliberately does *not* do. It does not elide the shared
 reconstructed wrongly. And there is no `--json`: braces, quotes and repeated
 field names cost more than the terse text they would replace.
 
-The measured effect on the real index — 225 508 declarations:
+The measured effect, on an index of 225 508 declarations:
 
 | | before | after |
 | --- | ---: | ---: |
@@ -175,8 +175,9 @@ dt: source `flt` is text, and a shape can only be matched against elaborated
 
 ## A declaration Lean wrote has no source of its own
 
-36 266 of Mathlib's 225 508 rows have a source range sitting inside another
-declaration's — one in six. They were generated rather than typed: `to_additive`
+57 443 of Mathlib's 325 936 rows have a source range sitting inside another
+declaration's, and in a random sample of 250 rows, 29 declared nothing at their
+own lines. They were generated rather than typed: `to_additive`
 turns `Finset.prod_image` into `Finset.sum_image`, `@[simps]` turns a definition
 into its simp lemmas, `alias` renames, a structure yields its fields and its
 constructor. Lean gives each of them a range all the same, and that range points

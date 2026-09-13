@@ -4,7 +4,8 @@
 //! typed. `to_additive` gives `Finset.sum_image` the range of the attribute
 //! block sitting inside `theorem Finset.prod_image`; a structure's fields and
 //! constructor get lines of the `structure`; `alias` and `@[simps]` do the
-//! same. 36 266 of Mathlib's 225 508 rows are in this position — one in six.
+//! same. 57 443 of Mathlib's 325 936 rows have a range sitting inside another
+//! declaration's, and a sample of 250 put one row in nine in this position.
 //!
 //! Printing or copying those lines and calling them the declaration is worse
 //! than printing nothing: they read like an answer and stop exactly where the
