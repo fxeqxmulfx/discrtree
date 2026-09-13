@@ -4,9 +4,8 @@ description: Search indexed Lean 4 corpora by the shape of a statement, by name,
 ---
 
 `dt` answers two questions without a Lean session: where is the declaration
-with this shape, and what does it take to use it here. Unlike `#find`, it also
-searches what is not imported yet — which is the point, since the answer it
-gives is the import line.
+with this shape, and what does it take to use it here. Unlike `#find` it also
+searches what is not imported yet, and the answer is the import line.
 
     dt find 'Real.exp _ ≤ _'        shape: top-level notation, head of each side
     dt find --name exp_le --in Mathlib.Analysis --kind theorem
@@ -14,7 +13,7 @@ gives is the import line.
     dt show <name>...               the declaration, and the import that provides it
     dt deps <name>                  what the proof rests on, level by level
     dt add <name>                   copy it in; dry run unless --write
-    dt status                       what is indexed, and whether it has gone stale
+    dt status                       what is indexed, and whether it is stale
 
 Rules that are not guessable:
 
@@ -23,12 +22,14 @@ Rules that are not guessable:
 - A row marked `[text]` was read by a scanner, not by Lean: no shape, and its
   dependencies are guessed from the file's imports.
 - `--in` wants a whole module prefix from the root — `Mathlib.Analysis`, not
-  `Analysis`. `--name` is a substring, `--text` is whole words.
+  `Analysis`. `--name` is a substring, `--text` whole words.
 - Conditions are AND. `no match` names the condition to blame. An unknown
   `--source`, or a shape asked of a text source, is an error and not an
   empty result.
-- Default limit is 10 and the footer says when more matched. `--long` adds the
+- A `dt:` line on stderr means a source moved since it was indexed: rows may be
+  missing — `no match` most often. Re-run the `dt dump` and `dt index` it names.
+- Default limit is 10; the footer says when more matched. `--long` adds the
   full type and the docstring.
 
-`dt <command> --help` has the rest. Setup, once, in order: `dt init` then edit
+`dt <command> --help` has the rest. Setup, once: `dt init`, edit
 discrtree.toml, `dt fetch`, `dt dump` (minutes), `dt index`.

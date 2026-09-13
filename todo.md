@@ -76,7 +76,12 @@ to have moved for the index to be behind. It has to be the build and not the
 `.lean` files, or an edit nobody has compiled yet would report a staleness that
 re-dumping would not fix.
 
-    project  local  true  true  784  1h ago  9ab0d31 stale
+`dt status` prints the proposed line as written, both revisions rather than the
+word `stale` on its own. That was the other half of the same defect: the help
+promised "the revision it was indexed from next to the one it is at now" and the
+table had only ever shown the first of the two.
+
+    project  local  true  true  784  1h ago  4f21c8e (now 9ab0d31, stale)
 
 `find`, `show` and `deps` compare the same revisions and warn on stderr:
 

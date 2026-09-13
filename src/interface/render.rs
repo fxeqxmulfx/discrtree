@@ -299,13 +299,15 @@ pub fn add(r: &AddReport, written: bool) -> String {
 
 pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
     let mut out = format!("index: {}\n\n", db.display());
+    // No width on the last column. It is the one that varies, and padding it
+    // buys nothing but trailing spaces on every row of every run.
     out.push_str(&format!(
-        "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<10}\n",
+        "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {}\n",
         "source", "kind", "elaborated", "importable", "declarations", "indexed", "revision"
     ));
     for r in rows {
         out.push_str(&format!(
-            "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<10}\n",
+            "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {}\n",
             r.name,
             r.kind.as_str(),
             r.elaborated,
@@ -346,13 +348,19 @@ pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
     out
 }
 
-/// The revision the index was built from, marked when the source has moved
-/// since. Seven characters is what a person pastes into `git show`.
+/// The revision the index was built from, and — when the source has moved
+/// since — the one it is at now. Both, because "stale" alone says a re-dump is
+/// due and nothing else, while the pair says how far behind and against what:
+/// the second value is what `git log A..B` wants, and for the project it is the
+/// build fingerprint that tells two rebuilds apart. Seven characters each,
+/// which is what a person pastes into `git show`.
 fn revision(r: &SourceStatus) -> String {
     let short = |s: &String| s.chars().take(7).collect::<String>();
-    match (&r.indexed_rev, r.stale()) {
-        (Some(v), true) => format!("{} stale", short(v)),
-        (Some(v), false) => short(v),
+    match (&r.indexed_rev, &r.current_rev) {
+        (Some(was), Some(now)) if was != now => {
+            format!("{} (now {}, stale)", short(was), short(now))
+        }
+        (Some(was), _) => short(was),
         (None, _) => "-".into(),
     }
 }
@@ -480,6 +488,10 @@ mod tests {
         let rows =
             [behind("project", SourceKind::Local, true), behind("flt", SourceKind::Git, false)];
         let r = status(&rows, std::path::Path::new("/p/index.db"));
+        // Both revisions, which is what the help promises and what a reader
+        // needs to see how far behind the index is.
+        assert!(r.contains("4f21c8e (now 9ab0d31, stale)"), "{r}");
+        assert!(!r.contains("  \n") && !r.ends_with(" \n"), "no row ends in padding: {r:?}");
         assert!(r.contains("behind the build: project — re-run `dt dump` and `dt index`"), "{r}");
         assert!(r.contains("behind the checkout: flt — re-run `dt fetch` and `dt index`"), "{r}");
         // A source that is where it was is not named at all.

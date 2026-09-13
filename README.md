@@ -215,7 +215,7 @@ built from, and `dt status` reports both that and where the source is now.
 
 ```
 source         kind    elaborated   importable   declarations  indexed  revision
-project        local   true         true                  784  2h ago   9ab0d31 stale
+project        local   true         true                  784  2h ago   4f21c8e (now 9ab0d31, stale)
 mathlib        lake    true         true               325936  2h ago   0df444a
 flt            git     false        false               58674  2h ago   aa2d8b3
 
@@ -224,8 +224,11 @@ behind the build: project — re-run `dt dump` and `dt index`
 
 A lake dependency's revision comes from `lake-manifest.json`, which is what the
 next `lake build` will honour, and a text source's from the checkout's `HEAD`.
-A source with no revision to read is reported as `-` and never as stale: a
-warning that is always on is a warning nobody reads.
+A source that has moved shows both revisions rather than the word `stale` alone:
+one of them says a re-dump is due, the pair says how far behind and against
+what, which is what `git log A..B` wants. A source with no revision to read is
+reported as `-` and never as stale: a warning that is always on is a warning
+nobody reads.
 
 The project itself has neither. Nobody pins it, and its working tree is ahead of
 its last commit by definition — that is what working on it means. So its
