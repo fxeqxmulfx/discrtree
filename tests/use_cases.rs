@@ -304,3 +304,54 @@ fn status_reports_a_source_the_checkout_has_moved_past() {
         Some("bbbbbbb")
     );
 }
+
+/// The help is the only documentation a program driving this tool will read,
+/// so the load-bearing parts of it are pinned here. `debug_assert` is clap's
+/// own check that the definition is coherent: conflicting flags, duplicate
+/// short options, a required argument sitting after an optional one.
+#[test]
+fn the_help_says_the_things_that_matter() {
+    use clap::CommandFactory;
+    let mut cli = discrtree::interface::cli::Cli::command();
+    cli.build();
+
+    let top = cli.render_long_help().to_string();
+    // A first run has to be done in order, and the order is not guessable.
+    assert!(top.contains("dt init"), "the setup order belongs on the first screen:\n{top}");
+    assert!(top.contains("[text]"), "the elaborated/text invariant does too:\n{top}");
+
+    let find = cli
+        .find_subcommand_mut("find")
+        .expect("find is a subcommand")
+        .render_long_help()
+        .to_string();
+    // The pattern language exists nowhere else: without an example in the help
+    // it can only be discovered by guessing, one failed invocation at a time.
+    for expected in ["Real.exp _ ≤ _", "--elaborated", "`dt status` lists them"] {
+        assert!(find.contains(expected), "`dt find --help` must mention {expected}:\n{find}");
+    }
+}
+
+/// An argument with no description is an argument that has to be guessed at.
+/// Four commands had blank positionals, which is the most expensive kind:
+/// `dt deps <NAME>` does not say whether NAME is a module or a declaration.
+#[test]
+fn every_argument_is_described() {
+    use clap::CommandFactory;
+    let mut cli = discrtree::interface::cli::Cli::command();
+    cli.build();
+    for sub in cli.get_subcommands_mut() {
+        if sub.get_name() == "help" {
+            continue;
+        }
+        assert!(sub.get_about().is_some(), "`dt {}` has no description", sub.get_name());
+        for arg in sub.get_arguments() {
+            assert!(
+                arg.get_help().is_some() || arg.get_long_help().is_some(),
+                "`dt {} {}` has no description",
+                sub.get_name(),
+                arg.get_id()
+            );
+        }
+    }
+}
