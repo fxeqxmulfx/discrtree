@@ -6,12 +6,14 @@ mod support;
 
 use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, Provenance};
+use discrtree::application::status;
 use discrtree::domain::decl::{ArgHead, DeclKind, Shape, Span};
 use discrtree::domain::name::DeclName;
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
+use discrtree::infrastructure::revision;
 use discrtree::infrastructure::sqlite::SqliteIndex;
-use support::{TempDir, theorem};
+use support::{FakeRevisions, TempDir, theorem};
 
 fn loaded() -> SqliteIndex {
     let mut db = SqliteIndex::in_memory().unwrap();
@@ -268,6 +270,77 @@ fn provenance_survives_a_reopen() {
     let db = SqliteIndex::open(&path).unwrap();
     assert_eq!(db.provenance(&id).unwrap(), Some(was));
     assert_eq!(db.provenance(&SourceId::new("flt")).unwrap(), None);
+}
+
+/// `dt find`, `dt show` and `dt deps` warn about a stale source without paying
+/// for the row counts `dt status` prints, so the comparison lives apart from
+/// `Status::run` and has to be held to the same rule: both revisions known and
+/// different, never one of them.
+#[test]
+fn a_source_is_stale_only_when_both_revisions_are_known_and_differ() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let p = |rev: Option<&str>| Provenance {
+        revision: rev.map(str::to_string),
+        stamp: rev.map(str::to_string),
+        indexed_at: 1,
+        decls: 1,
+    };
+    db.record(&SourceId::new("project"), &p(Some("4f21c8e"))).unwrap();
+    db.record(&SourceId::new("mathlib"), &p(Some("0df444a"))).unwrap();
+    // Indexed from a directory nobody could fingerprint at the time.
+    db.record(&SourceId::new("flt"), &p(None)).unwrap();
+
+    let revs = FakeRevisions::at(&[
+        ("project", "9ab0d31"), // rebuilt since the dump
+        ("mathlib", "0df444a"), // where it was
+        ("flt", "ccccccc"),     // a revision now, but nothing to compare it to
+    ]);
+    let ids = ["project", "mathlib", "flt", "never-indexed"].map(SourceId::new);
+    let stale = status::stale_among(&db, &revs, ids).unwrap();
+    assert_eq!(stale, vec![SourceId::new("project")]);
+}
+
+/// The bug this comparison was added for: a local source whose revision is a
+/// fingerprint of the build tree, and a module compiled after the last dump.
+/// Before the build had a revision this read as "up to date" and `dt find`
+/// answered `no match` for a declaration that was in the project all along.
+#[test]
+fn a_module_compiled_after_the_dump_makes_the_project_stale() {
+    let dir = TempDir::new("dt-build-rev");
+    let lib = dir.path().join(".lake/build/lib/lean/Transformer");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("Hull.olean"), "compiled").unwrap();
+    let dumped = revision::build_stamp(dir.path()).expect("a built project has a revision");
+
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let id = SourceId::new("project");
+    db.record(
+        &id,
+        &Provenance {
+            revision: Some(dumped.clone()),
+            stamp: Some("1:1".into()),
+            indexed_at: 1,
+            decls: 718,
+        },
+    )
+    .unwrap();
+
+    let unchanged = OneBuild(dir.path().to_path_buf());
+    assert!(status::stale_among(&db, &unchanged, [id.clone()]).unwrap().is_empty());
+
+    std::fs::write(lib.join("HullProbe.olean"), "compiled since").unwrap();
+    assert_ne!(revision::build_stamp(dir.path()).as_deref(), Some(dumped.as_str()));
+    assert_eq!(status::stale_among(&db, &unchanged, [id.clone()]).unwrap(), vec![id]);
+}
+
+/// Every source is at whatever the build tree under this root fingerprints to,
+/// which is what the real adapter does for a `local` source.
+struct OneBuild(std::path::PathBuf);
+
+impl discrtree::application::ports::Revisions for OneBuild {
+    fn current(&self, _source: &SourceId) -> discrtree::error::Result<Option<String>> {
+        Ok(revision::build_stamp(&self.0))
+    }
 }
 
 /// A second recording replaces the first. A source has one provenance, not a

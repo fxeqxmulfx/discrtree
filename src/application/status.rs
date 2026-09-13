@@ -7,7 +7,7 @@
 //! alongside the revision it would be built from now.
 
 use crate::application::ports::{DeclRepo, Revisions, Workspace};
-use crate::domain::source::SourceKind;
+use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,15 +26,43 @@ pub struct SourceStatus {
 }
 
 impl SourceStatus {
-    /// Whether the source has moved since it was indexed. Unknown counts as
-    /// not stale: reporting a revision nobody could read as a mismatch would
-    /// cry wolf on every source that is a plain directory.
+    /// Whether the source has moved since it was indexed.
     pub fn stale(&self) -> bool {
-        match (&self.indexed_rev, &self.current_rev) {
-            (Some(was), Some(now)) => was != now,
-            _ => false,
+        moved(&self.indexed_rev, &self.current_rev)
+    }
+}
+
+/// Two revisions disagree only when both are known. Unknown counts as not
+/// stale: reporting a revision nobody could read as a mismatch would cry wolf
+/// on every source that is a plain directory.
+fn moved(was: &Option<String>, now: &Option<String>) -> bool {
+    matches!((was, now), (Some(was), Some(now)) if was != now)
+}
+
+/// Which of these sources have moved since they were indexed.
+///
+/// The same comparison `dt status` reports, minus the row counts — and that is
+/// the point of it existing separately. This runs on every search, so that a
+/// search whose answer a stale index has corrupted says so; `counts()` is a
+/// `GROUP BY` over every row in the index, and paying it to print a line that
+/// is usually empty is how a warning earns its way back out of a tool.
+///
+/// Nothing here is fatal. A source whose revision cannot be read is not stale,
+/// which is the same rule [`SourceStatus::stale`] follows and for the same
+/// reason: the cost of a false alarm is that the next real one is ignored.
+pub fn stale_among(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    among: impl IntoIterator<Item = SourceId>,
+) -> Result<Vec<SourceId>> {
+    let mut out = Vec::new();
+    for id in among {
+        let was = repo.provenance(&id)?.and_then(|p| p.revision);
+        if moved(&was, &revisions.current(&id)?) {
+            out.push(id);
         }
     }
+    Ok(out)
 }
 
 pub struct Status<'a> {

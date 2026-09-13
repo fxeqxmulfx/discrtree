@@ -320,15 +320,28 @@ pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
     if rows.iter().any(|r| r.decls == 0) {
         out.push_str("\nA source with no declarations has not been dumped or scanned yet.\n");
     }
-    // The one line worth spending on: an index that has fallen behind answers
+    // The lines worth spending on: an index that has fallen behind answers
     // with confidence and is wrong, which is the failure this tool exists to
     // prevent, not to commit.
-    let stale: Vec<&str> = rows.iter().filter(|r| r.stale()).map(|r| r.name.as_str()).collect();
-    if !stale.is_empty() {
-        out.push_str(&format!(
-            "\nbehind the checkout: {} — re-run `dt fetch`, `dt dump` and `dt index`\n",
-            stale.join(", ")
-        ));
+    //
+    // Two lines rather than one because what brings a source up to date is
+    // whatever reads it, and that differs: an elaborated source is read from
+    // the build by `dt dump`, a text source from the checkout by `dt fetch`.
+    // Printing both commands for both was advice nobody could act on without
+    // first working out which half applied to them.
+    let stale = |elaborated: bool| -> Vec<&str> {
+        rows.iter()
+            .filter(|r| r.stale() && r.elaborated == elaborated)
+            .map(|r| r.name.as_str())
+            .collect()
+    };
+    for (which, names, fix) in [
+        ("build", stale(true), "`dt dump` and `dt index`"),
+        ("checkout", stale(false), "`dt fetch` and `dt index`"),
+    ] {
+        if !names.is_empty() {
+            out.push_str(&format!("\nbehind the {which}: {} — re-run {fix}\n", names.join(", ")));
+        }
     }
     out
 }
@@ -438,6 +451,43 @@ mod tests {
         let cut = find(&Hits { rows: vec![decl(true)], truncated: true, empty: None }, false);
         assert!(full.contains("1 result"));
         assert!(cut.contains("more match"), "got: {cut}");
+    }
+
+    fn behind(
+        name: &str,
+        kind: crate::domain::source::SourceKind,
+        elaborated: bool,
+    ) -> SourceStatus {
+        SourceStatus {
+            name: name.into(),
+            kind,
+            elaborated,
+            importable: true,
+            decls: 718,
+            indexed_rev: Some("4f21c8e".into()),
+            current_rev: Some("9ab0d31".into()),
+            age: Some(3600),
+        }
+    }
+
+    /// What brings a source up to date depends on what reads it. Telling
+    /// somebody to `dt fetch` the project they are writing is advice they
+    /// cannot follow, and advice nobody can follow is how a warning gets
+    /// filtered out of a terminal.
+    #[test]
+    fn the_repair_named_is_the_one_that_reads_the_source() {
+        use crate::domain::source::SourceKind;
+        let rows =
+            [behind("project", SourceKind::Local, true), behind("flt", SourceKind::Git, false)];
+        let r = status(&rows, std::path::Path::new("/p/index.db"));
+        assert!(r.contains("behind the build: project — re-run `dt dump` and `dt index`"), "{r}");
+        assert!(r.contains("behind the checkout: flt — re-run `dt fetch` and `dt index`"), "{r}");
+        // A source that is where it was is not named at all.
+        let current = [SourceStatus {
+            current_rev: Some("4f21c8e".into()),
+            ..behind("mathlib", SourceKind::Lake, true)
+        }];
+        assert!(!status(&current, std::path::Path::new("/p/index.db")).contains("behind"));
     }
 
     #[test]

@@ -5,13 +5,13 @@
 //! only file that has to change to index something that is not a Lake project.
 
 use crate::application::add::Add;
-use crate::application::deps::Deps;
+use crate::application::deps::{Deps, DepsResult};
 use crate::application::find::{Dup, Find};
 use crate::application::index;
 use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
 use crate::application::ship::Fetch;
 use crate::application::show::Show;
-use crate::application::status::Status;
+use crate::application::status::{self, Status};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::pattern;
 use crate::domain::query::Query;
@@ -26,7 +26,7 @@ use crate::infrastructure::revision::{self, OnDisk};
 use crate::infrastructure::sqlite::SqliteIndex;
 use crate::interface::cli::{Cli, Command, FindArgs};
 use crate::interface::render;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -132,12 +132,20 @@ impl App {
             }
         }
         if shown.is_empty() {
+            // Every name missed, which is the case the warning is for: check
+            // every source before handing back "not in the index".
+            self.warn_stale(repo.as_ref(), BTreeSet::new());
             return Err(missed.into_iter().next().expect("a batch has at least one name"));
         }
         print!("{}", render::show_all(&shown, import_only));
         for e in &missed {
             eprintln!("dt: {e}");
         }
+        let from = match missed.is_empty() {
+            true => shown.iter().map(|s| s.decl.source.clone()).collect(),
+            false => BTreeSet::new(),
+        };
+        self.warn_stale(repo.as_ref(), from);
         Ok(())
     }
 
@@ -149,10 +157,22 @@ impl App {
                     Error::new(format!("--depth takes a number or `all`, not `{d}`"))
                 })?),
             };
-        let result = Deps { repo: self.repo()?.as_ref(), workspace: &self.workspace }
-            .run(&DeclName::new(name), depth)?;
-        print!("{}", render::deps(&result));
-        Ok(())
+        let repo = self.repo()?;
+        // Not `?`: a declaration the index has not heard of is exactly what a
+        // stale source hides, and the root is the one row whose absence ends
+        // the command. So the warning is reached on both paths.
+        let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace };
+        match deps.run(&DeclName::new(name), depth) {
+            Ok(result) => {
+                print!("{}", render::deps(&result));
+                self.warn_stale(repo.as_ref(), closure_sources(&result));
+                Ok(())
+            }
+            Err(e) => {
+                self.warn_stale(repo.as_ref(), BTreeSet::new());
+                Err(e)
+            }
+        }
     }
 
     fn find(&self, args: &FindArgs) -> Result<()> {
@@ -169,9 +189,45 @@ impl App {
                 );
             }
         }
-        let hits = Find { repo: self.repo()?.as_ref() }.run(&query)?;
+        let repo = self.repo()?;
+        let hits = Find { repo: repo.as_ref() }.run(&query)?;
         print!("{}", render::find(&hits, args.long));
+        self.warn_stale(repo.as_ref(), hits.rows.iter().map(|d| d.source.clone()).collect());
         Ok(())
+    }
+
+    /// One line on stderr when a source a search touched has moved since it was
+    /// indexed.
+    ///
+    /// `dt status` reports this already, and nobody runs `dt status` before a
+    /// search. What a stale index gives back is not a poor answer but a
+    /// confident wrong one, and `no match` is the worst of them: it reads as
+    /// "upstream has no such lemma, write it yourself" when the lemma was in
+    /// the project all along, compiled after the last dump.
+    ///
+    /// An empty `from` means every source, not none. That is deliberate — a
+    /// result with no rows names no sources, and it is exactly the result the
+    /// warning exists for. It is also the one where checking costs nothing,
+    /// because there were no rows to read in the first place.
+    fn warn_stale(&self, repo: &dyn DeclRepo, from: BTreeSet<SourceId>) {
+        let among: Vec<SourceId> = match from.is_empty() {
+            true => self.workspace.sources.iter().map(|s| s.id.clone()).collect(),
+            false => from.into_iter().collect(),
+        };
+        let revs = OnDisk::read(&self.cfg);
+        // A search that failed because its warning failed would be a worse
+        // outcome than the staleness the warning was about to report.
+        let Ok(stale) = status::stale_among(repo, &revs, among) else { return };
+        for id in stale {
+            let fix = match self.cfg.source(id.as_str()).is_ok_and(Source::elaborated) {
+                true => "dump",
+                false => "fetch",
+            };
+            eprintln!(
+                "dt: `{id}` moved since it was indexed; this answer may be out of date \
+                 — re-run `dt {fix} {id}` and `dt index`"
+            );
+        }
     }
 
     fn status(&self) -> Result<()> {
@@ -474,6 +530,19 @@ fn skill(install: bool) -> Result<()> {
     std::fs::write(&path, SKILL)?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+/// Every source a dependency listing drew on. `--depth all` keeps only the
+/// tally, but the tally is by source, which is all this needs.
+fn closure_sources(r: &DepsResult) -> BTreeSet<SourceId> {
+    match r {
+        DepsResult::Levels { root, levels, .. } => {
+            std::iter::once(root).chain(levels.iter().flatten()).map(|d| d.source.clone()).collect()
+        }
+        DepsResult::Summary { root, stats, .. } => std::iter::once(root.source.clone())
+            .chain(stats.by_source.keys().map(|s| SourceId::new(s.clone())))
+            .collect(),
+    }
 }
 
 fn files(cfg: &Config) -> Files {

@@ -99,7 +99,8 @@ pub enum Command {
     ///
     /// Each source reports the revision it was indexed from next to the one it
     /// is at now. A source that has moved since is named, because a stale index
-    /// answers confidently and wrongly.
+    /// answers confidently and wrongly. The project's own revision fingerprints
+    /// its build, so a module compiled since the last dump shows up here too.
     Status,
 
     /// Print a declaration and the import line that provides it.

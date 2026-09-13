@@ -215,17 +215,40 @@ built from, and `dt status` reports both that and where the source is now.
 
 ```
 source         kind    elaborated   importable   declarations  indexed  revision
-project        local   true         true                  470  2h ago   -
-mathlib        lake    true         true               225508  2h ago   0000000 stale
+project        local   true         true                  784  2h ago   9ab0d31 stale
+mathlib        lake    true         true               325936  2h ago   0df444a
 flt            git     false        false               58674  2h ago   aa2d8b3
 
-behind the checkout: mathlib — re-run `dt fetch`, `dt dump` and `dt index`
+behind the build: project — re-run `dt dump` and `dt index`
 ```
 
-A compiled source's revision comes from `lake-manifest.json`, which is what the
+A lake dependency's revision comes from `lake-manifest.json`, which is what the
 next `lake build` will honour, and a text source's from the checkout's `HEAD`.
 A source with no revision to read is reported as `-` and never as stale: a
 warning that is always on is a warning nobody reads.
+
+The project itself has neither. Nobody pins it, and its working tree is ahead of
+its last commit by definition — that is what working on it means. So its
+revision is a hash of (module path, size, mtime) over every `.olean` under
+`.lake/build/lib`, which moves exactly when a rebuild has happened. It has to be
+the build rather than the `.lean` files, because the build is what `dt dump`
+reads: an edit nobody has compiled yet would otherwise report a staleness that
+re-dumping would not fix.
+
+This is the source where staleness is guaranteed rather than occasional. Mathlib
+is bumped monthly and the project changes every commit, so the corpus being
+watched was the one that moves least. `find`, `show` and `deps` therefore make
+the same comparison and warn on stderr:
+
+```
+dt: `project` moved since it was indexed; this answer may be out of date — re-run `dt dump project` and `dt index`
+```
+
+A result with rows is checked against the sources those rows came from; a result
+with no rows is checked against every source, which is both the case the warning
+exists for and the case where checking is free. `no match` from a stale index is
+worse than a wrong hit — it reads as "upstream has no such lemma, write it
+yourself" when the lemma was in the project all along.
 
 `dt index` leaves alone any source whose input has not changed since it was
 indexed. The input is the dump for a compiled source and the checkout for a

@@ -4,7 +4,8 @@ Shortcomings found while using `dt` on real work. Newest first.
 
 ## `dt status` cannot tell that a `local` source has gone stale
 
-Found 2026-09-13, dt 0.4.0, on a Lean project of my own.
+Found 2026-09-13, dt 0.4.0, on a Lean project of my own. Fixed 2026-09-13 in
+dt 0.5.0.
 
 `dt status --help` says each source "reports the revision it was indexed from
 next to the one it is at now. A source that has moved since is named, because a
@@ -36,6 +37,31 @@ The same comparison belongs in `find`, `show` and `deps` as a one-line warning
 on stderr when the source a result came from is stale, since those are the
 commands whose answer the staleness corrupts, and nobody runs `dt status`
 before every search.
+
+Both repairs are in. A `local` source is fingerprinted by hashing (module path,
+size, mtime) over every `.olean` under `.lake/build/lib`, which is a revision in
+the same sense as a git SHA: the dump reads the build, so the build is what has
+to have moved for the index to be behind. It has to be the build and not the
+`.lean` files, or an edit nobody has compiled yet would report a staleness that
+re-dumping would not fix.
+
+    project  local  true  true  784  1h ago  9ab0d31 stale
+
+`find`, `show` and `deps` compare the same revisions and warn on stderr:
+
+    dt: `project` moved since it was indexed; this answer may be out of date
+        — re-run `dt dump project` and `dt index`
+
+A result with rows is checked against the sources those rows came from. A result
+with no rows is checked against every source, because `no match` names no
+sources and is the answer the warning exists for. `dt status` names the repair
+that fits: an elaborated source is read from the build by `dt dump`, a text
+source from the checkout by `dt fetch`, and printing both left the reader to
+work out which half applied to them.
+
+The revision appears on the next `dt dump` and `dt index`. An index built by an
+earlier `dt` has no revision recorded for its local source, and nothing can
+recover what the build was when that dump was taken.
 
 ## `dt show` prints the sibling's attribute block for `to_additive` declarations
 
