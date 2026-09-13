@@ -8,9 +8,12 @@ use std::path::PathBuf;
     name = "dt",
     version,
     about = "Find a Lean declaration by shape, and lift it into a proof",
-    long_about = "discrtree indexes Lean corpora and answers two questions the \
-                  repository answers badly: where is the declaration with this \
-                  shape, and what does it take to use it here.\n\n\
+    long_about = "discrtree indexes Lean corpora and answers two questions \
+                  without loading the Lean environment: where is the declaration \
+                  with this shape, and what does it take to use it here. \
+                  Mathlib's `#find` answers the first only over what the file \
+                  has already imported, which is the wrong set when the point \
+                  of the search is to find out what to import.\n\n\
                   Compiled sources are elaborated: shape search and exact \
                   dependencies work. Text sources are not, and every row from \
                   one is marked [text]. Asking for a shape implies \

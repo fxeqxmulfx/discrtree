@@ -17,9 +17,34 @@ import Mathlib.Analysis.Complex.Exponential
 That module is the point. The name suggests
 `Mathlib.Analysis.SpecialFunctions.Exp`, which does not contain it.
 
-Name search already exists and works. Shape search is the part the repository
-answers badly: a lemma is easy to describe and hard to name. Over 225 508
-elaborated Mathlib declarations that query takes 24 ms.
+Shape search is not missing from Lean. Mathlib ships `#find`, the elaborator
+has `exact?` and `apply?`, and `#loogle` asks the same question over the
+network — all of them built on the discrimination tree this tool is named
+after. What they need is a Lean session. The query above, asked both ways over
+the same Mathlib:
+
+| | answer | time | peak memory |
+| --- | --- | ---: | ---: |
+| `#find Real.exp _ ≤ Real.exp _` after `import Mathlib` | found it | 377.54 s | 7.45 GB |
+| `dt find 'Real.exp _ ≤ Real.exp _'` | found it | 0.03 s | 8 MB |
+
+And `import Mathlib` is the cheat. `#find` searches the environment of the file
+it runs in, so without `import Mathlib.Analysis.Complex.Exponential` the lemma
+is not merely unfound — the pattern will not elaborate at all:
+
+```
+$ lake env lean A.lean          # A.lean imports only Mathlib.Tactic.Find
+A.lean:2:6: error: Unknown identifier `Real.exp`
+```
+
+That is the whole difficulty. You are searching in order to find out what to
+import, and the search will not run until you have imported it. `dt` reads an
+index rather than an environment, so it answers before the import exists and
+its answer *is* the import line. It also reaches corpora that were never
+compiled — the 58 674 declarations of FLT below, which no `#find` can see.
+
+A lemma is easy to describe and hard to name. That much was always true; what
+was missing was somewhere cheap to ask.
 
 ## The one invariant
 

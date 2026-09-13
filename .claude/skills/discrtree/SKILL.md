@@ -3,8 +3,10 @@ name: discrtree
 description: Search indexed Lean 4 corpora by the shape of a statement, by name, by the constants a type mentions, or by text, and get the import line that actually provides a declaration. Use in a Lean project that has a discrtree.toml, or whenever a lemma is easy to describe and hard to name.
 ---
 
-`dt` answers two questions the repository answers badly: where is the
-declaration with this shape, and what does it take to use it here.
+`dt` answers two questions without a Lean session: where is the declaration
+with this shape, and what does it take to use it here. Unlike `#find`, it also
+searches what is not imported yet — which is the point, since the answer it
+gives is the import line.
 
     dt find 'Real.exp _ ≤ _'        shape: top-level notation, head of each side
     dt find --name exp_le --in Mathlib.Analysis --kind theorem
