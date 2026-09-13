@@ -235,9 +235,9 @@ which is correct, because the index is built from the dump.
 
 | | |
 | --- | ---: |
-| `dt index` with nothing changed | 0.03 s |
-| `dt index` after one source moved | 125 s |
-| `dt index --rebuild` | 93 s |
+| `dt index` with nothing changed | 0.04 s |
+| `dt index` after one source moved | 98 s |
+| `dt index --rebuild` | 75 s |
 
 Re-indexing one large source in place costs *more* than starting over, because
 the rows have to be deleted before they are written and the text index is
@@ -245,18 +245,49 @@ rebuilt either way. That is worth knowing rather than hiding: when Mathlib
 moves, `--rebuild`; the incremental path is for the common case, which is that
 nothing moved at all and the whole command is free.
 
+Most of a rebuild used to be index maintenance rather than work. Sixteen
+million side-table rows go in, and three indexes over them had to be kept in
+step — `uses(const, decl_id)`, `uses(decl_id)`, `dep(decl_id)`, together 383 MB
+of a 1.2 GB file. The rows arrive in declaration order, which is not the order
+any of those trees is sorted by, so past the point where they outgrow the page
+cache every insert is a page fault. That is why 54 of the old 141 seconds were
+system time rather than user time.
+
+Two of the three are now gone. Both side tables are `WITHOUT ROWID` with
+`decl_id` leading the primary key, so they *are* the index on `decl_id`:
+reading a declaration's constants and deleting a source's rows are range scans
+over rows that are already adjacent, and a load appends to the right-hand edge
+in order. The third, `uses_const`, answers the opposite question — which
+declarations mention a constant — and nothing about indexing needs it, so a
+load drops it and `finish` builds it back in one pass over rows already on
+disk, which is sorted work.
+
+| | before | after |
+| --- | ---: | ---: |
+| `dt index --rebuild` | 141 s | **75 s** |
+| of which system time | 54 s | 17 s |
+| index on disk | 1.2 GB | 1.1 GB |
+
+Clustering rather than indexing is the part that is easy to get wrong.
+`clear_source` runs *between* loads, when `uses_const` is down; a first attempt
+kept the tables as they were and dropped all three indexes, and re-indexing one
+source in place went from two minutes to over eighteen, because the delete had
+lost the index it searched by.
+
 Reading is streamed, not slurped. A dump is parsed a batch of lines at a time
 off a 1 MiB buffered reader and handed straight to SQLite, so peak memory is a
 property of the batch rather than of the corpus — which matters, because the
-reason to index a library is that it is large. Parsing the 231 MB Mathlib dump
-in one piece held the text and the parsed rows in memory at once and peaked at
-**936 MB**; a batch at a time peaks at **246 MB** and costs 3% more wall clock.
-The read stays serial and only the parse is spread over the cores: reading off a
-warm page cache was never the expensive half.
+reason to index a library is that it is large. Parsing a dump in one piece held
+the text and the parsed rows in memory at once and peaked at **936 MB** on the
+231 MB dump it was measured against — four times the file. A batch at a time
+peaks at **356 MB** against a dump that has since grown to 503 MB, and 64 MB of
+that is a page cache the loader asks for on purpose. The read stays serial and
+only the parse is spread over the cores: reading off a warm page cache was
+never the expensive half.
 
 The dump itself never passes through `dt` at all. `lake env lean` writes the
 file, and `dt` runs it with `status()` rather than `output()` — capturing a
-subprocess that emits 231 MB is the same mistake one level up.
+subprocess that emits 503 MB is the same mistake one level up.
 
 `--force` re-indexes everything without deleting the file. `--rebuild` deletes
 it, which is also what a schema change requires — the index carries a version,
@@ -264,9 +295,40 @@ and a database written by a different build is refused rather than read wrong:
 
 ```
 $ dt status
-dt: this index was written by a different version of dt (schema 0, this build
-    expects 1); run `dt index --rebuild`
+dt: this index was written by a different version of dt (schema 1, this build
+    expects 2); run `dt index --rebuild`
 ```
+
+## The dump runs on every core
+
+Indexing Mathlib is a minute. Dumping it was twenty-five, on one core out of
+twelve, because the dumper walked the environment and elaborated each
+declaration in turn.
+
+It is now one thread per core over a shared environment. The walk stays serial
+— it is the cheap part — and collects a work list, which is dealt out and
+elaborated in parallel. Nothing here adds a declaration, so every thread starts
+from the same `Core.State` and its result state is dropped; there is nothing to
+merge back. `DISCRTREE_JOBS` overrides the thread count, which otherwise
+follows the hardware concurrency.
+
+| | |
+| --- | ---: |
+| `dt dump mathlib` on one core | 25:10 |
+| `dt dump mathlib` on twelve | **4:06** |
+
+Threads rather than processes, because the environment is the whole expense:
+`import Mathlib` by itself is 9 s and **6.9 GB**, so twelve processes would
+want 83 GB on a machine that has 30. Twelve threads sharing one environment
+moved the peak from 7.31 GB to 7.42 GB — a thread costs its own elaboration
+caches and nothing else.
+
+Round robin rather than contiguous blocks, because what a declaration costs is
+the size of its proof term, and those cluster by file: contiguous shares leave
+one thread alone in `Mathlib.Analysis` long after the rest have finished. Each
+thread writes its own file and the parts are concatenated in share order, so
+the dump is one file and the same file however many threads wrote it — byte for
+byte against the serial dumper, which is how the change was checked.
 
 ## Setup
 
