@@ -23,6 +23,18 @@ pub trait DeclRepo {
         Ok(self.get(name)?.is_some())
     }
 
+    /// The smallest declaration whose source range strictly contains `span` in
+    /// the same module, if any.
+    ///
+    /// This is how a generated declaration is recognised without asking Lean.
+    /// `to_additive` gives `Finset.sum_image` the range of the attribute block
+    /// sitting inside `Finset.prod_image`, so the declaration that produced it
+    /// is the one wrapped around it. A store that cannot answer says so, and
+    /// `dt show` then reports only that the lines declare nothing.
+    fn enclosing(&self, _of: &Decl) -> Result<Option<Decl>> {
+        Ok(None)
+    }
+
     /// What the source was when it was indexed, if the store remembers.
     fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
         Ok(None)

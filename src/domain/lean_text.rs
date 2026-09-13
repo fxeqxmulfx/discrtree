@@ -54,6 +54,39 @@ const MODIFIERS: &[&str] = &[
     "local ",
 ];
 
+/// Whether a slice of source declares anything at all.
+///
+/// Lean's declaration range for a *generated* declaration points at the syntax
+/// that generated it, which is not a declaration: `to_additive` points at its
+/// own attribute block, a structure field at the field line. Printing those
+/// lines and calling them the declaration is the one thing `dt show` exists to
+/// prevent, so it has to be able to tell.
+pub fn declares(text: &str) -> bool {
+    text.lines().any(|l| header(l).is_some())
+}
+
+/// Whether a slice of source declares `name` in particular.
+///
+/// `declares` only says the lines declare something. A structure's constructor
+/// is given the range of a line of the structure, so those lines do declare
+/// something, and it is not the row in hand: `MonoidHom.mk` points at
+/// `structure MonoidHom ...`. The name in the header is what separates the two.
+/// An anonymous `instance : Foo Bar` has no name to compare and is taken at its
+/// word, since nothing else in the file claims that line either.
+pub fn declares_name(text: &str, name: &DeclName) -> bool {
+    text.lines().filter_map(header).any(|(_, rest)| match ident(rest) {
+        Some(id) => id == name.base() || id == name.as_str(),
+        None => true,
+    })
+}
+
+/// The identifier a declaration header opens with, or `None` where the header
+/// goes straight into binders or the type — an anonymous instance.
+fn ident(rest: &str) -> Option<&str> {
+    let id = rest.trim_start().split([' ', '\t', '(', '{', '[', ':']).next()?;
+    (!id.is_empty()).then_some(id)
+}
+
 /// The modules a file imports. For a text corpus these are the only structural
 /// dependency information there is.
 pub fn imports(text: &str) -> Vec<ModuleName> {
@@ -342,6 +375,46 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
         let src = "noncomputable def f : Nat := 0\nprivate theorem g : True := trivial\n";
         let kinds: Vec<String> = scan(src).decls.iter().map(|d| d.kind.clone()).collect();
         assert_eq!(kinds, vec!["def", "theorem"]);
+    }
+
+    #[test]
+    fn an_attribute_block_declares_nothing() {
+        // Exactly what Lean hands back as the range of `Finset.sum_image`: the
+        // `to_additive` block above `theorem prod_image`, which is a different
+        // declaration and begins on the line after the range ends.
+        let block = "@[to_additive (attr := simp) /-- If a function is injective on a finset, sums\n                     over the original finset or its image coincide. -/]";
+        assert!(!declares(block));
+        assert!(!declares("  d_model : \u{2115}"), "a structure field is not a declaration");
+        assert!(!declares(""));
+
+        assert!(declares("theorem prod_image : True := trivial"));
+        assert!(declares("@[simp] theorem f : True := trivial"), "an attribute may precede it");
+        assert!(declares("private noncomputable def g : Nat := 0"), "so may modifiers");
+        assert!(declares("/-- doc -/\ninstance : Nat := 0"), "the header may be on a later line");
+    }
+
+    #[test]
+    fn a_structure_line_declares_the_structure_and_not_its_constructor() {
+        // The range Lean gives `MonoidHom.mk` is one line of `structure
+        // MonoidHom`, so the lines do declare something; the name is the only
+        // thing that says it is something else.
+        let line = "structure MonoidHom (M : Type*) (N : Type*) [MulOne M] [MulOne N] extends";
+        assert!(declares(line), "the line does declare a structure");
+        assert!(!declares_name(line, &DeclName::new("MonoidHom.mk")));
+        assert!(declares_name(line, &DeclName::new("MonoidHom")));
+
+        let thm = "@[simp] theorem exp_le_exp : True := trivial";
+        assert!(declares_name(thm, &DeclName::new("Real.exp_le_exp")), "a namespace is dropped");
+        assert!(declares_name(thm, &DeclName::new("exp_le_exp")));
+
+        let full = "protected theorem Finset.sum_image {s : Finset α} : True := trivial";
+        assert!(declares_name(full, &DeclName::new("Finset.sum_image")), "or spelled in full");
+
+        let anon = "instance : Repr Nat.Primes :=\n  \u{27e8}fun p _ => repr p.val\u{27e9}";
+        assert!(
+            declares_name(anon, &DeclName::new("Nat.Primes.instRepr")),
+            "an anonymous instance has no name to compare, and the line is still its source"
+        );
     }
 
     #[test]

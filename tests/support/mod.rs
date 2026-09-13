@@ -118,6 +118,26 @@ impl DeclRepo for FakeRepo {
         Ok(names.iter().filter_map(|n| self.decls.iter().find(|d| &d.name == n).cloned()).collect())
     }
 
+    /// The same rule SQLite applies: the smallest strictly-containing span in
+    /// the same module. Written out again here because the two agreeing is what
+    /// makes the fake worth testing against.
+    fn enclosing(&self, of: &Decl) -> Result<Option<Decl>> {
+        let Some(span) = of.span else { return Ok(None) };
+        Ok(self
+            .decls
+            .iter()
+            .filter(|d| d.module == of.module && d.source == of.source && d.name != of.name)
+            .filter(|d| {
+                d.span.is_some_and(|s| {
+                    s.start <= span.start
+                        && s.end >= span.end
+                        && (s.start, s.end) != (span.start, span.end)
+                })
+            })
+            .min_by_key(|d| d.span.map(|s| s.end - s.start).unwrap_or(u32::MAX))
+            .cloned())
+    }
+
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {
         let mut by: BTreeMap<SourceId, usize> = BTreeMap::new();
         for d in &self.decls {

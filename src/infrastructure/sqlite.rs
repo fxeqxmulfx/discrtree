@@ -272,6 +272,33 @@ impl DeclRepo for SqliteIndex {
         Ok(decl)
     }
 
+    fn enclosing(&self, of: &Decl) -> Result<Option<Decl>> {
+        let Some(span) = of.span else { return Ok(None) };
+        // Smallest container, so a lemma generated inside a theorem that is
+        // itself inside a section reports the theorem. `decl_module` narrows
+        // this to one file's worth of rows before the range test runs.
+        self.conn
+            .prepare_cached(
+                "SELECT * FROM decl
+                 WHERE module = ?1 AND source = ?2 AND name <> ?3
+                   AND line_start <= ?4 AND line_end >= ?5
+                   AND (line_start < ?4 OR line_end > ?5)
+                 ORDER BY line_end - line_start LIMIT 1",
+            )?
+            .query_row(
+                params![
+                    of.module.as_str(),
+                    of.source.as_str(),
+                    of.name.as_str(),
+                    span.start,
+                    span.end
+                ],
+                decl_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn contains(&self, name: &DeclName) -> Result<bool> {
         Ok(self
             .conn

@@ -7,9 +7,11 @@
 //! edge case.
 
 use crate::application::deps::RepoSource;
+use crate::application::generated;
 use crate::application::ports::{DeclRepo, ProjectWriter, SourceFiles, Workspace};
 use crate::domain::closure::{self, Frontier};
 use crate::domain::decl::Decl;
+use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::vendor::{self, VendorPlan};
 use crate::error::{Result, bail};
@@ -106,8 +108,16 @@ impl Add<'_> {
         if !file.imports.is_empty() {
             out.push('\n');
         }
+        // A generated declaration resolves to the declaration that generated it,
+        // and a `to_additive` pair in one file resolves to the same block twice.
+        // Emitting it twice is not merely wasteful: the second copy redeclares
+        // the first, and the vendored module does not compile.
+        let mut seen = std::collections::BTreeSet::new();
         for decl in &file.decls {
-            let text = self.text_of(decl)?;
+            let (module, start, end, text) = self.text_of(decl)?;
+            if !seen.insert((module, start, end)) {
+                continue;
+            }
             out.push_str(&text);
             if !text.ends_with('\n') {
                 out.push('\n');
@@ -117,7 +127,15 @@ impl Add<'_> {
         Ok(out)
     }
 
-    fn text_of(&self, decl: &Decl) -> Result<String> {
+    /// The lines to copy for one declaration, and the range they came from.
+    ///
+    /// Not always the declaration's own range. Lean points a generated
+    /// declaration at the syntax that produced it — `to_additive` at an
+    /// attribute block, a structure's field at a line of the structure — and
+    /// copying those lines vendors an attribute with no declaration under it.
+    /// The declaration that encloses them is the one to copy: elaborating it
+    /// produces this one again.
+    fn text_of(&self, decl: &Decl) -> Result<(ModuleName, u32, u32, String)> {
         let Some(span) = decl.span else {
             bail!("{}: the index has no line range, so it cannot be copied", decl.name)
         };
@@ -132,6 +150,13 @@ impl Add<'_> {
                 decl.module
             )
         }
-        Ok(lines.join("\n"))
+        let joined = lines.join("\n");
+        if lean_text::declares_name(&joined, &decl.name) {
+            return Ok((decl.module.clone(), span.start, span.end, joined));
+        }
+        match generated::generator(self.repo, decl, &text)? {
+            Some(up) => self.text_of(&up),
+            None => Ok((decl.module.clone(), span.start, span.end, joined)),
+        }
     }
 }

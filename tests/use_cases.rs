@@ -9,7 +9,7 @@ use discrtree::application::add::Add;
 use discrtree::application::deps::{Deps, DepsResult};
 use discrtree::application::find::{Dup, Empty, Find};
 use discrtree::application::ports::Workspace;
-use discrtree::application::show::Show;
+use discrtree::application::show::{Show, Source};
 use discrtree::application::status::Status;
 use discrtree::domain::decl::Span;
 use discrtree::domain::name::{DeclName, ModuleName};
@@ -69,7 +69,89 @@ fn show_gives_the_import_that_actually_provides_the_declaration() {
         .run(&DeclName::new("Real.exp_le_exp"))
         .unwrap();
     assert_eq!(shown.import.as_deref(), Some("import Mathlib.Analysis.Exp"));
-    assert_eq!(shown.source_text.as_deref(), Some("theorem exp_le_exp : True :=\n  trivial"));
+    assert_eq!(shown.source, Source::Text("theorem exp_le_exp : True :=\n  trivial".into()));
+}
+
+/// `Finset.sum_image` in miniature: Lean points a `to_additive` twin at the
+/// attribute block inside the theorem that generated it, so the range holds an
+/// attribute and no declaration at all.
+fn generated() -> (FakeRepo, FakeFiles) {
+    let mut orig = theorem("Finset.prod_image", "mathlib", "Mathlib.BigOperators", "Eq", &[]);
+    orig.span = Some(Span::new(1, 4));
+    let mut twin = theorem("Finset.sum_image", "mathlib", "Mathlib.BigOperators", "Eq", &[]);
+    twin.ty = "∑ x ∈ s.image f, g x = ∑ x ∈ s, g (f x)".into();
+    twin.span = Some(Span::new(2, 2));
+    let mut alias = theorem("Eq.ge", "mathlib", "Mathlib.Order", "Eq", &[]);
+    alias.ty = "a = b → a ≥ b".into();
+    alias.span = Some(Span::new(1, 1));
+    // A structure, the projection Lean generates for its parent, and its
+    // constructor: three rows over the same two lines, and only the first was
+    // written by anyone.
+    let mut structure = theorem("Hom", "mathlib", "Mathlib.Hom", "Eq", &[]);
+    structure.kind = discrtree::domain::decl::DeclKind::Structure;
+    structure.span = Some(Span::new(1, 3));
+    let mut field = theorem("Hom.toFun", "mathlib", "Mathlib.Hom", "Eq", &[]);
+    field.span = Some(Span::new(1, 2));
+    let mut ctor = theorem("Hom.mk", "mathlib", "Mathlib.Hom", "Eq", &[]);
+    ctor.span = Some(Span::new(1, 1));
+    let repo = FakeRepo { decls: vec![orig, twin, alias, structure, field, ctor] };
+    let files = FakeFiles::new()
+        .with("mathlib", "Mathlib.Hom", "structure Hom where\n  toFun : Nat\n  inj : True\n")
+        .with(
+            "mathlib",
+            "Mathlib.BigOperators",
+            "theorem prod_image :\n  @[to_additive]\n  True :=\n  trivial\n",
+        )
+        .with("mathlib", "Mathlib.Order", "@[to_dual ge] alias Eq.le := le_of_eq\n");
+    (repo, files)
+}
+
+#[test]
+fn show_names_the_declaration_a_generated_one_came_out_of() {
+    let (repo, files) = generated();
+    let ws = workspace();
+    let shown = Show { repo: &repo, files: &files, workspace: &ws }
+        .run(&DeclName::new("Finset.sum_image"))
+        .unwrap();
+    let Source::Generated { inside, .. } = &shown.source else {
+        panic!("an attribute block is not a declaration: {:?}", shown.source)
+    };
+    assert_eq!(
+        inside.as_ref().map(|d| d.name.to_string()),
+        Some("Finset.prod_image".into()),
+        "the enclosing theorem is the one that generated it"
+    );
+}
+
+#[test]
+fn show_walks_past_a_container_that_was_itself_generated() {
+    let (repo, files) = generated();
+    let ws = workspace();
+    let shown =
+        Show { repo: &repo, files: &files, workspace: &ws }.run(&DeclName::new("Hom.mk")).unwrap();
+    let Source::Generated { inside, .. } = &shown.source else {
+        panic!("a structure's first line is not its constructor: {:?}", shown.source)
+    };
+    assert_eq!(
+        inside.as_ref().map(|d| d.name.to_string()),
+        Some("Hom".into()),
+        "the projection Hom.toFun encloses it more tightly, and has no source of its own either"
+    );
+}
+
+#[test]
+fn show_still_answers_when_nothing_encloses_the_generated_lines() {
+    let (repo, files) = generated();
+    let ws = workspace();
+    let shown =
+        Show { repo: &repo, files: &files, workspace: &ws }.run(&DeclName::new("Eq.ge")).unwrap();
+    let Source::Generated { inside, head } = &shown.source else {
+        panic!("an alias line declares no theorem: {:?}", shown.source)
+    };
+    assert!(inside.is_none(), "nothing in the module contains that line");
+    assert!(head.contains("alias"), "the head line names the original: {head}");
+    // The type is the whole answer in this case, so it has to be printed.
+    assert!(discrtree::interface::render::show(&shown, false).contains("a = b → a ≥ b"));
 }
 
 #[test]
@@ -192,6 +274,45 @@ fn writing_emits_provenance_the_source_text_and_an_aggregator_entry() {
     assert!(
         !writer.imports.is_empty(),
         "a module not in the aggregator is not built, so registering it is not optional"
+    );
+}
+
+#[test]
+fn a_generated_declaration_is_vendored_as_the_one_that_generates_it() {
+    // `Other.sum_thing` is the `to_additive` twin: its range is the attribute
+    // block, and copying that yields a file with an attribute and nothing under
+    // it. Copying `prod_thing` instead produces both on elaboration — once.
+    let mut uses = theorem(
+        "Other.uses",
+        "other",
+        "Other.Uses",
+        "Eq",
+        &["Other.sum_thing", "Other.prod_thing"],
+    );
+    uses.span = Some(Span::new(1, 1));
+    let mut prod = theorem("Other.prod_thing", "other", "Other.Gen", "Eq", &[]);
+    prod.span = Some(Span::new(1, 3));
+    let mut sum = theorem("Other.sum_thing", "other", "Other.Gen", "Eq", &[]);
+    sum.span = Some(Span::new(1, 1));
+    let repo = FakeRepo { decls: vec![uses, prod, sum] };
+    let files = FakeFiles::new()
+        .with("other", "Other.Uses", "theorem uses : True := trivial\n")
+        .with("other", "Other.Gen", "@[to_additive]\ntheorem prod_thing : True :=\n  trivial\n");
+
+    let ws = workspace();
+    let mut writer = FakeWriter::default();
+    Add { repo: &repo, files: &files, workspace: &ws }
+        .write(&DeclName::new("Other.uses"), &mut writer, false)
+        .unwrap();
+    let all: String = writer.files.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(
+        all.matches("theorem prod_thing").count(),
+        1,
+        "the pair resolves to one block, and a second copy would redeclare it:\n{all}"
+    );
+    assert!(
+        !all.contains("@[to_additive]\n\n"),
+        "an attribute block with no declaration under it does not compile:\n{all}"
     );
 }
 

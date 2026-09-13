@@ -173,6 +173,38 @@ dt: source `flt` is text, and a shape can only be matched against elaborated
     rows; search it by --name, --text, --in or --uses instead
 ```
 
+## A declaration Lean wrote has no source of its own
+
+36 266 of Mathlib's 225 508 rows have a source range sitting inside another
+declaration's — one in six. They were generated rather than typed: `to_additive`
+turns `Finset.prod_image` into `Finset.sum_image`, `@[simps]` turns a definition
+into its simp lemmas, `alias` renames, a structure yields its fields and its
+constructor. Lean gives each of them a range all the same, and that range points
+at the syntax that produced it: an attribute block, a field line, the first line
+of a `structure`. Printed as if it were the declaration, it reads like an answer
+and stops exactly where the useful part begins.
+
+```
+$ dt show Finset.sum_image
+import Mathlib.Algebra.BigOperators.Group.Finset.Basic
+
+Finset.sum_image
+  theorem  Mathlib.Algebra.BigOperators.Group.Finset.Basic:92-94
+  generated inside Finset.prod_image:90-97; `dt show Finset.prod_image` has the source
+
+∀ {ι : Type u_1} {κ : Type u_2} {M : Type u_4} [inst : AddCommMonoid M] {f : ι → M}
+  [inst_1 : DecidableEq ι] {s : Finset κ} {g : κ → ι},
+  Set.InjOn g ↑s → ∑ x ∈ Finset.image g s, f x = ∑ x ∈ s, f (g x)
+```
+
+Two questions settle it, and neither needs Lean: do those lines declare this
+name, and if not, which declaration contains them? The walk continues outward
+while the container is generated too — `MonoidHom.mk` sits inside the projection
+`MonoidHom.toMulHom`, which sits inside `structure MonoidHom`, and only the last
+of the three was written by anyone. `dt add` resolves the same way and copies
+the generator once for both halves of a pair: an attribute block vendored with
+no declaration under it is a file that does not compile.
+
 ## Staying current
 
 An index is a snapshot, and the dangerous failure is not a stale answer but a

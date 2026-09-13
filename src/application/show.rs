@@ -6,8 +6,10 @@
 //! `Mathlib.Analysis.SpecialFunctions.Exp` one would guess, which does not
 //! contain it at all.
 
+use crate::application::generated;
 use crate::application::ports::{DeclRepo, SourceFiles, Workspace};
 use crate::domain::decl::Decl;
+use crate::domain::lean_text;
 use crate::domain::name::DeclName;
 use crate::error::{Result, bail};
 
@@ -17,11 +19,33 @@ pub struct Shown {
     /// The import line that provides it, or `None` for a source that cannot be
     /// imported.
     pub import: Option<String>,
-    /// The declaration's own lines. `None` when the file is not on disk or the
-    /// index has no range for it.
-    pub source_text: Option<String>,
-    /// Why `source_text` is missing, when it is.
-    pub note: Option<String>,
+    pub source: Source,
+}
+
+/// What the indexed line range turned out to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// The declaration's own lines.
+    Text(String),
+    /// The range holds no declaration at all.
+    ///
+    /// Lean points a *generated* declaration at whatever syntax produced it:
+    /// `Finset.sum_image` gets the range of the `to_additive` block above
+    /// `theorem prod_image`, and a structure field gets the field line. Printing
+    /// those lines as the declaration is worse than printing nothing, because
+    /// they read like an answer and stop exactly where the useful part starts.
+    /// 36 266 of Mathlib's 225 508 rows are in this position.
+    Generated {
+        /// The declaration whose range contains this one, when there is one.
+        /// That is the declaration that generated it, and the one whose source
+        /// carries the proof.
+        inside: Option<Box<Decl>>,
+        /// The first non-blank line of the range, for when there is not — an
+        /// `alias` produced by `to_dual` names its original there.
+        head: String,
+    },
+    /// No lines at all: no range in the index, or the file is not on disk.
+    Missing(String),
 }
 
 pub struct Show<'a> {
@@ -38,13 +62,31 @@ impl Show<'_> {
         let import =
             self.workspace.sources.importable(&decl.source).then(|| decl.module.import_line());
 
-        let (source_text, note) = match decl.span {
-            None => (None, Some("the index has no line range for this declaration".into())),
-            Some(span) => match self.files.read_module(&decl.source, &decl.module) {
-                Ok(text) => (Some(span.slice(&text).join("\n")), None),
-                Err(e) => (None, Some(format!("{e}"))),
-            },
+        let source = self.source_of(&decl)?;
+        Ok(Shown { decl, import, source })
+    }
+
+    fn source_of(&self, decl: &Decl) -> Result<Source> {
+        let Some(span) = decl.span else {
+            return Ok(Source::Missing("the index has no line range for this declaration".into()));
         };
-        Ok(Shown { decl, import, source_text, note })
+        let text = match self.files.read_module(&decl.source, &decl.module) {
+            Ok(t) => t,
+            Err(e) => return Ok(Source::Missing(format!("{e}"))),
+        };
+        let lines = span.slice(&text).join("\n");
+        if lean_text::declares_name(&lines, &decl.name) {
+            return Ok(Source::Text(lines));
+        }
+        let inside = generated::generator(self.repo, decl, &text)?;
+        // The lines declare something else, and nothing in the module contains
+        // them: believe the file. Lean's naming is not a parser, and a name the
+        // header spells in a way this does not recognise is still likelier than
+        // a declaration with no source at all.
+        if inside.is_none() && lean_text::declares(&lines) {
+            return Ok(Source::Text(lines));
+        }
+        let head = lines.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+        Ok(Source::Generated { inside: inside.map(Box::new), head })
     }
 }

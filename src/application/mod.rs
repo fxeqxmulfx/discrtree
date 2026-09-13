@@ -4,6 +4,7 @@
 pub mod add;
 pub mod deps;
 pub mod find;
+pub mod generated;
 pub mod index;
 pub mod ports;
 pub mod ship;

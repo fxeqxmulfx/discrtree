@@ -7,7 +7,7 @@
 use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
 use crate::application::find::{Duplicate, Empty, Hits};
-use crate::application::show::Shown;
+use crate::application::show::{Shown, Source};
 use crate::application::status::SourceStatus;
 use crate::domain::decl::Decl;
 use std::collections::BTreeMap;
@@ -125,21 +125,39 @@ pub fn show(s: &Shown, import_only: bool) -> String {
         s.decl.kind,
         s.decl.module
     ));
-    if let Some(span) = s.decl.span {
-        out.push_str(&format!(":{}-{}", span.start, span.end));
+    out.push_str(&at(&s.decl));
+    out.push('\n');
+    // A generated declaration has no source of its own, so the header has to say
+    // where the lines below came from. Without it the type reads like a summary
+    // of source that was withheld, rather than the whole of what exists.
+    if let Source::Generated { inside, head } = &s.source {
+        match inside {
+            Some(d) => out.push_str(&format!(
+                "  generated inside {}{}; `dt show {}` has the source\n",
+                d.name,
+                at(d),
+                d.name
+            )),
+            None => out.push_str(&format!("  those lines declare nothing: `{head}`\n")),
+        }
     }
-    out.push_str("\n\n");
-    match (&s.source_text, &s.note) {
-        (Some(t), _) => {
+    out.push('\n');
+    match &s.source {
+        Source::Text(t) => {
             out.push_str(t);
             out.push('\n');
         }
-        (None, Some(n)) => {
+        Source::Generated { .. } => out.push_str(&format!("{}\n", s.decl.ty)),
+        Source::Missing(n) => {
             out.push_str(&format!("-- source not available: {n}\n-- type: {}\n", s.decl.ty))
         }
-        (None, None) => out.push_str(&format!("-- type: {}\n", s.decl.ty)),
     }
     out
+}
+
+/// `:92-94`, or nothing when the index has no range.
+fn at(d: &Decl) -> String {
+    d.span.map(|s| format!(":{}-{}", s.start, s.end)).unwrap_or_default()
 }
 
 pub fn deps(r: &DepsResult) -> String {
@@ -451,8 +469,7 @@ mod tests {
         let s = Shown {
             decl: decl(true),
             import: Some("import Mathlib.Analysis.Complex.Exponential".into()),
-            source_text: Some("theorem exp_le_exp : True := trivial".into()),
-            note: None,
+            source: Source::Text("theorem exp_le_exp : True := trivial".into()),
         };
         let out = show(&s, false);
         assert!(out.starts_with("import Mathlib.Analysis.Complex.Exponential\n"));
@@ -465,8 +482,7 @@ mod tests {
         let one = Shown {
             decl: decl(true),
             import: Some("import Mathlib.Analysis.Complex.Exponential".into()),
-            source_text: None,
-            note: None,
+            source: Source::Missing("no range".into()),
         };
         let two = Shown { decl: decl(true), ..one.clone() };
         let r = show_all(&[one, two], true);
@@ -475,7 +491,8 @@ mod tests {
 
     #[test]
     fn show_says_so_when_a_source_cannot_be_imported() {
-        let s = Shown { decl: decl(false), import: None, source_text: None, note: None };
+        let s =
+            Shown { decl: decl(false), import: None, source: Source::Missing("no range".into()) };
         assert!(show(&s, true).contains("not importable"));
     }
 
