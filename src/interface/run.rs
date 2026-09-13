@@ -355,13 +355,12 @@ impl App {
             if self.up_to_date(&sqlite, &id, &was, force)? {
                 continue;
             }
-            let decls = jsonl::read_parallel(&path)?;
             sqlite.clear_source(&id)?;
-            index::load(&mut sqlite, &decls)?;
+            let read = jsonl::stream(&path, |chunk| sqlite.put(chunk))?;
             let stored = sqlite.count_source(&id)?;
             sqlite.record(&id, &Provenance { decls: stored, ..was })?;
             changed = true;
-            report(&s.name, decls.len(), stored, "");
+            report(&s.name, read, stored, "");
         }
         for s in self.cfg.sources.iter().filter(|s| !s.elaborated()) {
             let dir = self.cfg.source_dir(s);

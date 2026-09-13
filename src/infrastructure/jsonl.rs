@@ -107,8 +107,50 @@ pub fn read(path: &Path) -> Result<Vec<Decl>> {
     Ok(out)
 }
 
-/// Read a dump in parallel. Phase 4 parses gigabytes across tens of thousands
-/// of files; with twelve cores this is seconds rather than minutes.
+/// Read a dump in bounded memory, handing each batch of rows to `sink` as soon
+/// as it is parsed.
+///
+/// [`read_parallel`] is the obvious way to do this and it costs four times the
+/// file: the whole text is resident while the whole `Vec<Decl>` is being built
+/// beside it, and the rows are the larger half. A 231 MB Mathlib dump peaked at
+/// 936 MB that way, and it scales with the corpus — the reason to index a
+/// library is that it is large.
+///
+/// The read stays serial and buffered; only the parse is spread over the cores,
+/// a batch at a time. Reading 231 MB off a warm page cache is not the cost here,
+/// parsing it is.
+pub fn stream(path: &Path, mut sink: impl FnMut(&[Decl]) -> Result<()>) -> Result<usize> {
+    /// Lines held at once. Large enough that the fork-and-join is amortised,
+    /// small enough that the batch is megabytes rather than hundreds of them.
+    const BATCH: usize = 8192;
+
+    let file =
+        std::fs::File::open(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+    let mut lines = BufReader::with_capacity(1 << 20, file).lines();
+    let mut raw: Vec<String> = Vec::with_capacity(BATCH);
+    let mut total = 0;
+    loop {
+        raw.clear();
+        for line in lines.by_ref().take(BATCH) {
+            raw.push(line?);
+        }
+        if raw.is_empty() {
+            return Ok(total);
+        }
+        let decls: Vec<Decl> = raw
+            .par_iter()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<Row>(l).ok())
+            .map(Decl::from)
+            .collect();
+        total += decls.len();
+        sink(&decls)?;
+    }
+}
+
+/// Read a dump in parallel, all of it at once. Used where the rows are wanted
+/// as a collection anyway — `JsonlRepo`, which is a repository over the dumps
+/// themselves. Prefer [`stream`] when the rows are only being passed through.
 pub fn read_parallel(path: &Path) -> Result<Vec<Decl>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
@@ -251,6 +293,43 @@ mod tests {
         std::fs::write(&path, format!("{good}\nnot json at all\n\n{good}\n")).unwrap();
         assert_eq!(read(&path).unwrap().len(), 2);
         assert_eq!(read_parallel(&path).unwrap().len(), 2);
+
+        let mut seen = 0;
+        assert_eq!(
+            stream(&path, |c| {
+                seen += c.len();
+                Ok(())
+            })
+            .unwrap(),
+            2
+        );
+        assert_eq!(seen, 2, "the streaming reader must skip the same rows");
+    }
+
+    /// The batch boundary is the part that can silently lose rows: an off-by-one
+    /// in the take-N loop drops the last partial batch, and every dump has one.
+    #[test]
+    fn streaming_crosses_batch_boundaries_without_losing_rows() {
+        let path = tempdir().join("batched.jsonl");
+        let rows: Vec<String> = (0..20_000)
+            .map(|i| {
+                serde_json::to_string(&Row::from(&Decl::stub(&format!("d{i}"), "s", "M"))).unwrap()
+            })
+            .collect();
+        std::fs::write(&path, rows.join("\n")).unwrap();
+
+        let mut names = Vec::new();
+        let total = stream(&path, |c| {
+            names.extend(c.iter().map(|d| d.name.to_string()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(total, 20_000);
+        assert_eq!(names.len(), 20_000);
+        // Order is what `dt add` depends on, and a parallel parse is where it
+        // would be lost.
+        assert_eq!(names[0], "d0");
+        assert_eq!(names[19_999], "d19999");
     }
 
     #[test]

@@ -187,6 +187,19 @@ rebuilt either way. That is worth knowing rather than hiding: when Mathlib
 moves, `--rebuild`; the incremental path is for the common case, which is that
 nothing moved at all and the whole command is free.
 
+Reading is streamed, not slurped. A dump is parsed a batch of lines at a time
+off a 1 MiB buffered reader and handed straight to SQLite, so peak memory is a
+property of the batch rather than of the corpus — which matters, because the
+reason to index a library is that it is large. Parsing the 231 MB Mathlib dump
+in one piece held the text and the parsed rows in memory at once and peaked at
+**936 MB**; a batch at a time peaks at **246 MB** and costs 3% more wall clock.
+The read stays serial and only the parse is spread over the cores: reading off a
+warm page cache was never the expensive half.
+
+The dump itself never passes through `dt` at all. `lake env lean` writes the
+file, and `dt` runs it with `status()` rather than `output()` — capturing a
+subprocess that emits 231 MB is the same mistake one level up.
+
 `--force` re-indexes everything without deleting the file. `--rebuild` deletes
 it, which is also what a schema change requires — the index carries a version,
 and a database written by a different build is refused rather than read wrong:

@@ -114,8 +114,11 @@ pub fn dump_source(
     })
 }
 
-/// Feed rows into the index in batches, so a 533 320-row corpus never has to be
-/// resident all at once.
+/// Feed rows into the index in batches.
+///
+/// The batch is the transaction, not the residency: the caller already holds
+/// every row. One transaction per row is an fsync per row, and one transaction
+/// for half a million rows is a journal the size of the index.
 pub fn load(sink: &mut dyn DeclSink, decls: &[Decl]) -> Result<usize> {
     const BATCH: usize = 8192;
     for chunk in decls.chunks(BATCH) {
