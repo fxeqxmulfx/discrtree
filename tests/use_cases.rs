@@ -355,3 +355,25 @@ fn every_argument_is_described() {
         }
     }
 }
+
+/// The skill is what an agent loads instead of reading eleven `--help`
+/// screens, so its whole value is that it is cheap. Past about 2 KB it stops
+/// being cheaper than the thing it replaces.
+#[test]
+fn the_skill_is_short_and_well_formed() {
+    let skill = include_str!("../.claude/skills/discrtree/SKILL.md");
+    assert!(skill.len() < 2048, "the skill is {} bytes; keep it under 2048", skill.len());
+
+    let (frontmatter, body) = skill
+        .strip_prefix("---\n")
+        .and_then(|s| s.split_once("\n---\n"))
+        .expect("the skill opens with YAML frontmatter");
+    assert!(frontmatter.contains("name: discrtree"), "{frontmatter}");
+    // The description is the only part always in context: it is what decides
+    // whether the skill gets loaded at all, so it has to say when to.
+    assert!(frontmatter.contains("description: "), "{frontmatter}");
+    assert!(frontmatter.contains("Lean"), "the description must say what corpus: {frontmatter}");
+
+    // The invariant an agent gets wrong without being told.
+    assert!(body.contains("[text]"), "the skill must carry the one invariant:\n{body}");
+}

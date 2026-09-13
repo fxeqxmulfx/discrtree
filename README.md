@@ -48,6 +48,7 @@ row cannot answer that question and dropping the condition would be a lie.
 | | |
 | --- | --- |
 | `dt init` | write a starter `discrtree.toml` |
+| `dt skill` | print the agent skill; `--install` writes it into `.claude/skills/` |
 | `dt dump [source]` | run Lean over a compiled source, writing JSONL |
 | `dt fetch [source]` | blobless sparse clone of a text corpus |
 | `dt scan [source]` | read a text corpus with the scanner |
@@ -108,6 +109,13 @@ reason `dt find` prints the module on the same line as the name: the module
 reason `dt show` takes any number of names, prints each import line once, and
 reports a name it could not find on stderr rather than failing the batch — a
 misremembered name costs one line, not the other four lookups.
+
+`dt skill` prints the whole interface in 32 lines — the rules that are not
+guessable, and nothing else. It is meant to be read once by an agent instead of
+eleven `--help` screens, and `dt skill --install` drops it into
+`.claude/skills/discrtree/SKILL.md` so it is loaded only when it is needed. The
+text is compiled into the binary from that same file, so the printed copy and
+the shipped one cannot drift apart.
 
 ## An empty answer says which repair it needs
 

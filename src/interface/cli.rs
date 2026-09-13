@@ -46,6 +46,17 @@ pub enum Command {
         force: bool,
     },
 
+    /// Print the agent skill for this tool: the whole interface, in 30 lines.
+    ///
+    /// Written for a program rather than a person. `--install` writes it to
+    /// .claude/skills/discrtree/SKILL.md, where an agent loads it when it is
+    /// needed instead of carrying it in every prompt.
+    Skill {
+        /// Write it to .claude/skills/discrtree/SKILL.md instead of printing.
+        #[arg(long)]
+        install: bool,
+    },
+
     /// Dump a compiled source from the Lean environment into JSONL.
     Dump {
         /// Source name. All compiled sources when omitted.
@@ -133,7 +144,7 @@ pub enum Command {
         force: bool,
     },
 
-    /// Search: by shape, name, constants, module or text.
+    /// Search: by shape, name, constants, module or text
     ///
     /// A pattern is the shape of a statement, written the way it reads:
     ///

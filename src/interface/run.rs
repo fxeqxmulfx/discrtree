@@ -32,8 +32,10 @@ use std::path::PathBuf;
 pub fn run(cli: Cli) -> Result<()> {
     // `init` is the one command that runs without a configuration, since its
     // whole job is to write one.
-    if let Command::Init { force } = cli.command {
-        return init(cli.config.as_deref(), force);
+    match cli.command {
+        Command::Init { force } => return init(cli.config.as_deref(), force),
+        Command::Skill { install } => return skill(install),
+        _ => {}
     }
     let cfg = Config::load(cli.config.as_deref())?;
     let app = App { workspace: cfg.workspace(), files: files(&cfg), verbose: cli.verbose, cfg };
@@ -51,7 +53,7 @@ impl App {
     fn dispatch(&self, command: Command) -> Result<()> {
         match command {
             // Handled before the configuration is loaded.
-            Command::Init { .. } => Ok(()),
+            Command::Init { .. } | Command::Skill { .. } => Ok(()),
             Command::Dump { source, no_deps } => self.dump(source.as_deref(), !no_deps),
             Command::Scan { source } => self.scan(source.as_deref()),
             Command::Fetch { source } => self.fetch(source.as_deref()),
@@ -454,6 +456,24 @@ fn init(explicit: Option<&std::path::Path>, force: bool) -> Result<()> {
         "wrote {}\n\nNext: `dt dump` to read the Lean environment, then `dt index`.",
         path.display()
     );
+    Ok(())
+}
+
+/// The skill file, compiled in. One copy: what `dt skill` prints is the file
+/// this repository ships, so the two cannot drift apart.
+const SKILL: &str = include_str!("../../.claude/skills/discrtree/SKILL.md");
+
+/// An agent that has to read `--help` for eleven commands to find out what the
+/// tool does has spent more than the answer is worth. This is that, once.
+fn skill(install: bool) -> Result<()> {
+    if !install {
+        print!("{SKILL}");
+        return Ok(());
+    }
+    let path = PathBuf::from(".claude/skills/discrtree/SKILL.md");
+    std::fs::create_dir_all(path.parent().expect("the path has a parent"))?;
+    std::fs::write(&path, SKILL)?;
+    println!("wrote {}", path.display());
     Ok(())
 }
 
