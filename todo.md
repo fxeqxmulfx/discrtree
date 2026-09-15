@@ -722,3 +722,26 @@ something really is called `a` is the project where that is a typo.
 `dt find -v` now names what it read as a wildcard, which is where a rule this
 quiet belongs: the pattern is echoed as `conclusion LE.le, 2 argument(s),
 operator `≤`, `a`, `b` as `_``.
+
+Fixed in 0.16.0.  `→` is split off before anything else and never becomes a
+head symbol: what follows the last arrow is the conclusion and is parsed as
+the whole pattern used to be, and each hypothesis contributes its head symbol
+and its constants as `--uses`.  That is what a hypothesis can honestly say --
+it is in the type, so it is in `consts` -- and the shape is the conclusion's
+alone, which is how the index has always been keyed.  `Arrow` is gone from the
+notation table; nothing declares it, and no elaborated conclusion can be one.
+
+The same pattern needed two smaller things to work.  `⁻¹` is one token now
+(Rust calls `¹` numeric, so `b⁻¹` tokenized as `b` and an identifier `¹`) and
+maps to `Inv.inv`, and notation carries how loosely it binds, so the head
+symbol of a side is its loosest operator rather than its first: `a⁻¹ + b⁻¹` is
+an addition.  `->` reads as `→`, which a keyboard has.
+
+Verified against the real index:
+
+    $ dt find 'HasFDerivAt _ _ _ → HasFDerivAt _ _ _ → HasFDerivAt _ _ _' --text inner
+    HasFDerivAt.inner  theorem  Mathlib.Analysis.InnerProductSpace.Calculus
+    1 result(s)
+
+    $ dt find 'a ≤ b → b⁻¹ ≤ a⁻¹'
+    ENNReal.inv_le_inv'  ...  Filter.inv_le_inv  ...  inv_le_inv'  ...
