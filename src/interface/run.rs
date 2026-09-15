@@ -20,7 +20,7 @@ use crate::error::{Error, Result, bail};
 use crate::infrastructure::config::{self, Config, Source};
 use crate::infrastructure::git::Git;
 use crate::infrastructure::jsonl::{self, JsonlRepo};
-use crate::infrastructure::lake::{self, LakeElaborator, LakePackages};
+use crate::infrastructure::lake::{self, LakeBuild, LakeElaborator};
 use crate::infrastructure::project::{Files, Project};
 use crate::infrastructure::revision::{self, OnDisk};
 use crate::infrastructure::sqlite::SqliteIndex;
@@ -122,12 +122,12 @@ impl App {
     /// empty batch is still an error.
     fn show(&self, names: &[String], import_only: bool) -> Result<()> {
         let repo = self.repo()?;
-        let packages = LakePackages::read(&self.cfg);
+        let build = LakeBuild::read(&self.cfg);
         let show = Show {
             repo: repo.as_ref(),
             files: &self.files,
             workspace: &self.workspace,
-            packages: &packages,
+            build: &build,
         };
         let mut shown = Vec::new();
         let mut missed = Vec::new();
@@ -196,8 +196,8 @@ impl App {
             }
         }
         let repo = self.repo()?;
-        let packages = LakePackages::read(&self.cfg);
-        let hits = Find { repo: repo.as_ref(), packages: &packages }.run(&query)?;
+        let build = LakeBuild::read(&self.cfg);
+        let hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
         print!("{}", render::find(&hits, args.long));
         self.warn_stale(repo.as_ref(), hits.rows.iter().map(|d| d.source.clone()).collect());
         Ok(())
@@ -242,7 +242,7 @@ impl App {
         let report = Status {
             repo: self.repo()?.as_ref(),
             revisions: &revs,
-            packages: &LakePackages::read(&self.cfg),
+            build: &LakeBuild::read(&self.cfg),
             workspace: &self.workspace,
             now: now(),
         }

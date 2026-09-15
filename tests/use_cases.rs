@@ -8,7 +8,7 @@ mod support;
 use discrtree::application::add::Add;
 use discrtree::application::deps::{Deps, DepsResult};
 use discrtree::application::find::{Dup, Empty, Find};
-use discrtree::application::ports::{NoPackages, Workspace};
+use discrtree::application::ports::{Missing, NoBuild, Workspace};
 use discrtree::application::show::{Show, Source};
 use discrtree::application::status::Status;
 use discrtree::domain::decl::Span;
@@ -16,7 +16,7 @@ use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
 use std::path::PathBuf;
-use support::{FakeFiles, FakePackages, FakeRepo, FakeRevisions, FakeWriter, sources, theorem};
+use support::{FakeBuild, FakeFiles, FakeRepo, FakeRevisions, FakeWriter, sources, theorem};
 
 fn workspace() -> Workspace {
     Workspace {
@@ -65,7 +65,7 @@ fn files() -> FakeFiles {
 #[test]
 fn show_gives_the_import_that_actually_provides_the_declaration() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("Real.exp_le_exp"))
         .unwrap();
     assert_eq!(shown.import.as_deref(), Some("import Mathlib.Analysis.Exp"));
@@ -110,7 +110,7 @@ fn generated() -> (FakeRepo, FakeFiles) {
 fn show_names_the_declaration_a_generated_one_came_out_of() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("Finset.sum_image"))
         .unwrap();
     let Source::Generated { inside, .. } = &shown.source else {
@@ -127,7 +127,7 @@ fn show_names_the_declaration_a_generated_one_came_out_of() {
 fn show_walks_past_a_container_that_was_itself_generated() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("Hom.mk"))
         .unwrap();
     let Source::Generated { inside, .. } = &shown.source else {
@@ -144,7 +144,7 @@ fn show_walks_past_a_container_that_was_itself_generated() {
 fn show_still_answers_when_nothing_encloses_the_generated_lines() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("Eq.ge"))
         .unwrap();
     let Source::Generated { inside, head } = &shown.source else {
@@ -159,7 +159,7 @@ fn show_still_answers_when_nothing_encloses_the_generated_lines() {
 #[test]
 fn show_offers_no_import_for_a_source_that_cannot_be_imported() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("FLT.guessed"))
         .unwrap();
     assert!(shown.import.is_none(), "a text corpus is not on the import path");
@@ -168,7 +168,7 @@ fn show_offers_no_import_for_a_source_that_cannot_be_imported() {
 #[test]
 fn show_says_which_name_it_could_not_find() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let err = Show { repo: &repo, files: &files, workspace: &ws, packages: &NoPackages }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
         .run(&DeclName::new("No.such"))
         .unwrap_err()
         .to_string();
@@ -321,8 +321,7 @@ fn a_generated_declaration_is_vendored_as_the_one_that_generates_it() {
 #[test]
 fn find_refuses_a_query_that_constrains_nothing() {
     let repo = repo();
-    let err =
-        Find { repo: &repo, packages: &NoPackages }.run(&Query::new()).unwrap_err().to_string();
+    let err = Find { repo: &repo, build: &NoBuild }.run(&Query::new()).unwrap_err().to_string();
     assert!(err.contains("nothing to search for"), "got: {err}");
 }
 
@@ -332,7 +331,7 @@ fn find_returns_at_most_the_limit() {
     let mut q = Query::new();
     q.name = Some("o".into());
     q.limit = 1;
-    assert_eq!(Find { repo: &repo, packages: &NoPackages }.run(&q).unwrap().rows.len(), 1);
+    assert_eq!(Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().rows.len(), 1);
 }
 
 /// The two empty results need opposite repairs, so they must not read alike.
@@ -346,7 +345,7 @@ fn an_empty_search_says_which_condition_is_impossible() {
     let mut q = Query::new();
     q.name = Some("top".into());
     q.module = Some("Nowhere".into());
-    match (Find { repo: &repo, packages: &NoPackages }).run(&q).unwrap().empty {
+    match (Find { repo: &repo, build: &NoBuild }).run(&q).unwrap().empty {
         Some(Empty::Barren(c)) => assert_eq!(c, vec!["--in Nowhere".to_string()]),
         other => panic!("expected the module condition to be blamed, got {other:?}"),
     }
@@ -360,7 +359,7 @@ fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
     q.name = Some("top".into());
     q.module = Some("Mathlib.Analysis.Exp".into());
     assert_eq!(
-        Find { repo: &repo, packages: &NoPackages }.run(&q).unwrap().empty,
+        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
         Some(Empty::Combination)
     );
 }
@@ -372,10 +371,7 @@ fn a_single_condition_is_not_diagnosed() {
     let repo = repo();
     let mut q = Query::new();
     q.name = Some("zzz".into());
-    assert_eq!(
-        Find { repo: &repo, packages: &NoPackages }.run(&q).unwrap().empty,
-        Some(Empty::Plain)
-    );
+    assert_eq!(Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty, Some(Empty::Plain));
 }
 
 #[test]
@@ -383,7 +379,7 @@ fn a_search_that_matches_is_not_diagnosed_at_all() {
     let repo = repo();
     let mut q = Query::new();
     q.name = Some("top".into());
-    assert_eq!(Find { repo: &repo, packages: &NoPackages }.run(&q).unwrap().empty, None);
+    assert_eq!(Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty, None);
 }
 
 #[test]
@@ -411,14 +407,14 @@ fn dup_reports_a_local_declaration_upstream_already_has() {
 /// `.lake/packages`, which is the one thing this tool exists to prevent.
 #[test]
 fn a_prefix_from_an_unindexed_package_is_not_reported_as_a_bad_prefix() {
-    let (repo, packages) = (repo(), FakePackages::with(&[("batteries", "Batteries")]));
+    let (repo, build) = (repo(), FakeBuild::with(&[("batteries", "Batteries")]));
     let mut q = Query::new();
     q.name = Some("Balanced".into());
     q.module = Some("Batteries".into());
-    let find = Find { repo: &repo, packages: &packages };
+    let find = Find { repo: &repo, build: &build };
     match find.run(&q).unwrap().empty {
-        Some(Empty::NotIndexed { prefix, package }) => {
-            assert_eq!((prefix.as_str(), package.as_str()), ("Batteries", "batteries"));
+        Some(Empty::NotIndexed { prefix, missing: Missing::Package(pkg) }) => {
+            assert_eq!((prefix.as_str(), pkg.as_str()), ("Batteries", "batteries"));
         }
         other => panic!("expected the package to be named, got {other:?}"),
     }
@@ -428,11 +424,11 @@ fn a_prefix_from_an_unindexed_package_is_not_reported_as_a_bad_prefix() {
 /// opposite repair, and the two are indistinguishable from the index alone.
 #[test]
 fn a_prefix_inside_an_indexed_source_still_says_to_correct_it() {
-    let (repo, packages) = (repo(), FakePackages::with(&[("batteries", "Batteries")]));
+    let (repo, build) = (repo(), FakeBuild::with(&[("batteries", "Batteries")]));
     let mut q = Query::new();
     q.name = Some("exp_le_exp".into());
     q.module = Some("Mathlib.Nowhere".into());
-    let find = Find { repo: &repo, packages: &packages };
+    let find = Find { repo: &repo, build: &build };
     match find.run(&q).unwrap().empty {
         Some(Empty::Barren(c)) => assert!(c.contains(&"--in Mathlib.Nowhere".to_string()), "{c:?}"),
         other => panic!("expected a barren condition, got {other:?}"),
@@ -446,8 +442,8 @@ fn a_prefix_inside_an_indexed_source_still_says_to_correct_it() {
 #[test]
 fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let packages = FakePackages::with(&[("batteries", "Batteries")]);
-    let err = Show { repo: &repo, files: &files, workspace: &ws, packages: &packages }
+    let build = FakeBuild::with(&[("batteries", "Batteries")]);
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
         .run(&DeclName::new("Batteries.RBNode.Balanced"))
         .unwrap_err()
         .to_string();
@@ -455,7 +451,7 @@ fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
     assert!(!err.contains("try `dt find"), "the retry is the dead end: {err}");
 
     // A name that is simply not there keeps the advice that does work.
-    let err = Show { repo: &repo, files: &files, workspace: &ws, packages: &packages }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
         .run(&DeclName::new("Real.exp_nowhere"))
         .unwrap_err()
         .to_string();
@@ -468,25 +464,83 @@ fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
 fn status_names_the_packages_no_source_covers() {
     let (repo, ws) = (repo(), workspace());
     let revs = FakeRevisions::default();
-    let packages = FakePackages::with(&[("batteries", "Batteries"), ("aesop", "Aesop")]);
-    let report =
-        Status { repo: &repo, revisions: &revs, packages: &packages, workspace: &ws, now: 0 }
-            .run()
-            .unwrap();
+    let build = FakeBuild::with(&[("batteries", "Batteries"), ("aesop", "Aesop")]);
+    let report = Status { repo: &repo, revisions: &revs, build: &build, workspace: &ws, now: 0 }
+        .run()
+        .unwrap();
     let named: Vec<&str> = report.unindexed.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(named, ["batteries", "aesop"]);
     assert_eq!(report.sources.len(), 3, "the sources are still reported");
+}
+
+/// Core is the same failure as an unindexed package, one level down, and the
+/// package repair does not reach it: `Int.add_one_le_iff` is proved in
+/// `Init/Data/Int/Order.lean`, core is no lake package, and `--name
+/// add_one_le_iff` answers with ten `PNat`, `ENat` and `Cardinal` namesakes
+/// that read like a complete answer to a question it never searched.
+#[test]
+fn a_name_from_lean_core_says_so_rather_than_sending_the_reader_to_name_search() {
+    let (repo, files, ws) = (repo(), files(), workspace());
+    let build = FakeBuild::with(&[]).without_core();
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+        .run(&DeclName::new("Int.add_one_le_iff"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Lean core"), "{err}");
+    assert!(err.contains("`Int`"), "the namespace that is core's, not the whole name: {err}");
+    assert!(!err.contains("try `dt find"), "the retry cannot reach a corpus nobody dumped: {err}");
+
+    // And a namespace core does not own keeps the advice that works. The list
+    // is narrow on purpose: an explanation that fits every missing name
+    // explains nothing.
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+        .run(&DeclName::new("Real.exp_nowhere"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("try `dt find --name exp_nowhere`"), "{err}");
+}
+
+/// The module roots and the namespaces are different lists, and `--in` is asked
+/// with the first: `Int.add_one_le_iff` lives in `Init.Data.Int.Order`.
+#[test]
+fn a_module_prefix_from_lean_core_names_core_and_not_a_bad_prefix() {
+    let (repo, build) = (repo(), FakeBuild::with(&[]).without_core());
+    let mut q = Query::new();
+    q.name = Some("add_one_le_iff".into());
+    q.module = Some("Init.Data.Int".into());
+    let find = Find { repo: &repo, build: &build };
+    match find.run(&q).unwrap().empty {
+        Some(Empty::NotIndexed { prefix, missing: Missing::Core(tc) }) => {
+            assert_eq!(prefix, "Init.Data.Int");
+            assert_eq!(tc, "leanprover/lean4:v4.33.1");
+        }
+        other => panic!("expected core to be named, got {other:?}"),
+    }
+}
+
+/// Where a reader looks when an answer seems thin, and the one corpus that
+/// cannot appear in the table above it: nothing was ever dumped to count.
+#[test]
+fn status_names_the_toolchain_whose_core_is_not_indexed() {
+    let (repo, ws) = (repo(), workspace());
+    let revs = FakeRevisions::default();
+    let build = FakeBuild::with(&[]).without_core();
+    let report = Status { repo: &repo, revisions: &revs, build: &build, workspace: &ws, now: 0 }
+        .run()
+        .unwrap();
+    let tc = report.toolchain.expect("the toolchain reaches the report");
+    assert_eq!(tc.name, "leanprover/lean4:v4.33.1");
+    assert!(!tc.indexed);
 }
 
 #[test]
 fn status_shows_a_configured_source_that_has_nothing_indexed() {
     let (repo, ws) = (repo(), workspace());
     let revs = FakeRevisions::default();
-    let rows =
-        Status { repo: &repo, revisions: &revs, packages: &NoPackages, workspace: &ws, now: 0 }
-            .run()
-            .unwrap()
-            .sources;
+    let rows = Status { repo: &repo, revisions: &revs, build: &NoBuild, workspace: &ws, now: 0 }
+        .run()
+        .unwrap()
+        .sources;
     assert_eq!(rows.len(), 3);
     let mathlib = rows.iter().find(|r| r.name == "mathlib").unwrap();
     assert!(mathlib.elaborated && mathlib.importable);
@@ -503,11 +557,10 @@ fn status_shows_a_configured_source_that_has_nothing_indexed() {
 fn status_reports_a_source_the_checkout_has_moved_past() {
     let (repo, ws) = (repo(), workspace());
     let revs = FakeRevisions::at(&[("mathlib", "bbbbbbb"), ("flt", "ccccccc")]);
-    let rows =
-        Status { repo: &repo, revisions: &revs, packages: &NoPackages, workspace: &ws, now: 0 }
-            .run()
-            .unwrap()
-            .sources;
+    let rows = Status { repo: &repo, revisions: &revs, build: &NoBuild, workspace: &ws, now: 0 }
+        .run()
+        .unwrap()
+        .sources;
     // The fake repo remembers nothing, so nothing can be behind anything.
     assert!(!rows.iter().any(|r| r.stale()), "nothing recorded cannot be stale");
     assert_eq!(

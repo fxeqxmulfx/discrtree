@@ -229,3 +229,102 @@ nothing or a page of Mathlib near-misses that read like an answer.
 What is still not done is the third repair the entry rules out, and for the
 reason it gives: adding a source is the reader's call. A tool that guessed
 would dump gigabytes nobody asked for.
+
+## Lean core is not a source, and nothing says so
+
+Found 2026-09-15, dt 0.6.0, on a Lean project of my own. Fixed 2026-09-15 in
+dt 0.7.0.
+
+`Int.add_one_le_iff` is `theorem add_one_le_iff {a b : Int} : a + 1 ≤ b ↔ a < b`
+in `Init/Data/Int/Order.lean` of the toolchain itself. Asked for it:
+
+    $ dt show Int.add_one_le_iff
+    dt: Int.add_one_le_iff is not in the index; try `dt find --name add_one_le_iff`
+
+    $ dt find --name add_one_le_iff
+    PNat.add_one_le_iff / ENat.add_one_le_iff / Cardinal.natCast_add_one_le_iff / ...
+    10 shown, more match; refine or --limit
+
+Ten near-misses over `PNat`, `ENat`, `Cardinal` and `Ordinal`, and the `Int` one
+is not among them at any `--limit`, because it was never dumped. The same
+happens for `Int.emod_emod_of_dvd` (`no match`) and for every other `Int`, `Nat`,
+`List` or `Array` lemma that core proves and Mathlib only uses.
+
+This is the entry above -- "The other lake packages are not indexed, and nothing
+says so" -- one level down, and the repair it shipped does not reach here. That
+repair traces an unfound prefix back to a *lake package* listed by `dt status`.
+Core is not a lake package and `dt status` does not list it at all, so
+`Int.add_one_le_iff` falls through to the generic suggestion, which from a
+corpus that never held it returns the page of Mathlib namesakes above -- the
+failure that entry set out to remove, reached by the one route it does not
+cover.
+
+Two things to do, and the second is the one that matters:
+
+* `dt status` should name the toolchain the index was built against and say
+  whether its `Init`/`Std` were dumped, the way it names the lake packages that
+  were not. A reader who sees `core: not indexed` stops trusting a `no match`
+  under `Int.`, `Nat.`, `List.` or `Array.` and greps; a reader who sees nothing
+  concludes the lemma does not exist.
+* A missing name whose root namespace is one core owns (`Int`, `Nat`, `List`,
+  `Array`, `Option`, `String`, `Fin`, `BitVec`, ...) should say so, exactly as an
+  unindexed package's prefix now does, rather than suggesting `--name`.
+
+Adding core as a source is a third thing and, like adding a lake package, the
+reader's call: `~/.elan/toolchains/<tc>/lib/lean/library` is dumpable and the
+declarations are elaborated, but nobody asked for them. Saying they are absent
+costs nothing and is what the two sessions that hit this actually needed.
+
+Both are in, and the second took a list rather than a directory walk. A lake
+package announces itself by sitting under `.lake/packages`, so what it provides
+can be read off disk; core ships inside the toolchain, and the modules that
+would say what it declares are exactly the ones nobody dumped. So it is written
+down in `domain/lean_core.rs`, as two lists that are deliberately not the same
+one:
+
+* `ROOTS` -- `Init`, `Std`, `Lean` -- what a source would have to import, and
+  what `--in` is asked with.
+* `NAMESPACES` -- `Int`, `Nat`, `List`, `Array`, ... -- what a declaration name
+  starts with.
+
+`Int.add_one_le_iff` is declared in module `Init.Data.Int.Order`, so the module
+root is `Init` and the namespace root is `Int`, neither derives from the other,
+and a name is all `dt show` has to go on. The namespace list is held to the
+types core defines and proves about; `Function` and `Set`, which both libraries
+declare in heavily, are left out, because an explanation that fits every missing
+name explains nothing.
+
+`dt status` now names the toolchain in its header either way, and calls out an
+absent core beside the packages:
+
+    index: .lake/discrtree/index.db
+    toolchain: leanprover/lean4:v4.33.1
+    ...
+    not indexed: Lean core (leanprover/lean4:v4.33.1)
+      -- Init, Std, Lean live in the toolchain, not under `.lake/packages`; a
+         `no match` under `Int.`, `Nat.`, `List.` or `Array.` is often theirs
+
+"Core is indexed" is printed too, because it answers "why did that not match"
+as squarely as its opposite. Whether it is indexed is decided by what a source
+imports rather than by where it points: a dump of core has to say `import
+Init`, while the path may be elan, a source tarball or a checkout of lean4.
+
+The claim `dt show` makes is weaker than the one it makes for a package, and
+deliberately:
+
+    dt: Int.add_one_le_iff is not in the index, and `Int` is a namespace Lean
+    core declares in; core (leanprover/lean4:v4.33.1) is not a source of this
+    index, so `--name` cannot reach it either
+
+A package owns a directory and its namespace is its own; `Int` is a namespace
+core and Mathlib both declare in, so the honest claim is about the namespace and
+not about the declaration. That is enough to stop a reader concluding the lemma
+does not exist, which is the whole failure. Neither message offers a `dt dump`
+line, because core is no directory a source can be pointed at in one line, and a
+command that does not work is worse than none.
+
+The port grew to fit: `Packages` is now `Build` -- what the build can import, as
+against what the index holds -- with `unindexed()` for the packages,
+`toolchain()` for core, and the two questions separated, `module(prefix)` and
+`declaring(name)`, because for a package they have the same answer and for core
+they do not.

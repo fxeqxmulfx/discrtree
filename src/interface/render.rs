@@ -7,9 +7,11 @@
 use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
 use crate::application::find::{Duplicate, Empty, Hits};
+use crate::application::ports::Missing;
 use crate::application::show::{Shown, Source};
 use crate::application::status::{Report, SourceStatus};
 use crate::domain::decl::Decl;
+use crate::domain::lean_core;
 use std::collections::BTreeMap;
 
 /// The marker every text row carries.
@@ -45,10 +47,18 @@ pub fn find(hits: &Hits, long: bool) -> String {
             }
             // Not "matches nothing on its own", which would be true and would
             // send the reader to correct a prefix that is already correct.
-            Some(Empty::NotIndexed { prefix, package }) => format!(
-                "no match: `{prefix}` is in the lake package `{package}`, which is not a source \
-                 of this index; add it to discrtree.toml and re-run `dt dump {package}` and \
+            Some(Empty::NotIndexed { prefix, missing: Missing::Package(pkg) }) => format!(
+                "no match: `{prefix}` is in the lake package `{pkg}`, which is not a source \
+                 of this index; add it to discrtree.toml and re-run `dt dump {pkg}` and \
                  `dt index`\n"
+            ),
+            // No `dt dump` line to offer: core is not a directory under
+            // `.lake/packages` that a source can be pointed at in one line, and
+            // printing a command that does not work is worse than printing
+            // none. `dt status` has the toolchain and the reader has the call.
+            Some(Empty::NotIndexed { prefix, missing: Missing::Core(tc) }) => format!(
+                "no match: `{prefix}` is a module of Lean core ({tc}), which is not a source \
+                 of this index\n"
             ),
             _ => "no match\n".into(),
         };
@@ -306,7 +316,11 @@ pub fn add(r: &AddReport, written: bool) -> String {
 
 pub fn status(report: &Report, db: &std::path::Path) -> String {
     let rows = &report.sources;
-    let mut out = format!("index: {}\n\n", db.display());
+    let mut out = format!("index: {}\n", db.display());
+    if let Some(tc) = &report.toolchain {
+        out.push_str(&format!("toolchain: {}\n", tc.name));
+    }
+    out.push('\n');
     // No width on the last column. It is the one that varies, and padding it
     // buys nothing but trailing spaces on every row of every run.
     out.push_str(&format!(
@@ -365,6 +379,21 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
             "\nnot indexed: {}\n  — lake packages the build resolved; \
              add one as a `lake` source to search it\n",
             names.join(", ")
+        ));
+    }
+    // And the corpus under all of them. Core has no directory to be listed
+    // from, which is exactly why it has to be said out loud: a reader who sees
+    // nothing here reads `no match` on an `Int` lemma as proof that nobody has
+    // proved it, and the lemma is in `Init/Data/Int/Order.lean`.
+    if let Some(tc) = &report.toolchain
+        && !tc.indexed
+    {
+        out.push_str(&format!(
+            "\nnot indexed: Lean core ({})\n  — {} live in the toolchain, not under \
+             `.lake/packages`; a `no match` under `Int.`, `Nat.`, `List.` or `Array.` \
+             is often theirs\n",
+            tc.name,
+            lean_core::ROOTS.join(", "),
         ));
     }
     out
@@ -485,7 +514,7 @@ mod tests {
 
     /// A status report of these sources and no unindexed packages.
     fn report(sources: &[SourceStatus]) -> Report {
-        Report { sources: sources.to_vec(), unindexed: Vec::new() }
+        Report { sources: sources.to_vec(), unindexed: Vec::new(), toolchain: None }
     }
 
     fn behind(
@@ -537,7 +566,11 @@ mod tests {
         use crate::application::ports::Package;
         let pkg = |n: &str| Package { name: n.into(), roots: vec![n.to_uppercase()] };
         let r = status(
-            &Report { sources: Vec::new(), unindexed: vec![pkg("batteries"), pkg("aesop")] },
+            &Report {
+                sources: Vec::new(),
+                unindexed: vec![pkg("batteries"), pkg("aesop")],
+                toolchain: None,
+            },
             std::path::Path::new("/p/index.db"),
         );
         assert!(r.contains("not indexed: batteries, aesop"), "{r}");
@@ -553,12 +586,57 @@ mod tests {
     fn an_empty_result_from_an_unindexed_package_names_the_package() {
         let empty = |e: Empty| Hits { rows: Vec::new(), truncated: false, empty: Some(e) };
         let r = find(
-            &empty(Empty::NotIndexed { prefix: "Batteries".into(), package: "batteries".into() }),
+            &empty(Empty::NotIndexed {
+                prefix: "Batteries".into(),
+                missing: Missing::Package("batteries".into()),
+            }),
             false,
         );
         assert!(r.contains("lake package `batteries`"), "{r}");
         assert!(r.contains("not a source"), "{r}");
         assert!(!r.contains("matches nothing"), "that is the wrong repair: {r}");
+    }
+
+    /// Core has no directory to be listed from, which is why the line has to
+    /// exist at all: without it a reader sees a table of fresh sources and
+    /// concludes the search covered everything importable.
+    #[test]
+    fn an_unindexed_core_is_named_in_the_report_and_an_indexed_one_is_not() {
+        use crate::application::ports::Toolchain;
+        let with = |indexed: bool| Report {
+            sources: Vec::new(),
+            unindexed: Vec::new(),
+            toolchain: Some(Toolchain { name: "leanprover/lean4:v4.33.1".into(), indexed }),
+        };
+        let db = std::path::Path::new("/p/index.db");
+        let r = status(&with(false), db);
+        assert!(r.contains("toolchain: leanprover/lean4:v4.33.1"), "named either way: {r}");
+        assert!(r.contains("not indexed: Lean core"), "{r}");
+        assert!(r.contains("Init"), "the roots a source would have to import: {r}");
+
+        let r = status(&with(true), db);
+        assert!(r.contains("toolchain: leanprover/lean4:v4.33.1"), "{r}");
+        assert!(!r.contains("not indexed"), "nothing to repair, nothing to print: {r}");
+    }
+
+    /// No `dt dump` line here: core is not a directory a source can be pointed
+    /// at in one line, and a command that does not work is worse than none.
+    #[test]
+    fn an_empty_result_from_core_names_the_toolchain() {
+        let r = find(
+            &Hits {
+                rows: Vec::new(),
+                truncated: false,
+                empty: Some(Empty::NotIndexed {
+                    prefix: "Init.Data.Int".into(),
+                    missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
+                }),
+            },
+            false,
+        );
+        assert!(r.contains("Lean core (leanprover/lean4:v4.33.1)"), "{r}");
+        assert!(!r.contains("matches nothing"), "that is the wrong repair: {r}");
+        assert!(!r.contains("dt dump"), "there is no one-line dump to offer: {r}");
     }
 
     #[test]

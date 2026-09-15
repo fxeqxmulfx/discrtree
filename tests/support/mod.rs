@@ -224,11 +224,14 @@ impl discrtree::application::ports::Revisions for FakeRevisions {
 
 /// A build carrying packages no source covers. `("batteries", "Batteries")` is
 /// a package directory and the library root it provides.
-pub struct FakePackages(pub Vec<discrtree::application::ports::Package>);
+pub struct FakeBuild(
+    pub Vec<discrtree::application::ports::Package>,
+    pub Option<discrtree::application::ports::Toolchain>,
+);
 
-impl FakePackages {
-    pub fn with(pairs: &[(&str, &str)]) -> FakePackages {
-        FakePackages(
+impl FakeBuild {
+    pub fn with(pairs: &[(&str, &str)]) -> FakeBuild {
+        FakeBuild(
             pairs
                 .iter()
                 .map(|(name, root)| discrtree::application::ports::Package {
@@ -236,12 +239,29 @@ impl FakePackages {
                     roots: vec![root.to_string()],
                 })
                 .collect(),
+            None,
         )
     }
 }
 
-impl discrtree::application::ports::Packages for FakePackages {
+impl FakeBuild {
+    /// The same build, with core absent from the index. `None` is a project
+    /// that pins no toolchain, which is every test that is not about core.
+    pub fn without_core(mut self) -> FakeBuild {
+        self.1 = Some(discrtree::application::ports::Toolchain {
+            name: "leanprover/lean4:v4.33.1".into(),
+            indexed: false,
+        });
+        self
+    }
+}
+
+impl discrtree::application::ports::Build for FakeBuild {
     fn unindexed(&self) -> Vec<discrtree::application::ports::Package> {
         self.0.clone()
+    }
+
+    fn toolchain(&self) -> Option<discrtree::application::ports::Toolchain> {
+        self.1.clone()
     }
 }

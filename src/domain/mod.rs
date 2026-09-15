@@ -3,6 +3,7 @@
 
 pub mod closure;
 pub mod decl;
+pub mod lean_core;
 pub mod lean_text;
 pub mod name;
 pub mod pattern;

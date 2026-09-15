@@ -6,7 +6,8 @@
 //! of the Rust side's knowledge of it: splice the right imports into
 //! `lean/dump.lean`, set four environment variables, run `lake env lean`.
 
-use crate::application::ports::{DumpSpec, Elaborator, Package, Packages};
+use crate::application::ports::{Build, DumpSpec, Elaborator, Package, Toolchain};
+use crate::domain::lean_core;
 use crate::error::{Error, Result, bail};
 use crate::infrastructure::config::Config;
 use std::path::{Path, PathBuf};
@@ -99,27 +100,51 @@ pub const PACKAGES: &str = ".lake/packages";
 /// the manifest says what was resolved, the directory holds what was actually
 /// fetched and built, and an `import` line resolves against the second of
 /// those. A package listed but never fetched is not a corpus anyone is missing.
-pub struct LakePackages {
+pub struct LakeBuild {
     dir: PathBuf,
     /// The package directories the configured sources point at, canonical, so
     /// that `.lake/packages/mathlib` and `./.lake/packages/mathlib` are one
     /// directory rather than two.
     indexed: Vec<PathBuf>,
+    toolchain: Option<Toolchain>,
 }
 
-impl LakePackages {
-    pub fn read(cfg: &Config) -> LakePackages {
+impl LakeBuild {
+    pub fn read(cfg: &Config) -> LakeBuild {
         let indexed = cfg
             .sources
             .iter()
             .filter_map(|s| s.path.as_ref())
             .map(|p| real(&cfg.resolve(p)))
             .collect();
-        LakePackages { dir: cfg.root().join(PACKAGES), indexed }
+        LakeBuild { dir: cfg.root().join(PACKAGES), indexed, toolchain: toolchain(cfg) }
     }
 }
 
-impl Packages for LakePackages {
+/// The file a lake project pins its toolchain in, one line, at the project
+/// root.
+pub const TOOLCHAIN: &str = "lean-toolchain";
+
+/// Which toolchain the project builds against, and whether its library is
+/// indexed.
+///
+/// A source covers core when it imports one of core's roots — that is what a
+/// dump of core would have to say, and it is a surer signal than the path,
+/// which may point into elan, into a source tarball, or at a checkout of
+/// lean4. A project with no `lean-toolchain` is not one this can speak about,
+/// and says nothing rather than guessing.
+fn toolchain(cfg: &Config) -> Option<Toolchain> {
+    let name = std::fs::read_to_string(cfg.root().join(TOOLCHAIN)).ok()?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let indexed =
+        cfg.sources.iter().filter_map(|s| s.root.as_deref()).any(|r| lean_core::ROOTS.contains(&r));
+    Some(Toolchain { name: name.to_owned(), indexed })
+}
+
+impl Build for LakeBuild {
     fn unindexed(&self) -> Vec<Package> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else { return Vec::new() };
         let mut out: Vec<Package> = entries
@@ -138,6 +163,10 @@ impl Packages for LakePackages {
         // would put every capitalized package in its own block.
         out.sort_by_key(|p| p.name.to_lowercase());
         out
+    }
+
+    fn toolchain(&self) -> Option<Toolchain> {
+        self.toolchain.clone()
     }
 }
 
@@ -182,6 +211,7 @@ pub fn is_lake_project(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ports::Missing;
 
     #[test]
     fn the_shipped_script_still_has_its_markers() {
@@ -218,7 +248,12 @@ mod tests {
             std::fs::create_dir_all(dir.join(lib)).unwrap();
             std::fs::write(dir.join(format!("{lib}.lean")), "").unwrap();
         }
-        let text = r#"
+        Config::parse(CONFIG, &root).unwrap()
+    }
+
+    /// Mathlib configured, batteries resolved and not, and nothing that imports
+    /// a root of core.
+    const CONFIG: &str = r#"
 [project]
 root = "."
 src = "src"
@@ -238,13 +273,11 @@ kind = "lake"
 path = ".lake/packages/mathlib"
 root = "Mathlib"
 "#;
-        Config::parse(text, &root).unwrap()
-    }
 
     #[test]
     fn a_configured_package_is_not_reported_and_the_rest_are() {
         let cfg = project("dt-packages-listed");
-        let found = LakePackages::read(&cfg).unindexed();
+        let found = LakeBuild::read(&cfg).unindexed();
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].name, "batteries");
         assert_eq!(found[0].roots, vec!["Batteries".to_string()]);
@@ -256,10 +289,10 @@ root = "Mathlib"
         // while the directory walk produces `<base>/.lake/packages/x`. Comparing
         // them as written would report Mathlib itself as unindexed.
         let cfg = project("dt-packages-dot");
-        assert!(LakePackages::read(&cfg).providing("Mathlib.Analysis").is_none());
+        assert!(LakeBuild::read(&cfg).module("Mathlib.Analysis").is_none());
         assert_eq!(
-            LakePackages::read(&cfg).providing("Batteries.Data.RBMap").unwrap().name,
-            "batteries"
+            LakeBuild::read(&cfg).module("Batteries.Data.RBMap"),
+            Some(Missing::Package("batteries".into()))
         );
     }
 
@@ -274,7 +307,46 @@ root = "Mathlib"
             &root,
         )
         .unwrap();
-        assert!(LakePackages::read(&cfg).unindexed().is_empty());
+        assert!(LakeBuild::read(&cfg).unindexed().is_empty());
+    }
+
+    /// The toolchain is read off the file the project pins it in, and "core is
+    /// indexed" off what a source imports rather than where it points: a dump
+    /// of core has to say `import Init`, while the path may be elan, a source
+    /// tarball or a checkout of lean4.
+    #[test]
+    fn the_toolchain_is_named_and_an_unindexed_core_is_reported_as_such() {
+        let cfg = project("dt-core-toolchain");
+        std::fs::write(cfg.root().join(TOOLCHAIN), "leanprover/lean4:v4.33.1\n").unwrap();
+        let tc = LakeBuild::read(&cfg).toolchain().expect("the file is there");
+        assert_eq!(tc.name, "leanprover/lean4:v4.33.1");
+        assert!(!tc.indexed, "no source imports Init");
+        assert_eq!(
+            LakeBuild::read(&cfg).declaring("Int.add_one_le_iff"),
+            Some(Missing::Core("leanprover/lean4:v4.33.1".into()))
+        );
+    }
+
+    #[test]
+    fn a_source_that_imports_a_core_root_is_core_indexed() {
+        let cfg = project("dt-core-indexed");
+        std::fs::write(cfg.root().join(TOOLCHAIN), "leanprover/lean4:v4.33.1\n").unwrap();
+        let with_core = format!(
+            "{CONFIG}\n[[source]]\nname = \"core\"\nkind = \"lake\"\n\
+             path = \".lake/packages/nowhere\"\nroot = \"Init\"\n"
+        );
+        let cfg = Config::parse(&with_core, &cfg.root()).unwrap();
+        assert!(LakeBuild::read(&cfg).toolchain().unwrap().indexed);
+        assert!(LakeBuild::read(&cfg).declaring("Int.add_one_le_iff").is_none());
+    }
+
+    /// A project that pins no toolchain is not one this can speak about, and
+    /// says nothing rather than guessing.
+    #[test]
+    fn no_toolchain_file_means_no_claim_about_core() {
+        let cfg = project("dt-core-unpinned");
+        assert!(LakeBuild::read(&cfg).toolchain().is_none());
+        assert!(LakeBuild::read(&cfg).declaring("Int.add_one_le_iff").is_none());
     }
 
     #[test]

@@ -171,7 +171,16 @@ correctly and there is nothing to drop. It is the index that is smaller than
 the build, and the repair is a source, not a flag. `dt show` answers a missing
 name the same way rather than with `try dt find --name`, which from an unindexed
 corpus can only return the same nothing or a page of Mathlib near-misses that
-read like an answer.
+read like an answer. The toolchain's own library answers there too, with a
+weaker claim and no `dt dump` line, because core is no directory a source can be
+pointed at in one line:
+
+```
+$ dt show Int.add_one_le_iff
+dt: Int.add_one_le_iff is not in the index, and `Int` is a namespace Lean core
+    declares in; core (leanprover/lean4:v4.33.1) is not a source of this index,
+    so `--name` cannot reach it either
+```
 
 Two asks are refused outright rather than answered with an empty result, because
 a closed set can name what was meant and a contradiction is not an absence:
@@ -360,6 +369,30 @@ readable without running Lake — half of these declare their libraries in
 Naming them is the whole repair. Which ones are worth a dump is the reader's
 call: Batteries is a minute and a useful corpus, and a tool that decided for
 them would be spending an hour on packages nobody searches.
+
+Under all of them is the corpus with no directory to be listed from at all.
+`Int.add_one_le_iff` is proved in `Init/Data/Int/Order.lean` of the toolchain
+itself, so `--name add_one_le_iff` answers with ten `PNat`, `ENat` and `Cardinal`
+namesakes and none of them is the one, at any `--limit`. The toolchain is
+therefore named either way, and called out when its library is absent:
+
+```
+index: .lake/discrtree/index.db
+toolchain: leanprover/lean4:v4.33.1
+...
+not indexed: Lean core (leanprover/lean4:v4.33.1)
+  — Init, Std, Lean live in the toolchain, not under `.lake/packages`; a `no match`
+    under `Int.`, `Nat.`, `List.` or `Array.` is often theirs
+```
+
+What core provides cannot be walked — the modules that would say are exactly the
+ones nobody dumped — so it is written down in `domain/lean_core.rs` instead, as
+two lists that are deliberately not the same one. `Int.add_one_le_iff` is
+declared in module `Init.Data.Int.Order`: the module root is `Init` and the
+namespace root is `Int`, neither derives from the other, and a name is all
+`dt show` has to go on. The namespace list is held to the types core defines and
+proves about; namespaces the two libraries share heavily (`Function`, `Set`) are
+left out, because an explanation that fits every missing name explains nothing.
 
 ## The dump runs on every core
 

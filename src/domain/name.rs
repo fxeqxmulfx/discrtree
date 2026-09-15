@@ -27,6 +27,13 @@ impl DeclName {
         self.0.rsplit_once('.').map(|(ns, _)| ns)
     }
 
+    /// `Mathlib.Order.Filter.Basic.foo` → `Mathlib`, and a name with no
+    /// namespace at all → itself. The outermost namespace rather than the
+    /// innermost, because that is the part a corpus owns.
+    pub fn namespace_root(&self) -> &str {
+        self.0.split_once('.').map_or(&self.0, |(root, _)| root)
+    }
+
     /// `Real.exp_le_exp` → `exp_le_exp`.
     pub fn base(&self) -> &str {
         self.0.rsplit_once('.').map_or(&self.0, |(_, b)| b)

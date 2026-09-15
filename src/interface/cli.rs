@@ -103,8 +103,10 @@ pub enum Command {
     /// its build, so a module compiled since the last dump shows up here too.
     ///
     /// The lake packages the build resolved that no source covers are listed
-    /// last. Every declaration in them is importable from the project and in no
-    /// search, which is the one gap the index cannot report on its own.
+    /// last, and under them the toolchain, whose `Init` and `Std` are a corpus
+    /// with no directory to be listed from at all. Every declaration in either
+    /// is importable from the project and in no search, which is the one gap
+    /// the index cannot report on its own.
     Status,
 
     /// Print a declaration and the import line that provides it.

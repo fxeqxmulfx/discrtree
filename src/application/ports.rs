@@ -2,6 +2,7 @@
 //! of them has a test double in `tests/`.
 
 use crate::domain::decl::Decl;
+use crate::domain::lean_core;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::{SourceId, SourceMeta, Sources};
@@ -99,23 +100,82 @@ pub struct Package {
     pub roots: Vec<String>,
 }
 
-/// The packages a build resolved that no source covers.
+/// The Lean toolchain the project builds against, and whether its own library
+/// is in the index.
+///
+/// Core is a corpus like the packages are, and the one that cannot be walked:
+/// `Init` and `Std` ship inside the toolchain, and the modules that would say
+/// what they declare are exactly the ones nobody dumped. So what it provides is
+/// written down in [`lean_core`](crate::domain::lean_core) and all that is read
+/// from disk is which toolchain, and whether a source covers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toolchain {
+    /// As `lean-toolchain` spells it, e.g. `leanprover/lean4:v4.33.1`.
+    pub name: String,
+    /// Whether a configured source imports one of core's roots.
+    pub indexed: bool,
+}
+
+/// A corpus the build can import that the index does not cover.
+///
+/// Two of them, and they are named apart because the repair is not the same
+/// sentence: a package is a directory that is already on the machine, and core
+/// is inside the toolchain. Telling a reader to `dt dump batteries` when what
+/// is missing is `Int.add_one_le_iff` would send them to the wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Missing {
+    /// A lake package, by its directory name under `.lake/packages`.
+    Package(String),
+    /// The toolchain's own library, by the toolchain's name.
+    Core(String),
+}
+
+/// What the build can import, as against what the index holds.
 ///
 /// A `discrtree.toml` names Mathlib and stops there, and everything Mathlib is
-/// built on — batteries, aesop, Qq — is then importable from the project and
-/// absent from every search. No question asked of the index can discover that:
-/// a corpus that was never dumped leaves nothing behind to find. The directory
-/// the build resolved is the only evidence there is.
-pub trait Packages {
+/// built on — batteries, aesop, Qq, and under all of them core itself — is then
+/// importable from the project and absent from every search. No question asked
+/// of the index can discover that: a corpus that was never dumped leaves
+/// nothing behind to find. What the build resolved is the only evidence there
+/// is.
+pub trait Build {
     /// Every resolved package that no configured source points at.
     fn unindexed(&self) -> Vec<Package>;
 
-    /// The unindexed package that provides this module prefix or declaration
-    /// name, if one does. `Batteries.RBNode.Balanced` comes back as `batteries`
-    /// whether it was asked for as a name or as an `--in` prefix, because the
-    /// answer to both is the same missing source.
-    fn providing(&self, prefix: &str) -> Option<Package> {
+    /// The toolchain the project pins, when it pins one.
+    fn toolchain(&self) -> Option<Toolchain> {
+        None
+    }
+
+    /// The unindexed corpus that provides this module prefix, if one does.
+    fn module(&self, prefix: &str) -> Option<Missing> {
+        if let Some(p) = self.package(prefix) {
+            return Some(Missing::Package(p.name));
+        }
+        self.absent_core().filter(|_| lean_core::has_module(prefix)).map(Missing::Core)
+    }
+
+    /// The unindexed corpus that declares in this name's namespace, if one
+    /// does. `Batteries.RBNode.Balanced` comes back as the package `batteries`
+    /// and `Int.add_one_le_iff` as core, because the answer to both is a source
+    /// that was never added.
+    fn declaring(&self, name: &str) -> Option<Missing> {
+        if let Some(p) = self.package(name) {
+            return Some(Missing::Package(p.name));
+        }
+        self.absent_core().filter(|_| lean_core::declares(name)).map(Missing::Core)
+    }
+
+    /// The unindexed package whose library root this sits under. A package's
+    /// module prefix and its namespace are the same string, so one lookup
+    /// answers for both.
+    fn package(&self, prefix: &str) -> Option<Package> {
         self.unindexed().into_iter().find(|p| p.roots.iter().any(|r| under(r, prefix)))
+    }
+
+    /// The toolchain, and only when its library is not in the index.
+    fn absent_core(&self) -> Option<String> {
+        self.toolchain().filter(|t| !t.indexed).map(|t| t.name)
     }
 }
 
@@ -126,10 +186,10 @@ fn under(root: &str, prefix: &str) -> bool {
 }
 
 /// A build with nothing beside its sources: a project that is not a lake
-/// project at all, and every test that is not about packages.
-pub struct NoPackages;
+/// project at all, and every test that is not about what is missing.
+pub struct NoBuild;
 
-impl Packages for NoPackages {
+impl Build for NoBuild {
     fn unindexed(&self) -> Vec<Package> {
         Vec::new()
     }
@@ -213,25 +273,39 @@ impl Workspace {
 mod tests {
     use super::*;
 
-    struct Build(Vec<Package>);
-    impl Packages for Build {
+    struct Resolved {
+        packages: Vec<Package>,
+        toolchain: Option<Toolchain>,
+    }
+
+    impl Build for Resolved {
         fn unindexed(&self) -> Vec<Package> {
-            self.0.clone()
+            self.packages.clone()
+        }
+        fn toolchain(&self) -> Option<Toolchain> {
+            self.toolchain.clone()
         }
     }
 
-    fn build() -> Build {
-        Build(vec![
-            Package { name: "batteries".into(), roots: vec!["Batteries".into()] },
-            Package { name: "importGraph".into(), roots: vec!["ImportGraph".into()] },
-        ])
+    fn build(core_indexed: bool) -> Resolved {
+        Resolved {
+            packages: vec![
+                Package { name: "batteries".into(), roots: vec!["Batteries".into()] },
+                Package { name: "importGraph".into(), roots: vec!["ImportGraph".into()] },
+            ],
+            toolchain: Some(Toolchain {
+                name: "leanprover/lean4:v4.33.1".into(),
+                indexed: core_indexed,
+            }),
+        }
     }
 
     #[test]
     fn a_prefix_is_traced_to_the_package_that_provides_it() {
-        assert_eq!(build().providing("Batteries").unwrap().name, "batteries");
-        assert_eq!(build().providing("Batteries.Data.RBMap").unwrap().name, "batteries");
-        assert_eq!(build().providing("ImportGraph.Cli").unwrap().name, "importGraph");
+        let b = build(true);
+        assert_eq!(b.module("Batteries"), Some(Missing::Package("batteries".into())));
+        assert_eq!(b.declaring("Batteries.Data.RBMap"), Some(Missing::Package("batteries".into())));
+        assert_eq!(b.module("ImportGraph.Cli"), Some(Missing::Package("importGraph".into())));
     }
 
     #[test]
@@ -239,13 +313,34 @@ mod tests {
         // `BatteriesTest` starts with `Batteries` and is a different library.
         // Claiming the package provides it would send the reader to add a
         // source that does not have what they asked for.
-        assert!(build().providing("BatteriesTest").is_none());
-        assert!(build().providing("Mathlib.Analysis").is_none());
+        let b = build(true);
+        assert!(b.declaring("BatteriesTest").is_none());
+        assert!(b.module("Mathlib.Analysis").is_none());
+    }
+
+    #[test]
+    fn core_answers_for_its_namespaces_by_name_and_its_roots_by_module() {
+        let b = build(false);
+        let core = Missing::Core("leanprover/lean4:v4.33.1".into());
+        assert_eq!(b.declaring("Int.add_one_le_iff"), Some(core.clone()));
+        assert_eq!(b.module("Init.Data.Int.Order"), Some(core));
+        // And not the other way round: `Int` is no module and `Init` is no
+        // namespace, so neither question may be answered with the other's list.
+        assert!(b.module("Int").is_none());
+        assert!(b.declaring("Mathlib.Analysis.exp").is_none());
+    }
+
+    #[test]
+    fn an_indexed_core_is_not_reported_missing() {
+        let b = build(true);
+        assert!(b.declaring("Int.add_one_le_iff").is_none());
+        assert!(b.module("Init.Data.Int.Order").is_none());
     }
 
     #[test]
     fn a_build_with_nothing_beside_its_sources_traces_nothing() {
-        assert!(NoPackages.providing("Batteries").is_none());
-        assert!(NoPackages.unindexed().is_empty());
+        assert!(NoBuild.declaring("Batteries").is_none());
+        assert!(NoBuild.declaring("Int.add_one_le_iff").is_none(), "no toolchain, no claim");
+        assert!(NoBuild.unindexed().is_empty());
     }
 }

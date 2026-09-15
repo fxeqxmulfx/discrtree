@@ -8,9 +8,10 @@
 //!
 //! The other way an index misleads is by covering less than the build does, and
 //! no row of that table can show it: a corpus nobody dumped has no row. So the
-//! report also names the lake packages no source claims.
+//! report also names the lake packages no source claims, and the toolchain,
+//! whose `Init` and `Std` sit under every one of them.
 
-use crate::application::ports::{DeclRepo, Package, Packages, Revisions, Workspace};
+use crate::application::ports::{Build, DeclRepo, Package, Revisions, Toolchain, Workspace};
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 
@@ -81,12 +82,16 @@ pub struct Report {
     pub sources: Vec<SourceStatus>,
     /// Lake packages the build resolved that no source covers.
     pub unindexed: Vec<Package>,
+    /// The toolchain the project builds against, and whether its own library
+    /// is in the index. Reported either way: "core is indexed" answers "why
+    /// did that not match" as squarely as its opposite.
+    pub toolchain: Option<Toolchain>,
 }
 
 pub struct Status<'a> {
     pub repo: &'a dyn DeclRepo,
     pub revisions: &'a dyn Revisions,
-    pub packages: &'a dyn Packages,
+    pub build: &'a dyn Build,
     pub workspace: &'a Workspace,
     /// Now, in seconds since the Unix epoch.
     pub now: u64,
@@ -109,6 +114,10 @@ impl Status<'_> {
                 age: was.map(|p| self.now.saturating_sub(p.indexed_at)),
             });
         }
-        Ok(Report { sources: out, unindexed: self.packages.unindexed() })
+        Ok(Report {
+            sources: out,
+            unindexed: self.build.unindexed(),
+            toolchain: self.build.toolchain(),
+        })
     }
 }
