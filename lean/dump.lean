@@ -105,11 +105,6 @@ def matchesPrefix (prefixes : Array String) (m : Name) : Bool :=
     let s := m.toString
     prefixes.any fun p => s == p || s.startsWith (p ++ ".")
 
-/-- The module a declaration was declared in. -/
-def moduleOf (env : Environment) (n : Name) : Option Name := do
-  let idx ← env.getModuleIdxFor? n
-  env.header.moduleNames[idx.toNat]?
-
 /-- One JSONL row. Field names match `discrtree::model::Decl`. -/
 def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     (module : Name) : MetaM Json := do
@@ -148,15 +143,37 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
 
 /-- Declarations this dump will write, paired with the module they came from.
 
+Asked of the modules rather than of the constants. The environment is indexed
+both ways: `env.constants` is everything the imports brought in -- four hundred
+thousand entries once Mathlib is among them -- while `header.moduleData[i]` is
+exactly what module `i` declared, and `header.moduleNames[i]` is its name.
+Folding over the constants to ask each one which module it came from cost
+twenty-two seconds for a project of two thousand declarations, and all but one
+second of that was spent deciding that Mathlib was not wanted. Four hundred
+module names answer the same question.
+
 Collected up front rather than walked in place: the walk is the only part that
 has to be serial, and it is the cheap part. -/
 def workList (env : Environment) (prefixes : Array String) :
-    Array (Name × Name × ConstantInfo) :=
-  env.constants.fold (init := #[]) fun acc name ci =>
-    if !keep name then acc
-    else match moduleOf env name with
-      | none   => acc
-      | some m => if matchesPrefix prefixes m then acc.push (name, m, ci) else acc
+    Array (Name × Name × ConstantInfo) := Id.run do
+  let names := env.header.moduleNames
+  let data := env.header.moduleData
+  let mut acc := #[]
+  for i in [0:names.size] do
+    let some m := names[i]? | continue
+    if !matchesPrefix prefixes m then continue
+    -- A module whose data was not loaded contributes nothing rather than
+    -- failing the dump: `moduleData` is as long as `moduleNames` only for the
+    -- imports that carry their `.olean` payload.
+    let some md := data[i]? | continue
+    -- `constNames` exists so that this loop does not have to project the name
+    -- out of every `ConstantInfo` to ask `keep` about it.
+    for j in [0:md.constNames.size] do
+      let some n := md.constNames[j]? | continue
+      if !keep n then continue
+      let some ci := md.constants[j]? | continue
+      acc := acc.push (n, m, ci)
+  return acc
 
 /-- Threads to dump on. `DISCRTREE_JOBS` overrides.
 

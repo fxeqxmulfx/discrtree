@@ -423,3 +423,117 @@ fn an_empty_file_is_a_new_index() {
     std::fs::write(&path, b"").unwrap();
     assert!(SqliteIndex::open(&path).is_ok());
 }
+
+/// An index of this many rows makes one source a small share of it. The
+/// decision is a fraction, so a three-row index has no small loads and this
+/// number is the smallest one that gives the maintained path something to do.
+const ENOUGH_TO_BE_BIG: usize = 320;
+
+fn filled(db: &mut SqliteIndex) {
+    let rows: Vec<_> = (0..ENOUGH_TO_BE_BIG)
+        .map(|i| theorem(&format!("Mathlib.pad{i}"), "mathlib", "Mathlib.Pad", "Eq", &[]))
+        .collect();
+    db.clear_source(&SourceId::new("mathlib")).unwrap();
+    index::load(db, &rows).unwrap();
+    db.finish().unwrap();
+}
+
+fn text_matches(db: &SqliteIndex, word: &str) -> Vec<String> {
+    let mut q = Query::new();
+    q.text = Some(word.to_string());
+    db.find(&q).unwrap().iter().map(|d| d.name.to_string()).collect()
+}
+
+/// Re-indexing one edited source used to rebuild the text index over every row
+/// in the database — six seconds of a fourteen-second `dt index` that had
+/// 1864 rows to write. A load small enough to maintain does not rebuild, and
+/// the only thing that can be observed from outside is whether `--text` is
+/// still right: both halves have to hold, the rows that left must stop
+/// matching and the rows that arrived must start.
+#[test]
+fn a_small_load_keeps_the_text_index_current_without_rebuilding_it() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    filled(&mut db);
+
+    let mut first = theorem("Transformer.hullProbe", "project", "Transformer.ALM", "Eq", &[]);
+    first.ty = "hullProbe is monotone".into();
+    db.clear_source(&SourceId::new("project")).unwrap();
+    index::load(&mut db, &[first]).unwrap();
+    db.finish().unwrap();
+    assert_eq!(text_matches(&db, "hullProbe"), vec!["Transformer.hullProbe".to_string()]);
+
+    // The edit: the same source, dumped again, with the declaration renamed.
+    let mut second = theorem("Transformer.softmaxIndex", "project", "Transformer.ALM", "Eq", &[]);
+    second.ty = "softmaxIndex is monotone".into();
+    db.clear_source(&SourceId::new("project")).unwrap();
+    index::load(&mut db, &[second]).unwrap();
+    db.finish().unwrap();
+    assert_eq!(text_matches(&db, "softmaxIndex"), vec!["Transformer.softmaxIndex".to_string()]);
+    assert!(text_matches(&db, "hullProbe").is_empty(), "the deleted row still matches");
+}
+
+/// A row rewritten inside one load is deleted and inserted again under a new
+/// id. The text index is keyed on the old one, and nothing but `decl` can say
+/// what that row said — so the entry has to go before the row does, or the old
+/// text keeps matching an id no declaration has.
+#[test]
+fn a_row_rewritten_within_a_load_takes_its_old_text_with_it() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    filled(&mut db);
+    db.clear_source(&SourceId::new("project")).unwrap();
+
+    let mut was = theorem("Transformer.probe", "project", "Transformer.ALM", "Eq", &[]);
+    was.ty = "hullProbe is monotone".into();
+    index::load(&mut db, &[was]).unwrap();
+
+    let mut now = theorem("Transformer.probe", "project", "Transformer.ALM", "Eq", &[]);
+    now.ty = "softmaxIndex is monotone".into();
+    index::load(&mut db, &[now]).unwrap();
+    db.finish().unwrap();
+
+    assert_eq!(text_matches(&db, "softmaxIndex"), vec!["Transformer.probe".to_string()]);
+    assert!(text_matches(&db, "hullProbe").is_empty(), "the overwritten text still matches");
+}
+
+/// The two tests above would pass on the old code too: a rebuild also leaves
+/// the text index right. What tells the paths apart is the work `finish` does
+/// not do, and the planner's statistics are where that becomes visible —
+/// `ANALYZE` is one of the three fixed prices, so after a maintained load the
+/// numbers must still be the ones the last bulk load wrote.
+#[test]
+fn a_maintained_load_leaves_the_fixed_prices_unpaid() {
+    let dir = TempDir::new("dt-maintained");
+    let path = dir.path().join("index.db");
+    let mut db = SqliteIndex::open(&path).unwrap();
+    filled(&mut db);
+
+    let stat = || -> Option<String> {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT stat FROM sqlite_stat1 WHERE tbl = 'decl' AND idx = 'decl_lookup'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+    };
+    let before = stat();
+    assert!(before.is_some(), "the bulk load must have analyzed, or this proves nothing");
+
+    db.clear_source(&SourceId::new("project")).unwrap();
+    index::load(&mut db, &[theorem("Transformer.probe", "project", "Transformer.ALM", "Eq", &[])])
+        .unwrap();
+    db.finish().unwrap();
+    assert_eq!(before, stat(), "a one-row load re-analyzed the whole index");
+    // FTS5 checks an external-content index against the table it indexes,
+    // which is the one question the maintained path has to answer for itself.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("INSERT INTO decl_fts(decl_fts, rank) VALUES('integrity-check', 1);")
+        .expect("the maintained text index no longer matches the rows it indexes");
+
+    // And the other way: a load that replaces the big source does pay, because
+    // for that one the fixed price is the cheaper answer.
+    filled(&mut db);
+    assert_ne!(before, stat(), "a full reload must leave the statistics current");
+}

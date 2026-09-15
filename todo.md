@@ -55,6 +55,39 @@ Expected after: 2-3 s for the dump (the 2.2 s `import Transformer` floor is
 irreducible, and the project's own elaboration is the second), and well under
 a second for the index. Thirty-seven seconds to four.
 
+Fixed 2026-09-15 in dt 0.9.0. Measured on the same project, same machine:
+
+    dt dump project   23.06 s -> 3.45 s
+    dt index          13.86 s -> 0.64 s
+
+The dump asks the modules instead of the constants. `workList` walks
+`header.moduleNames` with `matchesPrefix` and takes the declarations of the
+modules that match out of `header.moduleData`, which also makes `moduleOf`
+dead: the module is now what the loop is standing in, not something to look
+up per constant. The rows are the same rows -- 1872 names, every field equal,
+checked against the dump the old walk had just written.
+
+The index decides once per source and can change its mind once per batch. A
+load that replaces less than one row in sixteen keeps the side index up,
+deletes the rows it is replacing out of `decl_fts` before `decl` forgets what
+they said, inserts the new ones as it goes, and finishes by doing nothing at
+all. A load bigger than that -- a Mathlib bump, a rebuild, anything into an
+empty index -- takes the path that was always there, and a load that starts
+small and turns out big switches to it partway through and lets the rebuild
+repeat the little it had maintained.
+
+What makes this safe to leave on is that the text index can be asked: FTS5
+checks an external-content index against the table it indexes, and
+`integrity-check` over all 390 387 rows passes after a maintained load. A test
+pins it, and another pins the decision itself -- `sqlite_stat1` still holds
+the numbers the last bulk load wrote, which is how a maintained load proves it
+did not ANALYZE.
+
+The remaining 3.45 s is 2.2 s of `import Transformer` and a second of
+elaborating the project, so the loop is now within a factor of two of the
+floor. Cutting the floor means keeping a Lean process alive between dumps,
+which is a different program.
+
 ## `find`, `show` and `deps` answer from a stale source without saying so
 
 Found 2026-09-13, dt 0.5.0, on a Lean project of my own. Fixed 2026-09-13 in
@@ -426,3 +459,16 @@ The unqualified search stays a bare `no match`, pinned by a test.
 The one promise that had to be withdrawn is the one this entry quotes: the
 `show` message no longer says `--name` cannot reach it either, because now
 `--name` answers for itself. It says no search here can reach it.
+
+## `dt index` has no `--source`, but the staleness hint implies one
+
+`dt index --source project` is rejected with `Usage: dt index --force`, while
+the staleness warning at the bottom of a `find` result says to "re-run
+`dt dump project` and `dt index`".  Two asymmetries in one place: `dump` takes
+a source name positionally and `index` takes none, and the warning names the
+two-command sequence rather than a single `dt refresh project` that would do
+both.  Re-indexing one source after a few commits is the commonest maintenance
+action there is; it should be one command, and the flag that `dump` accepts
+should be accepted by `index` too (even as a no-op) so the obvious guess works.
+
+Reported from the transformer repo, 2026-09-15.

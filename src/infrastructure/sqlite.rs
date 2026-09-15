@@ -118,6 +118,19 @@ DROP INDEX IF EXISTS uses_const;
 /// three times the resident set.
 const BULK_CACHE_KIB: i64 = -65_536;
 
+/// The share of the index a load has to replace before rebuilding what it
+/// invalidates costs less than maintaining it.
+///
+/// Both sides were measured on a 390 000-row index. Rebuilding is a fixed
+/// price: `decl_fts` takes 5.9 s to rebuild and 1.0 s to optimize, `uses_const`
+/// 6.6 s to drop and build again, and every one of those is paid whether the
+/// load changed one row or all of them. Maintaining costs roughly the same per
+/// row and nothing for the rows it does not touch — so the crossover is a
+/// fraction of the index rather than a number of rows. One row in sixteen puts
+/// it at twenty-four thousand there, and a project of two thousand
+/// declarations an order of magnitude under it.
+const REBUILD_SHARE: usize = 16;
+
 const FTS: &str = r#"
 CREATE VIRTUAL TABLE IF NOT EXISTS decl_fts
   USING fts5(name, type, doc, content='decl', content_rowid='id', tokenize='unicode61');
@@ -145,6 +158,13 @@ pub struct SqliteIndex {
     conn: Connection,
     /// Whether the side indexes are currently dropped. See [`SIDE_INDEXES`].
     bulk: bool,
+    /// Rows this load may still write before it stops maintaining the indexes
+    /// and starts rebuilding them. See [`REBUILD_SHARE`].
+    budget: usize,
+    /// Whether `decl_fts` has been left behind by a bulk load and owes a
+    /// rebuild. A maintained load never sets it, and that is what makes
+    /// [`SqliteIndex::finish`] cheap after one.
+    dirty: bool,
 }
 
 impl SqliteIndex {
@@ -171,7 +191,10 @@ impl SqliteIndex {
         // here is what makes that self-healing.
         conn.execute_batch(SIDE_INDEXES)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        Ok(SqliteIndex { conn, bulk: false })
+        // No budget until a load says otherwise, so a caller that writes
+        // without clearing a source first — a fresh index, every test — takes
+        // the bulk path it always did.
+        Ok(SqliteIndex { conn, bulk: false, budget: 0, dirty: false })
     }
 
     /// What the source was when it was last indexed.
@@ -223,7 +246,25 @@ impl SqliteIndex {
     /// Called between loads, which means the side indexes may be down — so
     /// these deletes are written to need only what a `WITHOUT ROWID` table
     /// gives them for free, which is its own `decl_id` order.
-    pub fn clear_source(&self, source: &SourceId) -> Result<usize> {
+    pub fn clear_source(&mut self, source: &SourceId) -> Result<usize> {
+        // The size of what is going out is the best estimate of what is coming
+        // in, and it is exact for the loop this matters in: an edit re-dumps a
+        // source and puts back the same declarations plus a few.
+        let removing = self.count_source(source)?;
+        self.budget = self.count()? / REBUILD_SHARE;
+        if removing >= self.budget {
+            self.enter_bulk()?;
+            self.dirty = true;
+        } else if self.has_fts() {
+            // `decl_fts` holds no content of its own: it reads the columns out
+            // of `decl`, so the rows have to leave the text index while `decl`
+            // can still say what they were indexed under.
+            self.conn.execute(
+                "INSERT INTO decl_fts(decl_fts, rowid, name, type, doc)
+                 SELECT 'delete', id, name, type, doc FROM decl WHERE source = ?1",
+                params![source.as_str()],
+            )?;
+        }
         let tx = &self.conn;
         tx.execute(
             "DELETE FROM uses WHERE decl_id IN (SELECT id FROM decl WHERE source = ?1)",
@@ -547,7 +588,15 @@ impl DeclSink for SqliteIndex {
     }
 
     fn put(&mut self, decls: &[Decl]) -> Result<()> {
-        self.enter_bulk()?;
+        // A load that turns out bigger than the source it replaced gives up
+        // maintaining partway through: what it has maintained so far the
+        // rebuild simply does again.
+        if decls.len() > self.budget {
+            self.enter_bulk()?;
+            self.dirty = true;
+        }
+        self.budget = self.budget.saturating_sub(decls.len());
+        let maintain = !self.bulk && self.has_fts();
         let tx = self.conn.transaction()?;
         {
             let mut insert = tx.prepare_cached(
@@ -566,7 +615,55 @@ impl DeclSink for SqliteIndex {
                 tx.prepare_cached("INSERT OR IGNORE INTO uses (decl_id, const) VALUES (?1, ?2)")?;
             let mut insert_dep =
                 tx.prepare_cached("INSERT OR IGNORE INTO dep (decl_id, name) VALUES (?1, ?2)")?;
+            // Prepared only on the maintained path: without the FTS5 module
+            // these do not compile, and that is a database `dt` still works on.
+            let mut replaced = maintain
+                .then(|| {
+                    tx.prepare_cached(
+                        "SELECT id, name, type, doc FROM decl
+                         WHERE name = ?1 AND source = ?2 AND module = ?3",
+                    )
+                })
+                .transpose()?;
+            let mut fts_delete = maintain
+                .then(|| {
+                    tx.prepare_cached(
+                        "INSERT INTO decl_fts(decl_fts, rowid, name, type, doc)
+                         VALUES ('delete', ?1, ?2, ?3, ?4)",
+                    )
+                })
+                .transpose()?;
+            let mut fts_insert = maintain
+                .then(|| {
+                    tx.prepare_cached(
+                        "INSERT INTO decl_fts(rowid, name, type, doc) VALUES (?1, ?2, ?3, ?4)",
+                    )
+                })
+                .transpose()?;
             for d in decls {
+                // `INSERT OR REPLACE` frees the row it replaces and the text
+                // index does not hear about it, so a row that survives a load
+                // under the same key has to leave the index before it is
+                // rewritten — and it can only leave it by the values it went in
+                // under, which nothing but `decl` still holds.
+                if let (Some(find), Some(del)) = (&mut replaced, &mut fts_delete) {
+                    let was = find
+                        .query_row(
+                            params![d.name.as_str(), d.source.as_str(), d.module.as_str()],
+                            |r| {
+                                Ok((
+                                    r.get::<_, i64>(0)?,
+                                    r.get::<_, String>(1)?,
+                                    r.get::<_, String>(2)?,
+                                    r.get::<_, Option<String>>(3)?,
+                                ))
+                            },
+                        )
+                        .optional()?;
+                    if let Some((id, name, ty, doc)) = was {
+                        del.execute(params![id, name, ty, doc])?;
+                    }
+                }
                 let args: Vec<&str> = d.shape.args.iter().map(ArgHead::as_str).collect();
                 insert.execute(params![
                     d.name.as_str(),
@@ -593,6 +690,9 @@ impl DeclSink for SqliteIndex {
                 for c in &d.deps {
                     insert_dep.execute(params![id, c.as_str()])?;
                 }
+                if let Some(ins) = &mut fts_insert {
+                    ins.execute(params![id, d.name.as_str(), d.ty, d.doc])?;
+                }
             }
         }
         tx.commit()?;
@@ -601,8 +701,16 @@ impl DeclSink for SqliteIndex {
 
     fn finish(&mut self) -> Result<()> {
         self.exit_bulk()?;
-        // The text index is built once at the end: maintaining it row by row
-        // roughly doubles the load time for half a million rows.
+        if !self.dirty {
+            // Nothing here has anything to do after a maintained load: the
+            // text index is already current, and the planner has nothing to
+            // learn from a change of half a percent. Doing it anyway is the
+            // fourteen seconds this branch exists to not spend.
+            return Ok(());
+        }
+        // A bulk load leaves the text index empty and stale by turns, so it is
+        // built once at the end: maintaining it row by row roughly doubles the
+        // load time for half a million rows.
         if self.has_fts() {
             self.conn.execute_batch(
                 "INSERT INTO decl_fts(decl_fts) VALUES('rebuild');
@@ -610,6 +718,7 @@ impl DeclSink for SqliteIndex {
             )?;
         }
         self.conn.execute_batch("ANALYZE;")?;
+        self.dirty = false;
         Ok(())
     }
 }
