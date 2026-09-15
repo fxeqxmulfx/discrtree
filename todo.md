@@ -548,3 +548,82 @@ one sentence, written once and printed by `dt show`, `dt deps`, the `no match`
 line and `dt status` alike: for a package, add it and `dt refresh <pkg>`; for
 core, add a source with `kind = "core"` and `dt refresh core`.  The old
 comment explaining that core had no command to offer has gone with it.
+
+## A bare `dt refresh` stops at the first source it cannot read
+
+A toolchain bump is the moment every source in the index goes stale at once,
+and it is the one moment `dt refresh` with no name cannot do its job.  The
+project's own `.olean`s are the first thing the bump invalidates, so
+`dump_project.lean` fails with `incompatible header`, and the command exits
+there: `mathlib`, `batteries` and `core` are left on the previous toolchain's
+declarations, which is exactly the index a `Finset.prod_le_prod` question is
+about to be asked of.
+
+The order makes it worse than a coin flip -- the source most likely to fail is
+the local one, and it is the one that is refreshed first.  A source that fails
+should be reported and skipped, with the others still refreshed and a non-zero
+exit at the end naming what was missed.  As it stands the repair is to know
+that `dt refresh <each other source>` exists and to type it four times.
+
+Reported from the transformer repo, 2026-09-15, bumping Lean v4.33.1 to
+v4.34.0.
+
+Fixed 2026-09-15 in dt 0.12.0.  Every selected source is read, each failure is
+reported where it happens rather than in the summary, the sources that were
+read are indexed, and the command exits non-zero naming what was left alone:
+
+    $ dt refresh
+    dt: `nope`: lake env lean failed for source `nope` (exit 1); `Nope.olean`
+        was built by Lean 4.33.1 and lean-toolchain says 4.34.0 -- run `lake
+        build` first
+    toy: dumped to .discrtree/jsonl/toy.jsonl
+    toy: 1 declarations indexed
+    index: .discrtree/index.db (2 rows)
+    dt: 1 of 2 sources could not be read and were left as they were: nope
+    $ echo $?
+    1
+
+Reproduced on a two-library toy project rather than on the repo that reported
+it, which had already been repaired by hand: one library's `.olean` was given a
+previous toolchain's header, which is the whole of what a bump does to a build,
+and both sources went stale together because a `local` source is fingerprinted
+by the build they share.
+
+`dt refresh <name>` keeps the shape it had.  One name, one failure, nothing
+else attempted: the reason is the whole answer, and a summary over a list of
+one would only bury it.
+
+What can be tested without a Lean on the machine is the decision, so that is
+what the loop was made into -- a function over the targets that takes the
+reading half as a closure and hands back what was read and what was not.  Two
+tests pin it: the first failure does not stop the rest, and every failure is
+reported rather than only the first.
+
+## After a toolchain bump `dt refresh mathlib` fails on a file the cache never ships
+
+`lake exe cache get` fetches 8 906 `.olean`s and not `Mathlib.olean`, the
+top-level module that imports them all.  Nothing in a normal build needs it --
+a project imports `Mathlib.Data.List.Chain`, never `Mathlib` -- so the stale
+one from the previous toolchain is left sitting on disk, and `dump_mathlib.lean`
+is the one consumer that imports `Mathlib` wholesale:
+
+    failed to read file '.../Mathlib/.lake/build/lib/lean/Mathlib.olean',
+    incompatible header
+    dt: lake env lean failed for source `mathlib` (exit 1); the script is at ...
+
+The message points at the dump script, which is not where the repair is.  The
+repair is `lake build Mathlib` in the project root -- about three minutes with
+every dependency already cached -- and dt is in a position to know that: the
+header it could not read names the toolchain that wrote it, and comparing that
+to `lean-toolchain` is the whole diagnosis.  A `Missing::fix()` sentence for
+this case would say it in one line, the way the `kind = "core"` one now does.
+
+Worth considering whether the dump needs `Mathlib.olean` at all.  The
+environment walk added in 0.9.0 reads `env.header.moduleData`, and the module
+list could come from `Mathlib.lean`'s import lines read as text rather than
+from importing the module -- which would also drop three minutes off the first
+refresh after every bump.
+
+Reported from the transformer repo, 2026-09-15, bumping Lean v4.33.1 to
+v4.34.0.
+

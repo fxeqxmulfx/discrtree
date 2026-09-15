@@ -502,20 +502,54 @@ impl App {
             println!("nothing has moved since it was indexed");
             return Ok(());
         }
-        for name in &targets {
-            let s = self.cfg.source(name)?;
-            if s.elaborated() {
-                self.dump(Some(name), true)?;
-            } else if s.kind == config::Kind::Git {
-                self.fetch(Some(name))?;
-            }
-            // A local text source is read straight from its directory, so
-            // there is nothing to fetch and the indexing below is the refresh.
+        // Reported where it happens rather than in the summary: a refresh is
+        // minutes long, and a reader watching one wants to know that the
+        // project failed before Mathlib has finished dumping.
+        let many = targets.len() > 1;
+        let (read, mut failed) = read_each(&targets, |name| {
+            self.reread(name).inspect_err(|e| {
+                if many {
+                    eprintln!("dt: `{name}`: {e}");
+                }
+            })
+        });
+        // One name, one failure, nothing else attempted: the reason is the
+        // whole answer, and a summary over a list of one would only bury it.
+        if !many && failed.len() == 1 {
+            return Err(failed.remove(0).1);
         }
-        // Forced: the source was named, or measured stale. Either way the
-        // fingerprint check has already been answered, and answering it again
-        // from a file this command just rewrote is how a refresh does nothing.
-        self.index(Some(&targets), false, true)
+        if !read.is_empty() {
+            // Forced: the source was named, or measured stale. Either way the
+            // fingerprint check has already been answered, and answering it
+            // again from a file this command just rewrote is how a refresh
+            // does nothing.
+            self.index(Some(&read), false, true)?;
+        }
+        if !failed.is_empty() {
+            let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+            bail!(
+                "{} of {} sources could not be read and were left as they were: {}",
+                failed.len(),
+                targets.len(),
+                names.join(", ")
+            )
+        }
+        Ok(())
+    }
+
+    /// Read one source again, from wherever its declarations come from: the
+    /// build for a compiled source, the checkout for a fetched one. A local
+    /// text source is read straight from its directory, so there is nothing
+    /// to do here and the indexing that follows is the whole refresh.
+    fn reread(&self, name: &str) -> Result<()> {
+        let s = self.cfg.source(name)?;
+        if s.elaborated() {
+            self.dump(Some(name), true)
+        } else if s.kind == config::Kind::Git {
+            self.fetch(Some(name))
+        } else {
+            Ok(())
+        }
     }
 
     /// Whether this source can be left alone. Only when its input carries a
@@ -569,6 +603,29 @@ impl App {
 /// The source name, however it was spelled. `--source` is hidden rather than
 /// removed: it is the guess a flag-shaped memory makes, and refusing it would
 /// teach nothing that accepting it does not.
+/// Read every target, keeping going past the ones that fail.
+///
+/// A toolchain bump is the moment every source in the index goes stale at
+/// once, and the source refreshed first -- the project's own build, because a
+/// project configures its own source first -- is the one the bump is most
+/// likely to have broken. Stopping there leaves Mathlib and core on the
+/// previous toolchain's declarations, which is the index the next question is
+/// about to be asked of.
+fn read_each(
+    targets: &[String],
+    mut read: impl FnMut(&str) -> Result<()>,
+) -> (Vec<String>, Vec<(String, Error)>) {
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for name in targets {
+        match read(name) {
+            Ok(()) => ok.push(name.clone()),
+            Err(e) => failed.push((name.clone(), e)),
+        }
+    }
+    (ok, failed)
+}
+
 fn named(positional: Option<String>, flag: Option<String>) -> Option<String> {
     positional.or(flag)
 }
@@ -745,6 +802,36 @@ mod tests {
     #[test]
     fn a_source_cannot_be_named_twice() {
         assert!(Cli::try_parse_from(["dt", "index", "a", "--source", "b"]).is_err());
+    }
+
+    /// The bump that makes every source stale at once is the bump that breaks
+    /// the project's own build, and the project is refreshed first. Stopping
+    /// there used to leave Mathlib, Batteries and core on the previous
+    /// toolchain while the command reported the one failure it hit.
+    #[test]
+    fn a_source_that_cannot_be_read_does_not_stop_the_others() {
+        let targets: Vec<String> =
+            ["project", "mathlib", "batteries", "core"].iter().map(|s| (*s).to_owned()).collect();
+        let (read, failed) = read_each(&targets, |name| match name {
+            "project" => Err(Error::new("incompatible header")),
+            _ => Ok(()),
+        });
+        assert_eq!(read, ["mathlib", "batteries", "core"]);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, "project");
+        assert_eq!(failed[0].1.to_string(), "incompatible header");
+    }
+
+    /// Every failure is reported, not just the first one.
+    #[test]
+    fn what_could_not_be_read_is_all_of_it() {
+        let targets: Vec<String> = ["a", "b", "c"].iter().map(|s| (*s).to_owned()).collect();
+        let (read, failed) = read_each(&targets, |name| match name {
+            "b" => Ok(()),
+            n => Err(Error::new(format!("no {n}"))),
+        });
+        assert_eq!(read, ["b"]);
+        assert_eq!(failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "c"]);
     }
 
     #[test]
