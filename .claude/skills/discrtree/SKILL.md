@@ -28,7 +28,7 @@ Rules that are not guessable:
   empty result.
 - A `dt:` line on stderr means a source moved since it was indexed: rows may be
   missing — `no match` most often. Re-run the `dt dump` and `dt index` it names.
-- Default limit is 10; the footer says when more matched. `--long` adds the
+- Default limit is 10; the footer says when more matched. `find --long` adds
   full type and the docstring.
 
 `dt <command> --help` has the rest. Setup, once: `dt init`, edit
