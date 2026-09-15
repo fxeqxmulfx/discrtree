@@ -43,8 +43,34 @@ const NOTATION: &[(&str, &str, u8)] = &[
     ("%", "HMod.hMod", 4),
     ("^", "HPow.hPow", 5),
     ("⁻¹", "Inv.inv", 6),
-    ("‖", "Norm.norm", 6),
-    ("⟪", "Inner.inner", 6),
+];
+
+/// Notation that encloses its argument rather than standing between two: an
+/// opening delimiter, what closes it, and the constant the pair names.
+///
+/// A bracket is the outermost application of whatever it encloses, whichever
+/// operators are inside it -- `|a + b|` is an absolute value, not an addition
+/// -- so these need no binding strength. Parentheses name nothing: they group,
+/// and the head is whatever they group.
+///
+/// `⟫` is matched by prefix, because the field a notation is ascribed with
+/// belongs to it: see [`tokenize`].
+const BRACKETS: &[(&str, &str, Option<&str>)] = &[
+    ("(", ")", None),
+    ("‖", "‖", Some("Norm.norm")),
+    ("|", "|", Some("abs")),
+    ("⟪", "⟫", Some("Inner.inner")),
+];
+
+/// Tokens that are punctuation rather than notation: they carry no head symbol
+/// and dropping one loses nothing.
+///
+/// Binders and their brackets, because [`crate::domain::decl::Shape`] is read
+/// off a statement with every binder stripped; coercions and `@`, because they
+/// are not what a statement is about. The list exists so that a symbol *not*
+/// on it can be reported rather than quietly ignored -- see [`unreadable`].
+const IGNORED: &[&str] = &[
+    ",", ":", ";", "∀", "∃", "⟨", "⟩", "{", "}", "[", "]", "⦃", "⦄", "↑", "⇑", "@", "✝", "!", "?",
 ];
 
 /// What a pattern resolved to, so the caller can tell the user what was
@@ -61,6 +87,12 @@ pub struct Parsed {
     pub variables: Vec<String>,
     /// How many `→`-separated hypotheses came before the conclusion.
     pub hypotheses: usize,
+    /// Symbols that are neither notation nor punctuation, and so were read as
+    /// nothing at all. A pattern with one of these in it says more than the
+    /// query says, and the extra rows the query matches are not the rows that
+    /// were asked for. Empty when the pattern became a text search: nothing
+    /// was dropped there, the whole of it is what is searched for.
+    pub unknown: Vec<String>,
 }
 
 /// Parse a pattern such as `Real.exp _ ≤ _` or `Finset.sum _ _ = _`.
@@ -74,6 +106,7 @@ pub struct Parsed {
 pub fn parse(pattern: &str) -> Parsed {
     let all = tokenize(pattern);
     let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
+    let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
     let assumed = conditions_of(&hypotheses);
     let count = hypotheses.len();
@@ -95,6 +128,7 @@ pub fn parse(pattern: &str) -> Parsed {
                 extra_constants: Vec::new(),
                 variables: vars,
                 hypotheses: count,
+                unknown,
             }
         }
         None => {
@@ -105,7 +139,7 @@ pub fn parse(pattern: &str) -> Parsed {
                         .iter()
                         .skip_while(|t| t.as_str() != head.as_str())
                         .skip(1)
-                        .filter(|t| is_ident(t) || *t == "_")
+                        .filter(|t| is_ident(t) || is_numeral(t) || *t == "_")
                         .map(|t| arg_head(t))
                         .collect();
                     query.shape = Shape::new(Some(head.clone()), args);
@@ -116,6 +150,7 @@ pub fn parse(pattern: &str) -> Parsed {
                         extra_constants: Vec::new(),
                         variables: vars,
                         hypotheses: count,
+                        unknown,
                     }
                 }
                 // No name to key on, but notation is a name: `⟪x, y⟫_ℝ`
@@ -123,8 +158,8 @@ pub fn parse(pattern: &str) -> Parsed {
                 // `Real.exp`. Which argument is which is another matter --
                 // notation hides the implicit ones -- so the head is all this
                 // claims, and a head alone still matches.
-                None if notation_head(&tokens).is_some() => {
-                    query.shape = Shape::new(notation_head(&tokens), Vec::new());
+                None if head_of(&tokens).is_some() => {
+                    query.shape = Shape::new(head_of(&tokens), Vec::new());
                     query.uses = dedup(assumed);
                     Parsed {
                         query,
@@ -132,6 +167,7 @@ pub fn parse(pattern: &str) -> Parsed {
                         extra_constants: Vec::new(),
                         variables: vars,
                         hypotheses: count,
+                        unknown,
                     }
                 }
                 None => {
@@ -144,6 +180,8 @@ pub fn parse(pattern: &str) -> Parsed {
                         extra_constants: Vec::new(),
                         variables: vars,
                         hypotheses: count,
+                        // Nothing was dropped: the pattern is searched whole.
+                        unknown: Vec::new(),
                     }
                 }
             }
@@ -167,7 +205,7 @@ fn tokenize(s: &str) -> Vec<String> {
         if !cur.is_empty() {
             out.push(std::mem::take(&mut cur));
         }
-        if c.is_whitespace() || c == '(' || c == ')' {
+        if c.is_whitespace() {
             continue;
         }
         match c {
@@ -210,6 +248,20 @@ fn tokenize(s: &str) -> Vec<String> {
 
 fn is_ident(t: &str) -> bool {
     t != "_" && t.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+}
+
+/// A numeric literal, which every elaborated statement spells the same way.
+///
+/// `0`, `1` and `37` are all `@OfNat.ofNat _ n _` in the term, so a literal
+/// anywhere in a pattern is that head symbol and never a name to look up --
+/// `Nat.zero_lt_one` is stored as `LT.lt` over two `OfNat.ofNat`s.
+fn is_numeral(t: &str) -> bool {
+    !t.is_empty() && t.chars().all(|c| c.is_numeric())
+}
+
+/// What a numeral is in an elaborated statement.
+fn of_nat() -> DeclName {
+    DeclName::new("OfNat.ofNat")
 }
 
 /// The hypotheses of an implication pattern, and the conclusion left over.
@@ -267,7 +319,9 @@ fn conditions_of(hypotheses: &[Vec<String>]) -> Vec<DeclName> {
 /// Relations bind loosest, so the first one found is the top level.
 fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<String>)> {
     const RELATIONS: &[&str] = &["≤", "<", "≥", ">", "=", "≠", "↔", "∈", "∉", "⊆", "∣"];
-    let i = tokens.iter().position(|t| RELATIONS.contains(&t.as_str()))?;
+    let depth = depths(tokens);
+    let i =
+        tokens.iter().zip(&depth).position(|(t, d)| *d == 0 && RELATIONS.contains(&t.as_str()))?;
     Some((tokens[..i].to_vec(), tokens[i].clone(), tokens[i + 1..].to_vec()))
 }
 
@@ -279,10 +333,11 @@ fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<Stri
 /// with `Real.exp` demoted to a `uses` condition.
 fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     let mut rest = constants(tokens);
-    if let Some(head) = notation_head(tokens) {
+    if let Some(head) = head_of(tokens) {
         return (ArgHead::Named(head), rest);
     }
-    match tokens.iter().find(|t| is_ident(t)) {
+    match tokens.iter().find(|t| is_ident(t) || is_numeral(t)) {
+        Some(t) if is_numeral(t) => (ArgHead::Named(of_nat()), rest),
         // The head of this side is a bound variable, so the side constrains
         // nothing — which is what `_` already means.
         Some(t) if is_variable(t) => (ArgHead::Any, rest),
@@ -296,13 +351,90 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     }
 }
 
-/// The constant the loosest notation among these tokens stands for.
-fn notation_head(tokens: &[String]) -> Option<DeclName> {
+/// The constant the outermost notation among these tokens stands for.
+///
+/// A bracket around the whole of them is that outermost application whatever
+/// it contains: `|a + b|` is an absolute value and `‖x‖ * ‖y‖` is a product,
+/// and reading the first as an addition is not a near miss -- it is five rows
+/// about addition, none of which mention an absolute value. Otherwise the
+/// loosest infix notation *at the top level* wins; what is inside a bracket
+/// belongs to the bracket and is not the head of anything here.
+fn head_of(tokens: &[String]) -> Option<DeclName> {
+    if let Some((head, inside)) = enclosing(tokens) {
+        // Parentheses apply nothing. They group, and the head is what they
+        // group: `(Real.exp x) ≤ y` asks what `Real.exp x ≤ y` asks.
+        return match head {
+            Some(h) => Some(DeclName::new(h)),
+            None => head_of(inside),
+        };
+    }
+    let depth = depths(tokens);
     tokens
         .iter()
-        .filter_map(|t| NOTATION.iter().find(|(sym, ..)| sym == t))
+        .zip(&depth)
+        .filter(|(_, d)| **d == 0)
+        .filter_map(|(t, _)| NOTATION.iter().find(|(sym, ..)| sym == t))
         .min_by_key(|(.., prec)| *prec)
         .map(|(_, head, _)| DeclName::new(*head))
+}
+
+/// How deeply each token is bracketed. An opening delimiter and its closer are
+/// both reported at the depth outside the group they make, so that the tokens
+/// at depth 0 are exactly the ones the side is an application of.
+///
+/// `‖` and `|` close what they open, so a run of them alternates; `⟪` and `(`
+/// have closers of their own. An unclosed bracket leaves everything after it
+/// deeper, which is what a reader who typed one means anyway.
+fn depths(tokens: &[String]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut open: Vec<&str> = Vec::new();
+    for t in tokens {
+        if open.last().is_some_and(|close| t.starts_with(close)) {
+            open.pop();
+            out.push(open.len());
+        } else if let Some((_, close, _)) = BRACKETS.iter().find(|(o, ..)| *o == t.as_str()) {
+            out.push(open.len());
+            open.push(close);
+        } else {
+            out.push(open.len());
+        }
+    }
+    out
+}
+
+/// The bracket that encloses every one of these tokens, if one does: the
+/// constant it names, and what is inside it.
+fn enclosing(tokens: &[String]) -> Option<(Option<&'static str>, &[String])> {
+    let (first, rest) = tokens.split_first()?;
+    let (_, close, head) = BRACKETS.iter().find(|(o, ..)| *o == first.as_str())?;
+    let (last, inside) = rest.split_last()?;
+    if !last.starts_with(close) {
+        return None;
+    }
+    // `|a| + |b|` opens and closes before the end: the group the first token
+    // makes is not the whole side, and the `+` between them is the head.
+    depths(tokens)[1..tokens.len() - 1].iter().all(|d| *d > 0).then_some((*head, inside))
+}
+
+/// Symbols the parser reads as nothing: neither notation, nor a bracket, nor
+/// punctuation.
+///
+/// Dropping one silently is the worst answer available. The pattern still
+/// matches -- more loosely, having lost the one thing that distinguished it --
+/// so the rows come back looking like an answer, and `|_ + _| ≤ |_| + |_|`
+/// returned five lemmas about addition with no absolute value in them. An
+/// empty result says which condition to blame; those rows say nothing.
+fn unreadable(tokens: &[String]) -> Vec<String> {
+    let known = |t: &String| {
+        t == "_"
+            || is_ident(t)
+            || is_numeral(t)
+            || t == "→"
+            || IGNORED.contains(&t.as_str())
+            || NOTATION.iter().any(|(sym, ..)| *sym == t.as_str())
+            || BRACKETS.iter().any(|(o, c, _)| *o == t.as_str() || t.starts_with(c))
+    };
+    dedup_strings(tokens.iter().filter(|t| !known(t)).cloned().collect())
 }
 
 /// Whether a token names a bound variable rather than something to look up.
@@ -334,7 +466,11 @@ fn constants(tokens: &[String]) -> Vec<DeclName> {
 
 /// One argument of a prefix pattern. A variable is a wildcard, not a name.
 fn arg_head(token: &str) -> ArgHead {
-    if is_variable(token) { ArgHead::Any } else { ArgHead::parse(token) }
+    match token {
+        t if is_numeral(t) => ArgHead::Named(of_nat()),
+        t if is_variable(t) => ArgHead::Any,
+        t => ArgHead::parse(t),
+    }
 }
 
 fn dedup(mut v: Vec<DeclName>) -> Vec<DeclName> {
@@ -522,6 +658,64 @@ mod tests {
         assert!(p.query.shape.args.is_empty());
         assert!(p.query.text.is_none());
         assert_eq!(parse("‖x‖").query.shape.concl, Some(DeclName::new("Norm.norm")));
+    }
+
+    /// The report: `abs_add_le` is `|a + b| ≤ |a| + |b|`, and the pattern
+    /// written that way returned five lemmas about addition with no absolute
+    /// value in them. The bracket was dropped because the `+` inside it binds
+    /// looser, and looser is how the head of a side is chosen -- but a bracket
+    /// is not on the side, it *is* the side.
+    #[test]
+    fn a_bracket_is_the_head_of_everything_it_encloses() {
+        let p = parse("|_ + _| ≤ |_| + |_|");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
+        assert_eq!(p.query.shape.args, vec![arg("abs"), arg("HAdd.hAdd")]);
+        // The same defect, one bracket over: `‖_ + _‖ ≤ _` matched anything
+        // with an addition on the left.
+        assert_eq!(parse("‖_ + _‖ ≤ _").query.shape.args[0], arg("Norm.norm"));
+        // And the reading that was already right stays right: two brackets
+        // with an operator between them are that operator.
+        assert_eq!(parse("|_| + |_| ≤ _").query.shape.args[0], arg("HAdd.hAdd"));
+    }
+
+    /// A relation inside a bracket is not the one the statement is about.
+    #[test]
+    fn a_bracketed_relation_does_not_split_the_pattern() {
+        let p = parse("‖f x - f y‖ ≤ _");
+        assert_eq!(p.operator.as_deref(), Some("≤"));
+        assert_eq!(p.query.shape.args[0], arg("Norm.norm"));
+    }
+
+    /// A symbol that means something to Lean and nothing to this parser used
+    /// to be read as nothing, which quietly widened the search. It is now
+    /// reported, so the caller can say `no match` and name it.
+    #[test]
+    fn a_symbol_the_parser_cannot_read_is_reported_rather_than_dropped() {
+        assert_eq!(parse("_ ∩ _ ⊆ _").unknown, vec!["∩"]);
+        // Notation, brackets and punctuation are read, not reported -- a
+        // statement pasted whole out of a goal is mostly punctuation.
+        assert!(parse("∀ {a b : Int}, |a + b| ≤ |a| + |b|").unknown.is_empty());
+        assert!(parse("Real.exp _ ≤ _ → ⟪_, _⟫_ℝ = _").unknown.is_empty());
+        // Nothing was dropped from a pattern that became a text search: the
+        // whole of it is what is searched for.
+        assert!(parse("∫ x, f x").query.text.is_some());
+        assert!(parse("∫ x, f x").unknown.is_empty());
+    }
+
+    /// A literal is not a name and not a symbol to complain about: every
+    /// elaborated statement spells `0`, `1` and `37` as `OfNat.ofNat`, so a
+    /// pattern with one in it can say exactly that.
+    #[test]
+    fn a_numeral_is_the_head_symbol_a_literal_elaborates_to() {
+        let p = parse("0 < 1");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("LT.lt")));
+        assert_eq!(p.query.shape.args, vec![arg("OfNat.ofNat"), arg("OfNat.ofNat")]);
+        assert!(p.query.uses.is_empty(), "a literal is nothing to search for: {:?}", p.query.uses);
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        // Inside a side it is an argument like any other, and the side's own
+        // head still wins.
+        assert_eq!(parse("_ + 1 ≤ Real.exp _").query.shape.args[0], arg("HAdd.hAdd"));
+        assert_eq!(parse("Nat.succ 1").query.shape.args, vec![arg("OfNat.ofNat")]);
     }
 
     #[test]

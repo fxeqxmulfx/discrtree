@@ -24,6 +24,25 @@ fn sorry_mark(d: &Decl) -> &'static str {
     if d.has_sorry { "  [sorry]" } else { "" }
 }
 
+/// A pattern with a symbol in it that the parser cannot read.
+///
+/// This is an empty result rather than an error, because the pattern is not
+/// malformed -- it is understood by Lean and not by `dt`. What it must not be
+/// is rows: dropping the symbol leaves a pattern that matches more, and the
+/// extra rows read as an answer while being about something else. `no match`
+/// is the answer that can be acted on, and the symbol is the part to act on.
+pub fn unreadable(symbols: &[String]) -> String {
+    let list: Vec<String> = symbols.iter().map(|s| format!("`{s}`")).collect();
+    format!(
+        "no match: {} in the pattern {} as nothing here; searching without {} would answer a \
+         wider question — write the constant it stands for instead, or drop that part of the \
+         pattern and give it as --uses\n",
+        list.join(", "),
+        if symbols.len() == 1 { "reads" } else { "read" },
+        if symbols.len() == 1 { "it" } else { "them" },
+    )
+}
+
 /// A hit is two lines: what it is called, followed by what it says.
 ///
 /// Nothing here is padded or separated by blank lines. This output is read far
@@ -679,6 +698,20 @@ mod tests {
         assert!(r.contains("`inner` is `Inner.inner`"), "{r}");
         assert!(r.contains("Std.HashMap.inner"), "the other candidate is worth naming: {r}");
         assert!(!r.contains("matches nothing on its own"), "that is the wrong repair: {r}");
+    }
+
+    /// Naming the symbol is the whole point: the pattern was written by
+    /// someone who knows what it means, and the only thing they cannot know
+    /// is which part of it `dt` did not read.
+    #[test]
+    fn a_symbol_the_parser_cannot_read_is_named_and_the_repair_offered() {
+        let r = unreadable(&["∩".to_string()]);
+        assert!(r.starts_with("no match: `∩` in the pattern reads as nothing"), "{r}");
+        assert!(r.contains("--uses"), "the repair, not just the complaint: {r}");
+        // Two of them are two of them, in one line.
+        let r = unreadable(&["∩".to_string(), "×".to_string()]);
+        assert!(r.contains("`∩`, `×` in the pattern read as nothing"), "{r}");
+        assert_eq!(r.lines().count(), 1, "{r}");
     }
 
     /// The flag is right and the index is old: the repair is a re-read, and

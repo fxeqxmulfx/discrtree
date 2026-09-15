@@ -1047,3 +1047,109 @@ and a head alone is still a shape search rather than a text one.
 *concludes* an inner product, it concludes an equation between two of them.
 `Inner.inner _ _` spelled out gets the same answer, so the notation is no
 longer the odd one out, which is all this entry asked for.
+
+## A shape query over a notation-only conclusion drifts to unrelated rows
+
+`|a + b| ≤ |a| + |b|` is `abs_add_le` in
+`Mathlib.Algebra.Order.Group.Unbundled.Abs`.  Asked by shape:
+
+    $ dt find '|_ + _| ≤ |_| + |_|'
+    Int.add_le_add_right  theorem  Init.Data.Int.Order
+      ∀ {a b : Int}, a ≤ b → ∀ (c : Int), a + c ≤ b + c
+    Nat.add_le_add_left   theorem  Init.Data.Nat.Basic
+    Nat.add_le_add_right  theorem  Init.Data.Nat.Basic
+    Int.add_le_add_left   theorem  Init.Data.Int.Order
+    Int.add_le_add        theorem  Init.Data.Int.Order
+
+Five rows, none of them with an absolute value anywhere in the statement.
+The `|_|` on both sides was dropped and what was matched is `_ + _ ≤ _ + _`.
+A pattern whose distinguishing feature is silently discarded is worse than
+`no match`: `no match` says which condition to blame, these rows say nothing.
+
+Same shape as the earlier `_ = -_ ↔ _ = 0` entry: when part of a pattern
+cannot be resolved, the answer should narrow to `no match` and name the part,
+not widen to whatever remains.
+
+`dt find --name abs_add --kind theorem` does find `abs_add_le`, so the row is
+indexed and elaborated; only the shape query misses it.
+
+## An exactly-matching name is not ranked above its own prefixes
+
+`--name` is a substring filter, and within the matches nothing prefers the
+row whose name *is* the query. Asking for a declaration by its full name
+therefore buries it:
+
+    $ dt find --name "Real.sin_sq"
+    Real.sin_sq_le_one       theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_le_sq        theorem  ...Trigonometric.Bounds
+    Real.sin_sq_lt_sq        theorem  ...Trigonometric.Bounds
+    Real.sin_sq              theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_add_cos_sq   theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_eq_half_sub  theorem  Mathlib.Analysis.Complex.Trigonometric
+
+`Real.sin_sq` is there, fourth, under three of its own suffixes. With the
+default limit of 10 a name with more than ten descendants (`Finset.sum`,
+`Real.exp`, `List.map`) drops off the page entirely, and the caller reads
+`6 result(s)` as "the exact name is not indexed" rather than "look further
+down".
+
+`dt show Real.sin_sq` answers correctly, so this is only about ordering:
+an exact name match should sort first, and a prefix match ahead of an
+interior one. The filter itself is right — the ranking is what is missing.
+
+Fixed in 0.23.0.  `|` was not in the notation table, but adding it would not
+have fixed anything: `‖_ + _‖ ≤ _` had the identical defect with a bracket that
+*was* in the table, and returned rows whose left side was any addition at all.
+
+The head of a side was chosen as the loosest notation anywhere on it, which is
+right for infix -- `a⁻¹ + b⁻¹` is an addition -- and wrong for a bracket, which
+is not an operator *on* the side but the side itself.  Brackets are now their
+own kind of notation with no binding strength at all:
+
+    (  )    grouping, applies nothing
+    ‖  ‖    Norm.norm
+    |  |    abs
+    ⟪  ⟫    Inner.inner
+
+A bracket that encloses the whole of a side is that side's head whatever is
+inside it; otherwise the loosest infix *at depth zero* wins, so `|_| + |_|` is
+still an addition.  Parentheses are tokenized rather than discarded, for the
+same reason -- they group, and the head is what they group -- and the relation
+a pattern splits on is now the first one at depth zero.
+
+    $ dt find '|_ + _| ≤ |_| + |_|'
+    abs_add_le  theorem  Mathlib.Algebra.Order.Group.Unbundled.Abs
+      ∀ ... (a b : α), |a + b| ≤ |a| + |b|
+    abs_add'    theorem  Mathlib.Algebra.Order.Group.Abs
+    abs_sub     theorem  Mathlib.Algebra.Order.Group.Abs
+
+The second half of the entry -- narrow rather than widen -- is now a rule
+rather than a table.  A symbol that is neither notation, nor a bracket, nor
+punctuation used to be read as nothing, which silently loosened the pattern.
+It is reported instead:
+
+    $ dt find '_ ∩ _ ⊆ _'
+    no match: `∩` in the pattern reads as nothing here; searching without it
+    would answer a wider question — write the constant it stands for instead,
+    or drop that part of the pattern and give it as --uses
+
+This is an empty result rather than an error: the pattern is not malformed, it
+is understood by Lean and not by `dt`, and `no match` naming the part is the
+answer that can be acted on.  A pattern that falls through to a text search
+reports nothing, because nothing was dropped there -- the whole of it is what
+is searched for.
+
+Punctuation had to be enumerated for that rule to be usable, and the first
+draft was wrong in the direction that matters: it refused `a + 1 ≤ b`, because
+a numeral is not an identifier.  Literals now read as what the index actually
+stores for them -- `Nat.zero_lt_one` is `LT.lt` over two `OfNat.ofNat`s -- so
+`0 < 1` is a shape and not a complaint, and `--uses 1` is never searched for.
+
+Two things this does not do, both older than the entry:
+
+- `‖_ + _‖` still keys on `Norm.norm` alone.  The `+` is one level further
+  down than the index stores, which is phase 5 and not a parsing question.
+- a statement pasted whole, `∀ {a b : Int}, a + 1 ≤ b ↔ a < b`, still reads
+  its binders as part of the left side.  The shape in the index is read with
+  every binder stripped and the parser does not strip them; that wants its own
+  entry.

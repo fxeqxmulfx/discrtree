@@ -197,9 +197,18 @@ impl App {
     fn find(&self, args: &FindArgs) -> Result<()> {
         let query = query_of(args)?;
         self.check_source(&query)?;
+        let parsed = args.pattern.as_deref().map(pattern::parse);
+        if let Some(p) = &parsed
+            && !p.unknown.is_empty()
+        {
+            // Before the search rather than after it, because the search
+            // would succeed: what it would return is the pattern minus the
+            // part that made it this pattern.
+            print!("{}", render::unreadable(&p.unknown));
+            return Ok(());
+        }
         if self.verbose {
-            if let Some(p) = &args.pattern {
-                let parsed = pattern::parse(p);
+            if let Some((p, parsed)) = args.pattern.as_deref().zip(parsed) {
                 eprintln!(
                     "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}",
                     parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
