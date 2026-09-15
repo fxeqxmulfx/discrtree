@@ -8,7 +8,7 @@ use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
 use crate::application::find::{Duplicate, Empty, Hits};
 use crate::application::show::{Shown, Source};
-use crate::application::status::SourceStatus;
+use crate::application::status::{Report, SourceStatus};
 use crate::domain::decl::Decl;
 use std::collections::BTreeMap;
 
@@ -43,6 +43,13 @@ pub fn find(hits: &Hits, long: bool) -> String {
             Some(Empty::Combination) => {
                 "no match: every condition matches on its own; drop one\n".into()
             }
+            // Not "matches nothing on its own", which would be true and would
+            // send the reader to correct a prefix that is already correct.
+            Some(Empty::NotIndexed { prefix, package }) => format!(
+                "no match: `{prefix}` is in the lake package `{package}`, which is not a source \
+                 of this index; add it to discrtree.toml and re-run `dt dump {package}` and \
+                 `dt index`\n"
+            ),
             _ => "no match\n".into(),
         };
     }
@@ -297,7 +304,8 @@ pub fn add(r: &AddReport, written: bool) -> String {
     out
 }
 
-pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
+pub fn status(report: &Report, db: &std::path::Path) -> String {
+    let rows = &report.sources;
     let mut out = format!("index: {}\n\n", db.display());
     // No width on the last column. It is the one that varies, and padding it
     // buys nothing but trailing spaces on every row of every run.
@@ -344,6 +352,20 @@ pub fn status(rows: &[SourceStatus], db: &std::path::Path) -> String {
         if !names.is_empty() {
             out.push_str(&format!("\nbehind the {which}: {} — re-run {fix}\n", names.join(", ")));
         }
+    }
+    // The gap no row above can show. A project declares Mathlib and stops, and
+    // everything Mathlib is built on is importable from the project already and
+    // in no search — so `no match` for a Batteries lemma reads as "nobody has
+    // proved this", and the reader writes it again. Naming the packages is the
+    // whole repair: adding one is the reader's call, and a tool that guessed
+    // would be dumping gigabytes nobody asked for.
+    if !report.unindexed.is_empty() {
+        let names: Vec<&str> = report.unindexed.iter().map(|p| p.name.as_str()).collect();
+        out.push_str(&format!(
+            "\nnot indexed: {}\n  — lake packages the build resolved; \
+             add one as a `lake` source to search it\n",
+            names.join(", ")
+        ));
     }
     out
 }
@@ -461,6 +483,11 @@ mod tests {
         assert!(cut.contains("more match"), "got: {cut}");
     }
 
+    /// A status report of these sources and no unindexed packages.
+    fn report(sources: &[SourceStatus]) -> Report {
+        Report { sources: sources.to_vec(), unindexed: Vec::new() }
+    }
+
     fn behind(
         name: &str,
         kind: crate::domain::source::SourceKind,
@@ -487,7 +514,7 @@ mod tests {
         use crate::domain::source::SourceKind;
         let rows =
             [behind("project", SourceKind::Local, true), behind("flt", SourceKind::Git, false)];
-        let r = status(&rows, std::path::Path::new("/p/index.db"));
+        let r = status(&report(&rows), std::path::Path::new("/p/index.db"));
         // Both revisions, which is what the help promises and what a reader
         // needs to see how far behind the index is.
         assert!(r.contains("4f21c8e (now 9ab0d31, stale)"), "{r}");
@@ -499,7 +526,39 @@ mod tests {
             current_rev: Some("4f21c8e".into()),
             ..behind("mathlib", SourceKind::Lake, true)
         }];
-        assert!(!status(&current, std::path::Path::new("/p/index.db")).contains("behind"));
+        assert!(!status(&report(&current), std::path::Path::new("/p/index.db")).contains("behind"));
+    }
+
+    /// The gap a table of fresh sources cannot show. Reported at all, because
+    /// until it was there was no command in the tool that would say a search
+    /// had never covered the package it was about.
+    #[test]
+    fn packages_no_source_covers_are_named_with_the_repair() {
+        use crate::application::ports::Package;
+        let pkg = |n: &str| Package { name: n.into(), roots: vec![n.to_uppercase()] };
+        let r = status(
+            &Report { sources: Vec::new(), unindexed: vec![pkg("batteries"), pkg("aesop")] },
+            std::path::Path::new("/p/index.db"),
+        );
+        assert!(r.contains("not indexed: batteries, aesop"), "{r}");
+        assert!(r.contains("`lake` source"), "the repair, not just the complaint: {r}");
+        // Silent when there is nothing to report: a line that prints on every
+        // run is a line that is read on none.
+        assert!(!status(&report(&[]), std::path::Path::new("/p/index.db")).contains("not indexed"));
+    }
+
+    /// `--in Batteries` is not a prefix to correct, and telling the reader it
+    /// "matches nothing on its own" sends them to correct it anyway.
+    #[test]
+    fn an_empty_result_from_an_unindexed_package_names_the_package() {
+        let empty = |e: Empty| Hits { rows: Vec::new(), truncated: false, empty: Some(e) };
+        let r = find(
+            &empty(Empty::NotIndexed { prefix: "Batteries".into(), package: "batteries".into() }),
+            false,
+        );
+        assert!(r.contains("lake package `batteries`"), "{r}");
+        assert!(r.contains("not a source"), "{r}");
+        assert!(!r.contains("matches nothing"), "that is the wrong repair: {r}");
     }
 
     #[test]

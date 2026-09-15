@@ -1,6 +1,6 @@
 //! `dt find` — shape search, the main mode, plus `dt dup`.
 
-use crate::application::ports::{DeclRepo, SourceFiles};
+use crate::application::ports::{DeclRepo, Packages, SourceFiles};
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
@@ -11,6 +11,9 @@ use std::path::Path;
 
 pub struct Find<'a> {
     pub repo: &'a dyn DeclRepo,
+    /// Consulted only when a search came back empty, to tell a module prefix
+    /// that is wrong from one that was never indexed.
+    pub packages: &'a dyn Packages,
 }
 
 /// Why a search came back empty. The three cases need different repairs, and
@@ -26,6 +29,13 @@ pub enum Empty {
     /// Every condition matches something; no row satisfies all of them. Drop
     /// one rather than correcting any.
     Combination,
+    /// `--in` names a module that a lake package provides and no source
+    /// indexes. Neither repair above applies: nothing is misspelled and no
+    /// condition needs dropping, the corpus was never dumped. Told apart from
+    /// `Barren` because they look identical from the index and lead opposite
+    /// ways — one says edit the flag, and editing the flag here can only
+    /// produce another empty answer.
+    NotIndexed { prefix: String, package: String },
 }
 
 /// What a search found, and the two things about it a caller would otherwise
@@ -61,6 +71,20 @@ impl Find<'_> {
     /// Ask each condition on its own. One row each, so the diagnosis costs
     /// about as much as the search that failed.
     fn diagnose(&self, query: &Query) -> Result<Empty> {
+        // A module prefix is the one condition that can fail for a reason no
+        // probe can see. Every other empty answer means the index was asked and
+        // said no; this one means the index was never told. The build is asked
+        // first because it costs no query at all, and in a project whose
+        // sources cover every package it answers `None` immediately.
+        if let Some(m) = &query.module
+            && let Some(package) = self.packages.providing(m)
+            && self
+                .repo
+                .find(&Query { module: Some(m.clone()), limit: 1, ..Query::new() })?
+                .is_empty()
+        {
+            return Ok(Empty::NotIndexed { prefix: m.clone(), package: package.name });
+        }
         let conditions = query.conditions();
         if conditions.len() < 2 {
             return Ok(Empty::Plain);

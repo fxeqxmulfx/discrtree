@@ -155,6 +155,9 @@ with nothing under it is a file that does not compile.
 
 ## The other lake packages are not indexed, and nothing says so
 
+Found 2026-09-14, dt 0.5.0, on a Lean project of my own. Fixed 2026-09-15 in
+dt 0.6.0.
+
 A project's `discrtree.toml` names Mathlib as a `lake` source and stops there,
 so everything Mathlib itself is built on -- `batteries`, `aesop`, `Qq`,
 `plausible`, `Cli`, `importGraph` -- is invisible to `find` and `show`, even
@@ -191,3 +194,38 @@ Two repairs, both small:
 
 The third repair is not dt's: a project that wants those packages can add them
 as `lake` sources itself.  But it has to know they are missing first.
+
+Both are in. `dt status` ends with the packages the build resolved that no
+source points at, read off `.lake/packages` and not off `lake-manifest.json` --
+the manifest says what was resolved and the directory holds what was fetched,
+and an `import` line resolves against the second:
+
+    not indexed: aesop, batteries, Cli, importGraph, LeanSearchClient,
+                 plausible, proofwidgets, Qq
+      -- lake packages the build resolved; add one as a `lake` source to search it
+
+And an empty result from a prefix one of them provides names the package
+instead of blaming the prefix:
+
+    $ dt find --name Balanced --in Batteries
+    no match: `Batteries` is in the lake package `batteries`, which is not a
+    source of this index; add it to discrtree.toml and re-run `dt dump
+    batteries` and `dt index`
+
+A package is traced back to from a prefix by the one part of its layout that is
+readable without running Lake: a library root is an `X.lean` sitting beside a
+directory `X`. Half of these declare their libraries in `lakefile.lean`, which
+is a program and not data. A package whose layout does not follow the
+convention is still listed by `dt status`; it just cannot be reached from a
+prefix.
+
+The entry says two repairs and there were three. `dt show` had the same dead
+end -- the session above went `show`, then `find`, then `grep`, and repairing
+only `--in` leaves that loop intact -- so a missing name whose namespace belongs
+to an unindexed package now names the package rather than suggesting `dt find
+--name`, which from a corpus that was never dumped can only return the same
+nothing or a page of Mathlib near-misses that read like an answer.
+
+What is still not done is the third repair the entry rules out, and for the
+reason it gives: adding a source is the reader's call. A tool that guessed
+would dump gigabytes nobody asked for.

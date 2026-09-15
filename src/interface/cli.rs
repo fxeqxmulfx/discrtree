@@ -101,6 +101,10 @@ pub enum Command {
     /// is at now. A source that has moved since is named, because a stale index
     /// answers confidently and wrongly. The project's own revision fingerprints
     /// its build, so a module compiled since the last dump shows up here too.
+    ///
+    /// The lake packages the build resolved that no source covers are listed
+    /// last. Every declaration in them is importable from the project and in no
+    /// search, which is the one gap the index cannot report on its own.
     Status,
 
     /// Print a declaration and the import line that provides it.

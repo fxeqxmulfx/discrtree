@@ -145,8 +145,8 @@ the shipped one cannot drift apart.
 ## An empty answer says which repair it needs
 
 `no match` is the most expensive line `dt` can print, because on its own it
-does not say what to do next. Three situations produce it and they need
-opposite repairs:
+does not say what to do next. Four situations produce it and they need
+different repairs:
 
 ```
 $ dt find --name exp --in Analysis
@@ -154,12 +154,24 @@ no match: --in Analysis matches nothing on its own
 
 $ dt find --name exp --uses Finset.sum --in Mathlib.Order
 no match: every condition matches on its own; drop one
+
+$ dt find --name Balanced --in Batteries
+no match: `Batteries` is in the lake package `batteries`, which is not a source
+of this index; add it to discrtree.toml and re-run `dt dump batteries` and
+`dt index`
 ```
 
 The first is a condition to edit — Mathlib's modules begin `Mathlib.`, so
 `Analysis` is not a prefix of any of them. The second is a condition to drop.
 Guessing between them costs a search either way; asking each condition on its
 own costs one row each, and only when the search has already failed.
+
+The third is neither, and that is why it is told apart: `Batteries` is spelled
+correctly and there is nothing to drop. It is the index that is smaller than
+the build, and the repair is a source, not a flag. `dt show` answers a missing
+name the same way rather than with `try dt find --name`, which from an unindexed
+corpus can only return the same nothing or a page of Mathlib near-misses that
+read like an answer.
 
 Two asks are refused outright rather than answered with an empty result, because
 a closed set can name what was meant and a contradiction is not an absence:
@@ -324,6 +336,30 @@ $ dt status
 dt: this index was written by a different version of dt (schema 1, this build
     expects 2); run `dt index --rebuild`
 ```
+
+## What the index does not cover
+
+A `discrtree.toml` names Mathlib and stops there. Everything Mathlib is built on
+— batteries, aesop, Qq, plausible, Cli, importGraph — is then importable from
+the project without adding a dependency, and invisible to every search. The
+index cannot report that on its own: a corpus nobody dumped leaves nothing
+behind to find. The directory the build resolved is the only evidence there is,
+so `dt status` reads it:
+
+```
+not indexed: aesop, batteries, Cli, importGraph, LeanSearchClient, plausible, proofwidgets, Qq
+  — lake packages the build resolved; add one as a `lake` source to search it
+```
+
+A package is a directory under `.lake/packages` that no source's `path` points
+at; the library it provides is an `X.lean` sitting beside a directory `X`, which
+is the convention an `import` line relies on and the only part of a package
+readable without running Lake — half of these declare their libraries in
+`lakefile.lean`, which is a program, not data.
+
+Naming them is the whole repair. Which ones are worth a dump is the reader's
+call: Batteries is a minute and a useful corpus, and a tool that decided for
+them would be spending an hour on packages nobody searches.
 
 ## The dump runs on every core
 

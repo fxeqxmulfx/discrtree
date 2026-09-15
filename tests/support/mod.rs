@@ -221,3 +221,27 @@ impl discrtree::application::ports::Revisions for FakeRevisions {
         Ok(self.0.get(source.as_str()).cloned())
     }
 }
+
+/// A build carrying packages no source covers. `("batteries", "Batteries")` is
+/// a package directory and the library root it provides.
+pub struct FakePackages(pub Vec<discrtree::application::ports::Package>);
+
+impl FakePackages {
+    pub fn with(pairs: &[(&str, &str)]) -> FakePackages {
+        FakePackages(
+            pairs
+                .iter()
+                .map(|(name, root)| discrtree::application::ports::Package {
+                    name: name.to_string(),
+                    roots: vec![root.to_string()],
+                })
+                .collect(),
+        )
+    }
+}
+
+impl discrtree::application::ports::Packages for FakePackages {
+    fn unindexed(&self) -> Vec<discrtree::application::ports::Package> {
+        self.0.clone()
+    }
+}

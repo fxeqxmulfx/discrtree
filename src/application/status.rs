@@ -5,8 +5,12 @@
 //! worse than no index: it answers confidently with an import line that no
 //! longer resolves. So every source reports the revision it was built from
 //! alongside the revision it would be built from now.
+//!
+//! The other way an index misleads is by covering less than the build does, and
+//! no row of that table can show it: a corpus nobody dumped has no row. So the
+//! report also names the lake packages no source claims.
 
-use crate::application::ports::{DeclRepo, Revisions, Workspace};
+use crate::application::ports::{DeclRepo, Package, Packages, Revisions, Workspace};
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 
@@ -65,16 +69,31 @@ pub fn stale_among(
     Ok(out)
 }
 
+/// What `dt status` has to say.
+///
+/// Two halves, and the second is not a footnote to the first: the sources
+/// answer "is what I indexed still current", and `unindexed` answers "is what I
+/// indexed all of it". A table of perfectly fresh sources is not evidence that
+/// a search covered the corpus, and until this was reported there was no
+/// command that would say so.
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub sources: Vec<SourceStatus>,
+    /// Lake packages the build resolved that no source covers.
+    pub unindexed: Vec<Package>,
+}
+
 pub struct Status<'a> {
     pub repo: &'a dyn DeclRepo,
     pub revisions: &'a dyn Revisions,
+    pub packages: &'a dyn Packages,
     pub workspace: &'a Workspace,
     /// Now, in seconds since the Unix epoch.
     pub now: u64,
 }
 
 impl Status<'_> {
-    pub fn run(&self) -> Result<Vec<SourceStatus>> {
+    pub fn run(&self) -> Result<Report> {
         let counts = self.repo.counts()?;
         let mut out = Vec::new();
         for s in self.workspace.sources.iter() {
@@ -90,6 +109,6 @@ impl Status<'_> {
                 age: was.map(|p| self.now.saturating_sub(p.indexed_at)),
             });
         }
-        Ok(out)
+        Ok(Report { sources: out, unindexed: self.packages.unindexed() })
     }
 }

@@ -7,7 +7,7 @@
 //! contain it at all.
 
 use crate::application::generated;
-use crate::application::ports::{DeclRepo, SourceFiles, Workspace};
+use crate::application::ports::{DeclRepo, Packages, SourceFiles, Workspace};
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::DeclName;
@@ -52,11 +52,27 @@ pub struct Show<'a> {
     pub repo: &'a dyn DeclRepo,
     pub files: &'a dyn SourceFiles,
     pub workspace: &'a Workspace,
+    /// Consulted only when the name is missing, to tell a name the index does
+    /// not have from a corpus the index never had.
+    pub packages: &'a dyn Packages,
 }
 
 impl Show<'_> {
     pub fn run(&self, name: &DeclName) -> Result<Shown> {
         let Some(decl) = self.repo.get(name)? else {
+            // `try --name` is good advice only when the name might be in the
+            // index under a different spelling. When the namespace belongs to a
+            // package nothing indexed, that search returns the same nothing, or
+            // worse, a page of near-misses from Mathlib that read like an
+            // answer. Say which corpus is missing instead.
+            if let Some(p) = self.packages.providing(name.as_str()) {
+                bail!(
+                    "{name} is in the lake package `{}`, which is not a source of this index; \
+                     add it to discrtree.toml and re-run `dt dump {}` and `dt index`",
+                    p.name,
+                    p.name
+                )
+            }
             bail!("{name} is not in the index; try `dt find --name {}`", name.base())
         };
         let import =

@@ -86,6 +86,55 @@ pub trait Revisions {
     fn current(&self, source: &SourceId) -> Result<Option<String>>;
 }
 
+/// A package a `lake` build resolved: the directory it sits in, and the module
+/// prefixes it provides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+    /// The directory name under `.lake/packages`, which is what a source entry
+    /// would have to name to index it.
+    pub name: String,
+    /// The library roots, e.g. `Batteries`. Anything under one of these already
+    /// resolves from an `import` line in the project; only the index is missing
+    /// it, which is what makes the gap invisible.
+    pub roots: Vec<String>,
+}
+
+/// The packages a build resolved that no source covers.
+///
+/// A `discrtree.toml` names Mathlib and stops there, and everything Mathlib is
+/// built on — batteries, aesop, Qq — is then importable from the project and
+/// absent from every search. No question asked of the index can discover that:
+/// a corpus that was never dumped leaves nothing behind to find. The directory
+/// the build resolved is the only evidence there is.
+pub trait Packages {
+    /// Every resolved package that no configured source points at.
+    fn unindexed(&self) -> Vec<Package>;
+
+    /// The unindexed package that provides this module prefix or declaration
+    /// name, if one does. `Batteries.RBNode.Balanced` comes back as `batteries`
+    /// whether it was asked for as a name or as an `--in` prefix, because the
+    /// answer to both is the same missing source.
+    fn providing(&self, prefix: &str) -> Option<Package> {
+        self.unindexed().into_iter().find(|p| p.roots.iter().any(|r| under(r, prefix)))
+    }
+}
+
+/// Whether `prefix` is the root module or something below it. `Batteries` and
+/// `Batteries.Data` are, `BatteriesTest` is not.
+fn under(root: &str, prefix: &str) -> bool {
+    prefix == root || prefix.strip_prefix(root).is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// A build with nothing beside its sources: a project that is not a lake
+/// project at all, and every test that is not about packages.
+pub struct NoPackages;
+
+impl Packages for NoPackages {
+    fn unindexed(&self) -> Vec<Package> {
+        Vec::new()
+    }
+}
+
 /// Reading the corpora on disk.
 pub trait SourceFiles {
     /// The text of one module of one source.
@@ -157,5 +206,46 @@ pub struct Workspace {
 impl Workspace {
     pub fn meta(&self, id: &SourceId) -> Option<SourceMeta> {
         self.sources.get(id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Build(Vec<Package>);
+    impl Packages for Build {
+        fn unindexed(&self) -> Vec<Package> {
+            self.0.clone()
+        }
+    }
+
+    fn build() -> Build {
+        Build(vec![
+            Package { name: "batteries".into(), roots: vec!["Batteries".into()] },
+            Package { name: "importGraph".into(), roots: vec!["ImportGraph".into()] },
+        ])
+    }
+
+    #[test]
+    fn a_prefix_is_traced_to_the_package_that_provides_it() {
+        assert_eq!(build().providing("Batteries").unwrap().name, "batteries");
+        assert_eq!(build().providing("Batteries.Data.RBMap").unwrap().name, "batteries");
+        assert_eq!(build().providing("ImportGraph.Cli").unwrap().name, "importGraph");
+    }
+
+    #[test]
+    fn a_root_is_a_module_boundary_not_a_string_prefix() {
+        // `BatteriesTest` starts with `Batteries` and is a different library.
+        // Claiming the package provides it would send the reader to add a
+        // source that does not have what they asked for.
+        assert!(build().providing("BatteriesTest").is_none());
+        assert!(build().providing("Mathlib.Analysis").is_none());
+    }
+
+    #[test]
+    fn a_build_with_nothing_beside_its_sources_traces_nothing() {
+        assert!(NoPackages.providing("Batteries").is_none());
+        assert!(NoPackages.unindexed().is_empty());
     }
 }
