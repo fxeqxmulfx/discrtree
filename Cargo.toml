@@ -1,11 +1,11 @@
 [package]
 name = "discrtree"
-version = "0.25.0"
+version = "0.25.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 description = "Find Lean declarations by shape and lift them into a proof"
-repository = "https://github.com/misha/discrtree"
+repository = "https://github.com/fxeqxmulfx/discrtree"
 keywords = ["lean", "lean4", "mathlib", "search", "proof"]
 categories = ["command-line-utilities", "development-tools"]
 
