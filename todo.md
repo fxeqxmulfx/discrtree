@@ -152,3 +152,42 @@ lines are genuinely theirs.
 `dt add` had the same defect and got the same fix: it copies the generating
 declaration, once for both halves of a pair, because an attribute block vendored
 with nothing under it is a file that does not compile.
+
+## The other lake packages are not indexed, and nothing says so
+
+A project's `discrtree.toml` names Mathlib as a `lake` source and stops there,
+so everything Mathlib itself is built on -- `batteries`, `aesop`, `Qq`,
+`plausible`, `Cli`, `importGraph` -- is invisible to `find` and `show`, even
+though every declaration in them is importable from the project without adding
+a dependency.  In `transformer` that is 1 161 + 325 936 + 58 674 rows indexed
+and all of Batteries missing.
+
+It fails silently, which is the part worth fixing.  Looking for the red-black
+depth bound:
+
+    $ dt find --name Balanced --in Batteries
+    no match: --in Batteries matches nothing on its own
+    $ dt show Batteries.RBNode.Balanced
+    Batteries.RBNode.Balanced is not in the index; try `dt find --name Balanced`
+    $ dt find --name Balanced
+    Ordnode.BalancedSz  def  Mathlib.Data.Ordmap.Invariants
+    ...
+
+Three answers, none of which says "Batteries is not a source of this index".
+The last one is the worst: it returns ten Mathlib rows, so it reads like a
+complete answer to a question it did not search.  The declaration wanted was
+`RBTree.RBNode.WF.depth_bound`, and it was found by `grep -rn` over
+`.lake/packages/batteries`, which is the one thing `dt` exists to prevent.
+
+Two repairs, both small:
+
+* `dt status` lists the directories under `.lake/packages` that are not
+  configured as sources, the way it already lists the sources that are stale.
+  That is where a user looks when an answer seems thin.
+* `--in <prefix>` that matches no indexed module says so, instead of reporting
+  that the filter matched nothing.  The two cases are different: a prefix
+  inside an indexed source that happens to be empty, and a prefix belonging to
+  a source that was never indexed.
+
+The third repair is not dt's: a project that wants those packages can add them
+as `lake` sources itself.  But it has to know they are missing first.
