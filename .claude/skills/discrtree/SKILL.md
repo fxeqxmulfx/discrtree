@@ -4,8 +4,8 @@ description: Search indexed Lean 4 corpora by the shape of a statement, by name,
 ---
 
 `dt` answers two questions without a Lean session: where is the declaration
-with this shape, and what it takes to use it here. Unlike `#find` it searches
-what is not imported, and answers with the import line.
+with this shape, and what it takes to use it here. Unlike `#find` it
+searches what is not imported.
 
     dt find 'Real.exp _ ≤ _'        shape: notation, head of each side
     dt find --name exp_le --in Mathlib.Analysis --kind theorem
@@ -18,18 +18,19 @@ what is not imported, and answers with the import line.
 
 Rules that are not guessable:
 
-- `_` is anything. A pattern implies `--elaborated`, because a row that was
-  never elaborated has no conclusion head to match.
+- `_` is anything. A pattern implies `--elaborated`: an unelaborated row has
+  no conclusion head to match.
 - A row marked `[text]` was read by a scanner, not by Lean: no shape, and its
-  dependencies are guessed from the file's imports.
+  deps are guesses.
+- Lean core (`Init`, `Std`, `Lean`) is a source you add yourself:
+  `kind = "core"`, no path, no root. Without it `List.head?` is `no match`.
 - `--in` wants a whole module prefix from the root — `Mathlib.Analysis`, not
   `Analysis`. `--name` is a substring, `--text` whole words.
 - Conditions are AND; `no match` names the condition to blame. An unknown
   `--source`, or a shape asked of a text source, errors, not an empty result.
-- A `dt:` line on stderr means a source moved since it was indexed: rows may be
-  missing — `no match` most often. Re-run the `dt refresh` it names.
-- Default limit is 10; the footer says when more matched. `find --long` adds
-  the full type and the docstring.
+- A `dt:` line on stderr means a source moved since it was indexed: rows may
+  be missing. Re-run the `dt refresh` it names.
+- Default limit is 10. `find --long` adds the full type and the docstring.
 
 `dt <command> --help` has the rest. Setup: `dt init`, edit discrtree.toml,
 `dt fetch`, `dt dump` (minutes), `dt index`.
