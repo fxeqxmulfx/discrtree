@@ -583,7 +583,25 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // fraction of what comes back will fail it.
     let cap =
         if q.shape.args.is_empty() { (q.limit * 20).max(200) } else { (q.limit * 20).max(20_000) };
-    (format!("SELECT d.* FROM decl d{filter} LIMIT {cap}"), binds)
+    // Which rows the domain gets to rank, not what it ranks them as. `--name`
+    // is a substring filter, and the row called exactly what was asked for can
+    // sit anywhere among tens of thousands that merely contain it -- outside
+    // the window, it is not ranked first, it is absent. The three terms mirror
+    // `query::rank`, so the window is filled with the rows it would choose.
+    // The `_` in a name is a LIKE wildcard and over-matches here; that changes
+    // which rows are offered, never which one wins.
+    let order = match &q.name {
+        Some(n) => {
+            let n = n.to_lowercase();
+            binds.push(n.clone());
+            binds.push(format!("%.{n}"));
+            binds.push(format!("{n}%"));
+            " ORDER BY (lower(d.name) = ?) DESC, (lower(d.name) LIKE ?) DESC, \
+             (lower(d.name) LIKE ?) DESC, length(d.name)"
+        }
+        None => "",
+    };
+    (format!("SELECT d.* FROM decl d{filter}{order} LIMIT {cap}"), binds)
 }
 
 /// FTS5 treats bare punctuation as syntax. Quoting every term makes a search

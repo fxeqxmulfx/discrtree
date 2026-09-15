@@ -582,3 +582,37 @@ fn a_maintained_load_leaves_the_fixed_prices_unpaid() {
     filled(&mut db);
     assert_ne!(before, stat(), "a full reload must leave the statistics current");
 }
+
+/// `--name` is a substring filter, and the rows it matches are cut to a window
+/// before the domain ranks them. A name that is also a namespace matches more
+/// rows than the window holds, so the one called exactly that has to be inside
+/// it: outside, no ranking can put it first, because it is not there at all.
+#[test]
+fn the_row_called_exactly_what_was_asked_for_is_inside_the_window() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    // Enough descendants to fill the window several times over, all of them
+    // matching the substring, none of them the row that was asked for -- and
+    // written first, so that the row that was asked for is past the window in
+    // the order the rows happen to be stored.
+    let mut rows: Vec<_> = (0..300)
+        .map(|i| {
+            theorem(
+                &format!("Real.sin_sq_le_{i}"),
+                "mathlib",
+                "Mathlib.Analysis.Trig",
+                "LE.le",
+                &[],
+            )
+        })
+        .collect();
+    rows.push(theorem("Real.sin_sq", "mathlib", "Mathlib.Analysis.Trig", "Eq", &[]));
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let mut q = Query::new();
+    q.name = Some("Real.sin_sq".into());
+    let got = db.find(&q).unwrap();
+    assert!(
+        got.iter().any(|d| d.name.as_str() == "Real.sin_sq"),
+        "the exact row is missing from the window entirely"
+    );
+}

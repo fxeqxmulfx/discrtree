@@ -1153,3 +1153,42 @@ down".
 `dt show Real.sin_sq` answers correctly, so this is only about ordering:
 an exact name match should sort first, and a prefix match ahead of an
 interior one. The filter itself is right — the ranking is what is missing.
+
+Fixed in 0.24.0.  Ranking, as the entry says, and in two places for one rule.
+
+`query::rank` scores how much of the row's name the query accounted for, ahead
+of everything else it scores: a name given in full is worth more than the shape
+agreement below it, because a caller who writes the whole name has said which
+row they want and nothing else in the query says it more precisely.
+
+    the name is the query              8
+    the query is the name, unqualified 6   `sin_sq` for `Real.sin_sq`
+    the name begins with the query     2
+    the query is somewhere inside it   0
+
+Case-insensitively, because the filter is.  The old tie-break -- shortest type
+first -- is what put `Real.sin_sq_le_one` on top, and still decides between
+rows that score the same.
+
+    $ dt find --name Real.sin_sq
+    Real.sin_sq          theorem  Mathlib.Analysis.Complex.Trigonometric
+      ∀ (x : ℝ), Real.sin x ^ 2 = 1 - Real.cos x ^ 2
+    Real.sin_sq_le_one   theorem  Mathlib.Analysis.Complex.Trigonometric
+    ...
+    $ dt find --name sin_sq
+    Real.sin_sq          theorem  Mathlib.Analysis.Complex.Trigonometric
+    Complex.sin_sq       theorem  Mathlib.Analysis.Complex.Trigonometric
+
+The second place is the one the entry could not see.  Ranking happens in the
+domain over a window of rows SQLite is asked for -- 200 for a name query -- and
+for a name that is also a namespace the window is filled before the row itself
+is reached: `dt find --name Real.exp` returned `EReal.exp_bot` first out of
+thousands, and `Real.exp` was not below it, it was absent.  The SQL now orders
+by the same three tests before the cap, so the window is filled with the rows
+the domain would choose.  Sorting is what `LIKE '%x%'` costs anyway: on the
+1.2 GB index `--name Real.exp` is 0.21 s, unchanged, and the worst case that
+exists -- `--name e`, 463 306 matching rows -- is 0.37 s.
+
+Neither half works without the other, and each is testable on its own: the
+ranking against a handful of rows in the domain, the window against 301 rows
+in SQLite with the answer written last.

@@ -177,12 +177,15 @@ impl PartialEq for Query {
 
 impl Eq for Query {}
 
-/// How well a result answers the query, for ordering. Shape agreement first,
-/// then how much of the type is spent on things the query did not ask for: a
-/// two-line lemma about exactly the right constants beats a long one that
-/// happens to mention them.
+/// How well a result answers the query, for ordering. How much of the name the
+/// query accounted for, then shape agreement, then how much of the type is
+/// spent on things the query did not ask for: a two-line lemma about exactly
+/// the right constants beats a long one that happens to mention them.
 pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     let mut score = 0;
+    if let Some(n) = &q.name {
+        score += name_score(n, d);
+    }
     if q.shape.concl.is_some() && q.shape.concl == d.shape.concl {
         score += 4;
     }
@@ -192,6 +195,32 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     }
     // Descending score, then ascending type length.
     (u32::MAX - score, d.ty.len())
+}
+
+/// How much of the row's name `--name` accounts for.
+///
+/// The filter is a substring test, which is the right filter and no ordering
+/// at all: `Real.sin_sq` came fourth behind three of its own suffixes, sorted
+/// by type length like everything else. A name given in full is a request for
+/// that declaration, and one given without its namespace is a request for the
+/// declaration called that -- both outrank a row that merely begins with it,
+/// which in turn outranks one that contains it somewhere in the middle.
+///
+/// It outscores the shape agreement below deliberately. A caller who writes
+/// the whole name has said which row they want, and nothing else in the query
+/// says it more precisely.
+fn name_score(asked: &str, d: &Decl) -> u32 {
+    let asked = asked.to_lowercase();
+    let name = d.name.as_str().to_lowercase();
+    if name == asked {
+        8
+    } else if d.name.base().to_lowercase() == asked {
+        6
+    } else if name.starts_with(&asked) {
+        2
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +239,35 @@ mod tests {
         d.consts = ["Iff", "LE.le", "Real.exp"].iter().map(|s| DeclName::new(*s)).collect();
         d.doc = Some("`exp` is monotone.".into());
         d
+    }
+
+    /// The report: `--name Real.sin_sq` put `Real.sin_sq` fourth, behind three
+    /// of its own suffixes, because within the substring matches nothing
+    /// preferred the row whose name *is* the query. Past the default limit
+    /// that reads as "not indexed" rather than "look further down".
+    #[test]
+    fn a_name_given_in_full_ranks_above_the_names_that_extend_it() {
+        let named = |n: &str| {
+            let mut d = Decl::stub(n, "mathlib", "Mathlib.Analysis.Trigonometric");
+            // Shorter type, so the old tie-break would have put it first.
+            d.ty = "short".into();
+            d
+        };
+        let mut q = Query::new();
+        q.name = Some("Real.sin_sq".into());
+        let exact = Decl::stub("Real.sin_sq", "mathlib", "Mathlib.Analysis.Trigonometric");
+        assert!(rank(&q, &exact) < rank(&q, &named("Real.sin_sq_le_one")));
+        // A prefix of the query still beats a row that merely contains it.
+        assert!(
+            rank(&q, &named("Real.sin_sq_le_one")) < rank(&q, &named("Complex.of_Real.sin_sq"))
+        );
+        // Unqualified: the row called that is the row that was asked for,
+        // whichever namespace it is in.
+        q.name = Some("sin_sq".into());
+        assert!(rank(&q, &exact) < rank(&q, &named("Real.sin_sq_le_one")));
+        // And the filter is case-insensitive, so the ranking is too.
+        q.name = Some("REAL.SIN_SQ".into());
+        assert!(rank(&q, &exact) < rank(&q, &named("Real.sin_sq_le_one")));
     }
 
     #[test]

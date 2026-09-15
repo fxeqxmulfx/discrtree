@@ -807,3 +807,21 @@ fn the_skill_is_short_and_well_formed() {
     // The invariant an agent gets wrong without being told.
     assert!(body.contains("[text]"), "the skill must carry the one invariant:\n{body}");
 }
+
+/// `dt find --name Real.exp` and `dt show Real.exp` should agree about which
+/// declaration is meant. The filter is a substring and the rows that extend
+/// the name outnumber it, so without a ranking rule the row that was named
+/// arrives below them -- and below the default limit, on a real corpus.
+#[test]
+fn asking_for_a_declaration_by_its_whole_name_puts_it_first() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("Real.exp".into());
+    let hits = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
+    assert_eq!(hits.rows.first().map(|d| d.name.as_str()), Some("Real.exp"), "{:?}", hits.rows);
+    // Unqualified, the row called that is still the one meant: `Real.exp` is
+    // what `exp` names here, and `Real.exp_le_exp` is not.
+    q.name = Some("exp".into());
+    let hits = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
+    assert_eq!(hits.rows.first().map(|d| d.name.as_str()), Some("Real.exp"), "{:?}", hits.rows);
+}
