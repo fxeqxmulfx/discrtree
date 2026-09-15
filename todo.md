@@ -472,3 +472,42 @@ action there is; it should be one command, and the flag that `dump` accepts
 should be accepted by `index` too (even as a no-op) so the obvious guess works.
 
 Reported from the transformer repo, 2026-09-15.
+
+Fixed 2026-09-15 in dt 0.10.0, and not as a no-op: `dt index project`
+indexes that source and leaves the others where they are, which is what the
+word narrows to mean once it can be narrowed.  `--source` is accepted
+everywhere the positional is -- `dump`, `scan`, `fetch`, `index`, `refresh` --
+and hidden from `--help`, so the guess works without teaching a second
+spelling to anyone who never made it.  `--rebuild` refuses a source name
+outright rather than narrowing: it deletes the database, so "rebuild this one
+source" would read as the opposite of what it does.
+
+`dt refresh` is the command the warning was describing.  With a name it reads
+that source again and indexes it -- from the build if the source is
+elaborated, from the checkout if it is text, which is the whole reason the
+advice used to come in two flavours -- and it does so whether or not the
+source looks stale, because naming one means knowing something the timestamps
+do not.  With no name it refreshes exactly the stale sources, never all of
+them: a bare word that can start a 25-minute Mathlib dump is a word nobody
+can type with confidence.  The re-index is forced, since the fingerprint it
+would consult is one this command just rewrote.
+
+Both messages now name it.  The `dt:` line says "re-run `dt refresh project`",
+and `dt status` prints one `behind:` line for every stale source instead of
+splitting them across `behind the build:` and `behind the checkout:` -- that
+split existed only to tell the reader which of two commands applied to them,
+and there is one command now.
+
+## Lean core is not indexable, and `List` is where that hurts
+
+`dt show List.chain_append` answers that `List` is a namespace core declares
+in and core is not a source of this index — clear, and a dead end.  Today's
+work needed `List.IsChain` (renamed from `Chain'` in Mathlib v4.33.1) and its
+append/split lemmas; the split ones are Mathlib's and dt found them, but
+`List.head?`, `List.getLast?` and their whole API are core's, so every question
+about them fell back to grep over `.lake/packages`.  A `kind = "core"` source
+pointing at the toolchain's `src/lean` would cover `Init.Data.List`,
+`Init.Data.Option` and `Init.Data.Nat`, which between them are most of what a
+data-structure proof reaches for.
+
+Reported from the transformer repo, 2026-09-15.

@@ -361,24 +361,14 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
     // with confidence and is wrong, which is the failure this tool exists to
     // prevent, not to commit.
     //
-    // Two lines rather than one because what brings a source up to date is
-    // whatever reads it, and that differs: an elaborated source is read from
-    // the build by `dt dump`, a text source from the checkout by `dt fetch`.
-    // Printing both commands for both was advice nobody could act on without
-    // first working out which half applied to them.
-    let stale = |elaborated: bool| -> Vec<&str> {
-        rows.iter()
-            .filter(|r| r.stale() && r.elaborated == elaborated)
-            .map(|r| r.name.as_str())
-            .collect()
-    };
-    for (which, names, fix) in [
-        ("build", stale(true), "`dt dump` and `dt index`"),
-        ("checkout", stale(false), "`dt fetch` and `dt index`"),
-    ] {
-        if !names.is_empty() {
-            out.push_str(&format!("\nbehind the {which}: {} — re-run {fix}\n", names.join(", ")));
-        }
+    // One line and one command. This used to be two lines, split by what
+    // reads the source — the build for an elaborated one, the checkout for a
+    // text one — because the reader had to run the right half themselves.
+    // `dt refresh` picks the half, and with no argument it refreshes exactly
+    // the sources this line names, so the advice is the command.
+    let stale: Vec<&str> = rows.iter().filter(|r| r.stale()).map(|r| r.name.as_str()).collect();
+    if !stale.is_empty() {
+        out.push_str(&format!("\nbehind: {} — re-run `dt refresh`\n", stale.join(", ")));
     }
     // The gap no row above can show. A project declares Mathlib and stops, and
     // everything Mathlib is built on is importable from the project already and
@@ -547,12 +537,12 @@ mod tests {
         }
     }
 
-    /// What brings a source up to date depends on what reads it. Telling
-    /// somebody to `dt fetch` the project they are writing is advice they
-    /// cannot follow, and advice nobody can follow is how a warning gets
-    /// filtered out of a terminal.
+    /// What brings a source up to date depends on what reads it, and working
+    /// that out is the reader's job only if the tool refuses to do it. One
+    /// command covers both halves, so the advice names one command and every
+    /// source it applies to.
     #[test]
-    fn the_repair_named_is_the_one_that_reads_the_source() {
+    fn the_repair_named_is_the_one_command_that_reads_either_source() {
         use crate::domain::source::SourceKind;
         let rows =
             [behind("project", SourceKind::Local, true), behind("flt", SourceKind::Git, false)];
@@ -561,8 +551,7 @@ mod tests {
         // needs to see how far behind the index is.
         assert!(r.contains("4f21c8e (now 9ab0d31, stale)"), "{r}");
         assert!(!r.contains("  \n") && !r.ends_with(" \n"), "no row ends in padding: {r:?}");
-        assert!(r.contains("behind the build: project — re-run `dt dump` and `dt index`"), "{r}");
-        assert!(r.contains("behind the checkout: flt — re-run `dt fetch` and `dt index`"), "{r}");
+        assert!(r.contains("behind: project, flt — re-run `dt refresh`"), "{r}");
         // A source that is where it was is not named at all.
         let current = [SourceStatus {
             current_rev: Some("4f21c8e".into()),

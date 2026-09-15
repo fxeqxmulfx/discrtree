@@ -64,6 +64,10 @@ pub enum Command {
     Dump {
         /// Source name. All compiled sources when omitted.
         source: Option<String>,
+        /// Spelling the positional name as a flag, for the hands that reach
+        /// for `--source` first. Hidden: `--help` should teach one spelling.
+        #[arg(long = "source", value_name = "SOURCE", conflicts_with = "source", hide = true)]
+        source_flag: Option<String>,
         /// Skip proof terms: a much faster dump, with no dependency lists.
         #[arg(long)]
         no_deps: bool,
@@ -73,12 +77,20 @@ pub enum Command {
     Scan {
         /// Source name. All text sources when omitted.
         source: Option<String>,
+        /// Spelling the positional name as a flag, for the hands that reach
+        /// for `--source` first. Hidden: `--help` should teach one spelling.
+        #[arg(long = "source", value_name = "SOURCE", conflicts_with = "source", hide = true)]
+        source_flag: Option<String>,
     },
 
     /// Clone or update a text source.
     Fetch {
         /// Source name. All git sources when omitted.
         source: Option<String>,
+        /// Spelling the positional name as a flag, for the hands that reach
+        /// for `--source` first. Hidden: `--help` should teach one spelling.
+        #[arg(long = "source", value_name = "SOURCE", conflicts_with = "source", hide = true)]
+        source_flag: Option<String>,
     },
 
     /// Build the search index from whatever has been dumped and scanned.
@@ -87,12 +99,41 @@ pub enum Command {
     /// alone. Re-reading a 700 MB dump to discover that it is the same dump is
     /// the slowest way to do nothing.
     Index {
+        /// Source name. Every source with anything new when omitted.
+        source: Option<String>,
+        /// Spelling the positional name as a flag, for the hands that reach
+        /// for `--source` first. Hidden: `--help` should teach one spelling.
+        #[arg(long = "source", value_name = "SOURCE", conflicts_with = "source", hide = true)]
+        source_flag: Option<String>,
         /// Delete the index and start over. Needed when the schema changes.
-        #[arg(long)]
+        ///
+        /// Not compatible with a source name: this deletes the whole database,
+        /// which is the opposite of what naming one source asks for.
+        #[arg(long, conflicts_with_all = ["source", "source_flag"])]
         rebuild: bool,
         /// Re-index every source, including the ones that have not changed.
         #[arg(long)]
         force: bool,
+    },
+
+    /// Read a source again and index it: the two commands the staleness
+    /// warning used to name, as the one action they always were.
+    ///
+    /// Which two depends on the source and is the reason this exists: a
+    /// compiled source is read from the build by `dt dump`, a text source from
+    /// its checkout by `dt fetch`, and only `dt index` is common to both.
+    ///
+    /// A named source is refreshed whether or not it looks stale, because the
+    /// reason to name one is that you know something the timestamps do not.
+    /// With no name, exactly the sources that have fallen behind — never all
+    /// of them, which would mean dumping Mathlib again for nothing.
+    Refresh {
+        /// Source name. Every stale source when omitted.
+        source: Option<String>,
+        /// Spelling the positional name as a flag, for the hands that reach
+        /// for `--source` first. Hidden: `--help` should teach one spelling.
+        #[arg(long = "source", value_name = "SOURCE", conflicts_with = "source", hide = true)]
+        source_flag: Option<String>,
     },
 
     /// What is indexed, whether it is elaborated, and whether it is current.

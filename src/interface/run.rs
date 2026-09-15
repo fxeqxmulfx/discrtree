@@ -54,10 +54,22 @@ impl App {
         match command {
             // Handled before the configuration is loaded.
             Command::Init { .. } | Command::Skill { .. } => Ok(()),
-            Command::Dump { source, no_deps } => self.dump(source.as_deref(), !no_deps),
-            Command::Scan { source } => self.scan(source.as_deref()),
-            Command::Fetch { source } => self.fetch(source.as_deref()),
-            Command::Index { rebuild, force } => self.index(rebuild, force),
+            Command::Dump { source, source_flag, no_deps } => {
+                self.dump(named(source, source_flag).as_deref(), !no_deps)
+            }
+            Command::Scan { source, source_flag } => {
+                self.scan(named(source, source_flag).as_deref())
+            }
+            Command::Fetch { source, source_flag } => {
+                self.fetch(named(source, source_flag).as_deref())
+            }
+            Command::Index { source, source_flag, rebuild, force } => {
+                let only = self.only(named(source, source_flag).as_deref())?;
+                self.index(only.as_deref(), rebuild, force)
+            }
+            Command::Refresh { source, source_flag } => {
+                self.refresh(named(source, source_flag).as_deref())
+            }
             Command::Status => self.status(),
             Command::Show { names, import_only } => self.show(&names, import_only),
             Command::Deps { name, depth } => self.deps(&name, &depth),
@@ -227,13 +239,9 @@ impl App {
         // outcome than the staleness the warning was about to report.
         let Ok(stale) = status::stale_among(repo, &revs, among) else { return };
         for id in stale {
-            let fix = match self.cfg.source(id.as_str()).is_ok_and(Source::elaborated) {
-                true => "dump",
-                false => "fetch",
-            };
             eprintln!(
                 "dt: `{id}` moved since it was indexed; this answer may be out of date \
-                 — re-run `dt {fix} {id}` and `dt index`"
+                 — re-run `dt refresh {id}`"
             );
         }
     }
@@ -385,7 +393,17 @@ impl App {
         Ok(())
     }
 
-    fn index(&self, rebuild: bool, force: bool) -> Result<()> {
+    /// The sources `dt index` was pointed at, as names it has already checked
+    /// exist. `None` is every source, which is what indexing has always meant.
+    fn only(&self, source: Option<&str>) -> Result<Option<Vec<String>>> {
+        match source {
+            Some(n) => Ok(Some(vec![self.cfg.source(n)?.name.clone()])),
+            None => Ok(None),
+        }
+    }
+
+    fn index(&self, only: Option<&[String]>, rebuild: bool, force: bool) -> Result<()> {
+        let wanted = |s: &Source| only.is_none_or(|only| only.contains(&s.name));
         let db = self.cfg.db_path();
         if rebuild && db.exists() {
             std::fs::remove_file(&db)?;
@@ -400,7 +418,7 @@ impl App {
         // Compiled sources first: the text scanner resolves its identifiers
         // against what is already indexed, so an empty index would leave every
         // text row with no dependencies at all.
-        for s in self.cfg.sources.iter().filter(|s| s.elaborated()) {
+        for s in self.cfg.sources.iter().filter(|s| s.elaborated() && wanted(s)) {
             let path = self.cfg.jsonl_path(s);
             if !path.is_file() {
                 eprintln!("{}: not dumped yet, skipping (`dt dump {}`)", s.name, s.name);
@@ -427,7 +445,7 @@ impl App {
             changed = true;
             report(&s.name, read, stored, "");
         }
-        for s in self.cfg.sources.iter().filter(|s| !s.elaborated()) {
+        for s in self.cfg.sources.iter().filter(|s| !s.elaborated() && wanted(s)) {
             let dir = self.cfg.source_dir(s);
             if !dir.is_dir() {
                 eprintln!("{}: not on disk yet, skipping (`dt fetch {}`)", s.name, s.name);
@@ -458,6 +476,46 @@ impl App {
         }
         println!("\nindex: {} ({} rows)", db.display(), sqlite.count()?);
         Ok(())
+    }
+
+    /// Read a source again and index it, which is two commands only because
+    /// the reading half has two shapes: a compiled source comes from the
+    /// build, a text source from its checkout.
+    ///
+    /// With no name this refreshes the stale sources and no others. The
+    /// tempting alternative — refresh everything — is how a one-word command
+    /// turns into a Mathlib dump nobody asked for.
+    fn refresh(&self, source: Option<&str>) -> Result<()> {
+        let targets: Vec<String> = match source {
+            Some(n) => vec![self.cfg.source(n)?.name.clone()],
+            None => {
+                let repo = self.repo()?;
+                let revs = OnDisk::read(&self.cfg);
+                let among = self.workspace.sources.iter().map(|s| s.id.clone());
+                status::stale_among(repo.as_ref(), &revs, among)?
+                    .into_iter()
+                    .map(|id| id.as_str().to_owned())
+                    .collect()
+            }
+        };
+        if targets.is_empty() {
+            println!("nothing has moved since it was indexed");
+            return Ok(());
+        }
+        for name in &targets {
+            let s = self.cfg.source(name)?;
+            if s.elaborated() {
+                self.dump(Some(name), true)?;
+            } else if s.kind == config::Kind::Git {
+                self.fetch(Some(name))?;
+            }
+            // A local text source is read straight from its directory, so
+            // there is nothing to fetch and the indexing below is the refresh.
+        }
+        // Forced: the source was named, or measured stale. Either way the
+        // fingerprint check has already been answered, and answering it again
+        // from a file this command just rewrote is how a refresh does nothing.
+        self.index(Some(&targets), false, true)
     }
 
     /// Whether this source can be left alone. Only when its input carries a
@@ -506,6 +564,13 @@ impl App {
             }
         }
     }
+}
+
+/// The source name, however it was spelled. `--source` is hidden rather than
+/// removed: it is the guess a flag-shaped memory makes, and refusing it would
+/// teach nothing that accepting it does not.
+fn named(positional: Option<String>, flag: Option<String>) -> Option<String> {
+    positional.or(flag)
 }
 
 fn init(explicit: Option<&std::path::Path>, force: bool) -> Result<()> {
@@ -635,6 +700,51 @@ mod tests {
             Command::Find(a) => a,
             _ => unreachable!("not a find"),
         }
+    }
+
+    /// The name of the source a command was pointed at, however it was
+    /// spelled.
+    fn source_arg(argv: &[&str]) -> Option<String> {
+        match Cli::parse_from(argv).command {
+            Command::Dump { source, source_flag, .. }
+            | Command::Scan { source, source_flag }
+            | Command::Fetch { source, source_flag }
+            | Command::Index { source, source_flag, .. }
+            | Command::Refresh { source, source_flag } => named(source, source_flag),
+            _ => unreachable!("not a command that takes a source"),
+        }
+    }
+
+    /// `dt dump project` and `dt index` were the two halves of one action
+    /// spelled two ways, and the warning that named them taught the wrong
+    /// guess: `dt index --source project` used to be a usage error. Both
+    /// spellings now arrive at the same source on every command that has one.
+    #[test]
+    fn a_source_can_be_named_positionally_or_as_a_flag() {
+        for cmd in ["dump", "scan", "fetch", "index", "refresh"] {
+            assert_eq!(source_arg(&["dt", cmd, "project"]).as_deref(), Some("project"), "{cmd}");
+            assert_eq!(
+                source_arg(&["dt", cmd, "--source", "project"]).as_deref(),
+                Some("project"),
+                "{cmd}"
+            );
+            assert_eq!(source_arg(&["dt", cmd]), None, "{cmd}");
+        }
+    }
+
+    /// `--rebuild` deletes the database. Accepting a source name alongside it
+    /// would read as "rebuild this one source" and do the opposite.
+    #[test]
+    fn rebuilding_cannot_be_narrowed_to_one_source() {
+        assert!(Cli::try_parse_from(["dt", "index", "--rebuild", "project"]).is_err());
+        assert!(Cli::try_parse_from(["dt", "index", "--rebuild", "--source", "project"]).is_err());
+        assert!(Cli::try_parse_from(["dt", "index", "--rebuild"]).is_ok());
+    }
+
+    /// One name, two spellings, and no way to give both.
+    #[test]
+    fn a_source_cannot_be_named_twice() {
+        assert!(Cli::try_parse_from(["dt", "index", "a", "--source", "b"]).is_err());
     }
 
     #[test]
