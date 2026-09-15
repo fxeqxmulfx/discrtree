@@ -1004,6 +1004,46 @@ cold for `uses`, and both count the same thing.  The rule itself lives in
 `domain::decl::commonest_called`, so the in-memory stores and the SQL count
 agree by construction rather than by inspection.
 
-Not fixed: `⟪_, _⟫_ℝ`, the notation spelling from the third query above.  That
-is the parser's problem, not the resolver's -- notation is not a name, and the
-index holds no notation -- and it wants its own entry.
+Not fixed here: `⟪_, _⟫_ℝ`, the notation spelling from the third query above.
+That is the parser's problem, not the resolver's -- notation is not a name, and
+the index holds no notation -- so it got its own follow-up below.
+
+### Follow-up: the notation spelling of the same query
+
+    $ dt find '⟪_, _⟫_ℝ = _'
+    no match: `_ℝ` in the pattern matches nothing on its own
+
+Fixed in 0.22.0, in the tokenizer and the notation table, which is where every
+other operator a user types is already handled.  Two things were wrong and only
+the second one showed:
+
+- `⟪` was not in the table, so the side it heads contributed no head symbol;
+- `⟫_ℝ` tokenized as the closing bracket and an *identifier* `_ℝ`, which then
+  became a `--uses` condition on a constant no project declares.  That is the
+  condition the message named, and it is the one thing in the pattern the user
+  could not have written differently.
+
+The type a bracket notation is ascribed with belongs to the bracket, the way
+`¹` belongs to `⁻` -- which the tokenizer already knew, for the same reason --
+so `⟫` now absorbs a following `_ℝ`, `_𝕜` or `_ℂ`, and `⟪` maps to
+`Inner.inner` at the precedence of the other bracket notations:
+
+    $ dt find '⟪_, _⟫_ℝ = _'
+    Real.inner_apply  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+      ∀ (x y : ℝ), inner ℝ x y = x * y
+    Quaternion.inner_def  theorem  Mathlib.Analysis.Quaternion
+      ∀ (a b : Quaternion ℝ), inner ℝ a b = (a * star b).re
+
+Whichever field is named, and naming none, read the same: the notation says
+which constant, never which instance.
+
+A pattern that is *nothing* but notation used to fall through to a free-text
+search, because the fallback looked for an identifier and notation has none.
+`⟪x, y⟫_ℝ` and `‖x‖` now yield their head symbol with no arguments -- notation
+hides the implicit arguments, so the head is all that can honestly be claimed,
+and a head alone is still a shape search rather than a text one.
+
+`⟪_, _⟫_ℝ` on its own is still `no match`, and correctly: nothing in Mathlib
+*concludes* an inner product, it concludes an equation between two of them.
+`Inner.inner _ _` spelled out gets the same answer, so the notation is no
+longer the odd one out, which is all this entry asked for.

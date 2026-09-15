@@ -44,6 +44,7 @@ const NOTATION: &[(&str, &str, u8)] = &[
     ("^", "HPow.hPow", 5),
     ("⁻¹", "Inv.inv", 6),
     ("‖", "Norm.norm", 6),
+    ("⟪", "Inner.inner", 6),
 ];
 
 /// What a pattern resolved to, so the caller can tell the user what was
@@ -117,6 +118,22 @@ pub fn parse(pattern: &str) -> Parsed {
                         hypotheses: count,
                     }
                 }
+                // No name to key on, but notation is a name: `⟪x, y⟫_ℝ`
+                // says `Inner.inner` as plainly as `Real.exp x` says
+                // `Real.exp`. Which argument is which is another matter --
+                // notation hides the implicit ones -- so the head is all this
+                // claims, and a head alone still matches.
+                None if notation_head(&tokens).is_some() => {
+                    query.shape = Shape::new(notation_head(&tokens), Vec::new());
+                    query.uses = dedup(assumed);
+                    Parsed {
+                        query,
+                        operator: None,
+                        extra_constants: Vec::new(),
+                        variables: vars,
+                        hypotheses: count,
+                    }
+                }
                 None => {
                     // Nothing recognisable: fall back to free text rather than
                     // returning an unconstrained query.
@@ -154,6 +171,21 @@ fn tokenize(s: &str) -> Vec<String> {
             continue;
         }
         match c {
+            // The type a bracket notation is ascribed with -- the `_ℝ` of
+            // `⟪x, y⟫_ℝ` -- belongs to the bracket, the way `¹` belongs to
+            // `⁻`. Left to itself it tokenizes as an identifier `_ℝ`, which
+            // names nothing, and the search became an empty result blaming a
+            // condition the user never wrote.
+            '⟫' => {
+                let mut sym = String::from(c);
+                if cs.peek() == Some(&'_') {
+                    sym.push(cs.next().unwrap_or_default());
+                    while cs.peek().is_some_and(|n| n.is_alphanumeric()) {
+                        sym.push(cs.next().unwrap_or_default());
+                    }
+                }
+                out.push(sym);
+            }
             '⁻' => {
                 let mut sym = String::from(c);
                 while cs.peek().is_some_and(|n| SUPERSCRIPTS.contains(*n)) {
@@ -247,12 +279,7 @@ fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<Stri
 /// with `Real.exp` demoted to a `uses` condition.
 fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     let mut rest = constants(tokens);
-    let notation = tokens
-        .iter()
-        .filter_map(|t| NOTATION.iter().find(|(sym, ..)| sym == t))
-        .min_by_key(|(.., prec)| *prec)
-        .map(|(_, head, _)| DeclName::new(*head));
-    if let Some(head) = notation {
+    if let Some(head) = notation_head(tokens) {
         return (ArgHead::Named(head), rest);
     }
     match tokens.iter().find(|t| is_ident(t)) {
@@ -267,6 +294,15 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
         }
         None => (ArgHead::Any, rest),
     }
+}
+
+/// The constant the loosest notation among these tokens stands for.
+fn notation_head(tokens: &[String]) -> Option<DeclName> {
+    tokens
+        .iter()
+        .filter_map(|t| NOTATION.iter().find(|(sym, ..)| sym == t))
+        .min_by_key(|(.., prec)| *prec)
+        .map(|(_, head, _)| DeclName::new(*head))
 }
 
 /// Whether a token names a bound variable rather than something to look up.
@@ -458,6 +494,34 @@ mod tests {
         assert_eq!(p.hypotheses, 0);
         assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
         assert!(!parse("→").query.is_empty());
+    }
+
+    /// The report: the inner product written the way Lean prints it. The
+    /// bracket is the head symbol, and the `_ℝ` that says which field is not
+    /// a constant to look up -- read as one it was the only thing the error
+    /// message could name.
+    #[test]
+    fn a_bracket_notation_is_a_head_symbol_and_its_ascription_is_not_a_name() {
+        let p = parse("⟪_, _⟫_ℝ = _");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Eq")));
+        assert_eq!(p.query.shape.args, vec![arg("Inner.inner"), arg("_")]);
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+        // The bracket carries its own head whichever field is named, and
+        // naming none is how the `RCLike` notation is spelled.
+        assert_eq!(parse("⟪x, y⟫_𝕜 = _").query, p.query);
+        assert_eq!(parse("⟪x, y⟫ = _").query, p.query);
+    }
+
+    /// A pattern that is nothing but notation still says what it concludes.
+    /// Which argument is which is hidden by the notation, so the head is all
+    /// that is claimed -- but a head alone is a search, and free text is not.
+    #[test]
+    fn notation_alone_is_a_shape_not_a_text_search() {
+        let p = parse("⟪x, y⟫_ℝ");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Inner.inner")));
+        assert!(p.query.shape.args.is_empty());
+        assert!(p.query.text.is_none());
+        assert_eq!(parse("‖x‖").query.shape.concl, Some(DeclName::new("Norm.norm")));
     }
 
     #[test]
