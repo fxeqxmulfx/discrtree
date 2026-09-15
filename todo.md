@@ -1073,30 +1073,6 @@ not widen to whatever remains.
 `dt find --name abs_add --kind theorem` does find `abs_add_le`, so the row is
 indexed and elaborated; only the shape query misses it.
 
-## An exactly-matching name is not ranked above its own prefixes
-
-`--name` is a substring filter, and within the matches nothing prefers the
-row whose name *is* the query. Asking for a declaration by its full name
-therefore buries it:
-
-    $ dt find --name "Real.sin_sq"
-    Real.sin_sq_le_one       theorem  Mathlib.Analysis.Complex.Trigonometric
-    Real.sin_sq_le_sq        theorem  ...Trigonometric.Bounds
-    Real.sin_sq_lt_sq        theorem  ...Trigonometric.Bounds
-    Real.sin_sq              theorem  Mathlib.Analysis.Complex.Trigonometric
-    Real.sin_sq_add_cos_sq   theorem  Mathlib.Analysis.Complex.Trigonometric
-    Real.sin_sq_eq_half_sub  theorem  Mathlib.Analysis.Complex.Trigonometric
-
-`Real.sin_sq` is there, fourth, under three of its own suffixes. With the
-default limit of 10 a name with more than ten descendants (`Finset.sum`,
-`Real.exp`, `List.map`) drops off the page entirely, and the caller reads
-`6 result(s)` as "the exact name is not indexed" rather than "look further
-down".
-
-`dt show Real.sin_sq` answers correctly, so this is only about ordering:
-an exact name match should sort first, and a prefix match ahead of an
-interior one. The filter itself is right — the ranking is what is missing.
-
 Fixed in 0.23.0.  `|` was not in the notation table, but adding it would not
 have fixed anything: `‖_ + _‖ ≤ _` had the identical defect with a bracket that
 *was* in the table, and returned rows whose left side was any addition at all.
@@ -1153,3 +1129,27 @@ Two things this does not do, both older than the entry:
   its binders as part of the left side.  The shape in the index is read with
   every binder stripped and the parser does not strip them; that wants its own
   entry.
+
+## An exactly-matching name is not ranked above its own prefixes
+
+`--name` is a substring filter, and within the matches nothing prefers the
+row whose name *is* the query. Asking for a declaration by its full name
+therefore buries it:
+
+    $ dt find --name "Real.sin_sq"
+    Real.sin_sq_le_one       theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_le_sq        theorem  ...Trigonometric.Bounds
+    Real.sin_sq_lt_sq        theorem  ...Trigonometric.Bounds
+    Real.sin_sq              theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_add_cos_sq   theorem  Mathlib.Analysis.Complex.Trigonometric
+    Real.sin_sq_eq_half_sub  theorem  Mathlib.Analysis.Complex.Trigonometric
+
+`Real.sin_sq` is there, fourth, under three of its own suffixes. With the
+default limit of 10 a name with more than ten descendants (`Finset.sum`,
+`Real.exp`, `List.map`) drops off the page entirely, and the caller reads
+`6 result(s)` as "the exact name is not indexed" rather than "look further
+down".
+
+`dt show Real.sin_sq` answers correctly, so this is only about ordering:
+an exact name match should sort first, and a prefix match ahead of an
+interior one. The filter itself is right — the ranking is what is missing.
