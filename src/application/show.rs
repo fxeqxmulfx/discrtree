@@ -40,8 +40,9 @@ pub enum Source {
         /// That is the declaration that generated it, and the one whose source
         /// carries the proof.
         inside: Option<Box<Decl>>,
-        /// The first non-blank line of the range, for when there is not — an
-        /// `alias` produced by `to_dual` names its original there.
+        /// The first line of the range that is neither blank nor a comment,
+        /// for when there is not — an `alias` produced by `to_dual` names its
+        /// original there.
         head: String,
     },
     /// No lines at all: no range in the index, or the file is not on disk.
@@ -97,7 +98,7 @@ impl Show<'_> {
         if inside.is_none() && lean_text::declares(&lines) {
             return Ok(Source::Text(lines));
         }
-        let head = lines.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+        let head = lean_text::first_code_line(&lines).to_string();
         Ok(Source::Generated { inside: inside.map(Box::new), head })
     }
 }

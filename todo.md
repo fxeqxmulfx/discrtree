@@ -1263,3 +1263,65 @@ every source behind at once and for one reason, so the shared reason is said
 once; a mixed list spells it out per name, because then it is more than one
 fact. `dt index` no longer skips such a source either: its stamp answers "is
 the input the same input", which was never the question being asked.
+
+---
+
+## `dt show` can point at a docstring instead of the declaration
+
+    $ dt show MeasureTheory.integral
+    import Mathlib.MeasureTheory.Integral.Bochner.Basic
+
+    MeasureTheory.integral
+      def  Mathlib.MeasureTheory.Integral.Bochner.Basic:157-161
+      those lines declare nothing: `/-- The Bochner integral -/`
+
+The range is the declaration's *documentation*, not the declaration, so the
+one line `show` exists to print — the statement — is replaced by a complaint
+about the source it just read. The row is otherwise right: the name resolves,
+the import line is correct, the kind is correct.
+
+Whatever computes the line range is taking the start of the declaration's
+syntax including its doc comment and then a length that stops inside it. A
+declaration with a docstring is the common case in Mathlib, so this is not an
+edge: it is one whole class of `show` answers that comes back empty. Either
+extend the range past the doc comment, or, when the extracted text parses as
+nothing but a comment, fall back to the elaborated type that the index already
+holds — an answer from the index beats a wrong answer from the file.
+
+Fixed in 0.26.0. The range is right: lines 157-161 are the docstring *and* the
+declaration, and `dt show` had already printed them if it had recognised what
+followed. What it did not recognise was the command. `irreducible_def` is not
+`theorem`, `lemma`, `def` or any of the eight other words the text reader knows,
+and that list cannot be completed — Mathlib defines commands of its own, and a
+library may define one tomorrow.
+
+So the question changed. Asking "do these lines declare something" needs the
+list of declaration commands; asking "do these lines declare *this name*" does
+not. A word at column zero followed by the name Lean printed is that name's
+header, whatever the word is, and the only list still needed is the closed one:
+the commands that take a name and do not declare it (`namespace`, `open`, `end`,
+`import`, and nine more). A library can add a way to declare something. It
+cannot add a way to open a namespace.
+
+Three things fell out of reading real ranges:
+
+- the file writes whatever suffix of the name the surrounding namespaces leave,
+  and that suffix is more than the last component — `namespace Matroid` makes
+  `Matroid.IsRkFinite.diff_singleton_iff` into `IsRkFinite.diff_singleton_iff`.
+  `_root_.` is the opposite instruction and what follows it is the whole name;
+- `alias ⟨_, biUnion⟩ := h` binds two names, and either may be the one asked
+  about;
+- `meta def` and `public theorem` are declarations with a modifier, not
+  commands named `meta` and `public`.
+
+Comments are now dropped by the line rather than by nesting depth, so the line
+that *opens* a docstring is no longer read as syntax, and the head printed when
+a range really does declare nothing is its first line of code. That head is the
+useful half of the complaint: `@[inherit_doc] notation "‖" e "‖₊" => nnnorm e`
+says what produced the row, where `/-- The nnnorm -/` said only that the
+declaration has documentation.
+
+Measured over 4000 consecutive Mathlib rows: ranges reported as declaring
+nothing fell from 108 to 21, with no row losing an answer it had. The 21 that
+remain are notation, `deriving instance` and the `foo_def` companion of an
+`irreducible_def` — declarations Lean names itself, whose names are in no file.

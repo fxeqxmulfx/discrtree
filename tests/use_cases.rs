@@ -157,6 +157,30 @@ fn show_still_answers_when_nothing_encloses_the_generated_lines() {
 }
 
 #[test]
+fn show_prints_the_source_of_a_declaration_whose_command_it_does_not_know() {
+    // Lean's range is right and the list of headers is not exhaustive:
+    // `irreducible_def` is Mathlib's own command, and the lines it points at
+    // are the declaration. Calling them a docstring and printing the type
+    // instead loses the only source there is.
+    let mut d = theorem("MeasureTheory.integral", "mathlib", "Mathlib.Bochner", "G", &[]);
+    d.span = Some(Span::new(1, 3));
+    let repo = FakeRepo { decls: vec![d] };
+    let files = FakeFiles::new().with(
+        "mathlib",
+        "Mathlib.Bochner",
+        "/-- The Bochner integral -/\nirreducible_def integral (\u{3bc} : Measure \u{3b1}) : G :=\n  if hG : CompleteSpace G then \u{2026} else 0\n",
+    );
+    let ws = workspace();
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+        .run(&DeclName::new("MeasureTheory.integral"))
+        .unwrap();
+    let Source::Text(t) = &shown.source else {
+        panic!("the range is the declaration: {:?}", shown.source)
+    };
+    assert!(t.contains("irreducible_def integral"), "the source, docstring and all: {t}");
+}
+
+#[test]
 fn show_offers_no_import_for_a_source_that_cannot_be_imported() {
     let (repo, files, ws) = (repo(), files(), workspace());
     let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }

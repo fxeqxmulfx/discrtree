@@ -45,6 +45,13 @@ const HEADERS: &[&str] = &[
 /// `@[simp, norm_cast]` and `@[to_additive existing]` cannot be enumerated.
 const MODIFIERS: &[&str] = &[
     "private ",
+    // The module system's, and a declaration modifier like any other:
+    // `public theorem` is a theorem. `public import` is not a declaration, and
+    // is not one after this either -- `import` is structural.
+    "public ",
+    // The module system's other one: `meta def evalSqrt` is a `def` that runs
+    // at elaboration time, and `positivity` extensions are written that way.
+    "meta ",
     "protected ",
     "noncomputable ",
     "partial ",
@@ -62,7 +69,49 @@ const MODIFIERS: &[&str] = &[
 /// lines and calling them the declaration is the one thing `dt show` exists to
 /// prevent, so it has to be able to tell.
 pub fn declares(text: &str) -> bool {
-    text.lines().any(|l| header(l).is_some())
+    code_lines(text).any(|l| header(l).is_some())
+}
+
+/// The lines of a range that are code: not inside a block comment, and not a
+/// line comment.
+///
+/// A range that declares nothing is usually made of comments, and a comment can
+/// hold anything — a doc comment explaining a theorem, prose at column zero,
+/// an attribute block with a docstring inside it. Reading those as syntax is
+/// how `@[to_additive /-- sums over ... -/]` would come to declare something.
+fn code_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    text.lines().filter(move |l| {
+        let opened = depth;
+        depth = comment_depth(l, depth);
+        let t = l.trim_start();
+        // A line that opens a comment is the one the depth does not yet cover,
+        // and it is where a docstring starts. Nothing declares anything at a
+        // `/-`, so dropping the whole line costs nothing and keeps `/-- The
+        // Bochner integral -/` out of the answer.
+        opened == 0 && !t.starts_with("--") && !t.starts_with("/-")
+    })
+}
+
+/// The block comment nesting a line leaves behind. Lean's `/- -/` nests, and
+/// `/--` is a `/-` like any other.
+fn comment_depth(line: &str, mut depth: usize) -> usize {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        match (b[i], b[i + 1]) {
+            (b'/', b'-') => {
+                depth += 1;
+                i += 2;
+            }
+            (b'-', b'/') => {
+                depth = depth.saturating_sub(1);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    depth
 }
 
 /// Whether a slice of source declares `name` in particular.
@@ -74,10 +123,94 @@ pub fn declares(text: &str) -> bool {
 /// An anonymous `instance : Foo Bar` has no name to compare and is taken at its
 /// word, since nothing else in the file claims that line either.
 pub fn declares_name(text: &str, name: &DeclName) -> bool {
-    text.lines().filter_map(header).any(|(_, rest)| match ident(rest) {
-        Some(id) => id == name.base() || id == name.as_str(),
-        None => true,
+    code_lines(text).any(|l| match header(l) {
+        Some((_, rest)) => {
+            let bound = bound(rest);
+            bound.is_empty() || bound.iter().any(|id| names(id, name))
+        }
+        None => commands(l, name),
     })
+}
+
+/// Whether a header's identifier is this declaration. Lean prints the name in
+/// full and the file writes whatever suffix of it the surrounding namespaces
+/// leave: `Matroid.IsRkFinite.diff_singleton_iff` is written
+/// `IsRkFinite.diff_singleton_iff` inside `namespace Matroid`. `_root_.` is the
+/// opposite instruction -- ignore the namespaces -- and either way the name
+/// that follows it is a suffix of the full one.
+fn names(id: &str, name: &DeclName) -> bool {
+    let id = id.strip_prefix("_root_.").unwrap_or(id);
+    let full = name.as_str();
+    full == id || full.strip_suffix(id).is_some_and(|ns| ns.ends_with('.'))
+}
+
+/// The names a header binds: the identifier it opens with, or, for the
+/// `alias ⟨mp, mpr⟩ := iff` form, both of them. Empty where the header goes
+/// straight into binders or the type -- an anonymous instance.
+fn bound(rest: &str) -> Vec<&str> {
+    let rest = rest.trim_start();
+    match rest.strip_prefix('⟨').and_then(|r| r.split_once('⟩')) {
+        Some((inner, _)) => inner.split(',').map(str::trim).collect(),
+        None => ident(rest).into_iter().collect(),
+    }
+}
+
+/// Whether the line is a declaration command this does not know, declaring
+/// exactly this name.
+///
+/// [`HEADERS`] is what a scan with no name in hand can recognise, and it cannot
+/// grow to cover Lean: `irreducible_def`, and every other command a library
+/// defines for itself, produce declarations that list will never have. Asking
+/// whether a known range holds a known name is a different question, and for
+/// that one the command word does not have to be known — a word at column zero
+/// followed by the name is that name's header, whatever the word is.
+///
+/// `MeasureTheory.integral` is the case this was written for: its range is the
+/// five lines of `irreducible_def integral ...`, and `dt show` called them a
+/// docstring that declares nothing.
+fn commands(line: &str, name: &DeclName) -> bool {
+    let Some(rest) = undecorated(line) else { return false };
+    let Some(word) = rest.split([' ', '\t']).next() else { return false };
+    if !word.starts_with(|c: char| c.is_ascii_lowercase())
+        || !word.chars().all(|c| c.is_alphanumeric() || "_!?'".contains(c))
+        || STRUCTURAL.contains(&word)
+    {
+        return false;
+    }
+    bound(&rest[word.len()..]).iter().any(|id| names(id, name))
+}
+
+/// The commands that take a name at column zero and do not declare it. Unlike
+/// the declaration commands, this list is closed: a library can add a way to
+/// declare something, and cannot add a way to open a namespace.
+const STRUCTURAL: &[&str] = &[
+    "end",
+    "namespace",
+    "section",
+    "open",
+    "universe",
+    "variable",
+    "variables",
+    "import",
+    "export",
+    "attribute",
+    "set_option",
+    "deriving",
+];
+
+/// The first line of a range that is neither blank nor a comment, falling back
+/// to the first line that is not blank.
+///
+/// What a range holds, when it does not hold the declaration. A doc comment is
+/// the one thing it must not be: quoting `/-- The Bochner integral -/` back at
+/// someone who asked for `MeasureTheory.integral` names the declaration they
+/// asked about and says nothing about why its source is not here.
+pub fn first_code_line(text: &str) -> &str {
+    code_lines(text)
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .or_else(|| text.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("")
 }
 
 /// The identifier a declaration header opens with, or `None` where the header
@@ -162,17 +295,29 @@ pub fn scan(text: &str) -> Scan {
 /// Column zero is what makes this reliable: a `have` or a nested `def` inside a
 /// proof is always indented.
 fn header(line: &str) -> Option<(&'static str, &str)> {
+    let rest = undecorated(line)?;
+    let h = HEADERS.iter().find(|h| rest.starts_with(**h))?;
+    Some((h.trim_end(), &rest[h.len()..]))
+}
+
+/// What is left of a line after the attributes and modifiers a declaration may
+/// open with, or `None` when it is indented — a declaration starts at column
+/// zero, and requiring it is what keeps a `have` inside a proof from reading as
+/// one.
+fn undecorated(line: &str) -> Option<&str> {
+    if line.starts_with([' ', '\t']) {
+        return None;
+    }
     let mut rest = line;
     loop {
-        if let Some(h) = HEADERS.iter().find(|h| rest.starts_with(**h)) {
-            return Some((h.trim_end(), &rest[h.len()..]));
-        }
         if let Some(after) = attribute(rest) {
             rest = after;
             continue;
         }
-        let m = MODIFIERS.iter().find(|m| rest.starts_with(**m))?;
-        rest = &rest[m.len()..];
+        match MODIFIERS.iter().find(|m| rest.starts_with(**m)) {
+            Some(m) => rest = &rest[m.len()..],
+            None => return Some(rest),
+        }
     }
 }
 
@@ -415,6 +560,98 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
             declares_name(anon, &DeclName::new("Nat.Primes.instRepr")),
             "an anonymous instance has no name to compare, and the line is still its source"
         );
+    }
+
+    #[test]
+    fn a_command_this_does_not_know_still_declares_the_name_it_names() {
+        // Mathlib's own `MeasureTheory.integral`, verbatim. `irreducible_def`
+        // is not in HEADERS and never will be -- a library may define any
+        // command it likes -- but the word at column zero is followed by the
+        // name, and that is enough to say the range is the declaration.
+        let src = "/-- The Bochner integral -/\nirreducible_def integral {_ : MeasurableSpace \u{3b1}} (\u{3bc} : Measure \u{3b1}) (f : \u{3b1} \u{2192} G) : G :=\n  if hG : CompleteSpace G then ... else 0";
+        assert!(declares_name(src, &DeclName::new("MeasureTheory.integral")));
+        assert!(!declares_name(src, &DeclName::new("MeasureTheory.integral_def")));
+
+        let al = "alias FiniteDimensional.left := Module.Finite.left";
+        assert!(declares_name(al, &DeclName::new("FiniteDimensional.left")));
+        let ext = "meta def evalSqrt : PositivityExt where";
+        assert!(declares_name(ext, &DeclName::new("Mathlib.Meta.Positivity.evalSqrt")));
+        let pubthm = "public theorem foo : True := trivial";
+        assert!(declares_name(pubthm, &DeclName::new("Bar.foo")));
+    }
+
+    #[test]
+    fn a_command_that_does_not_declare_is_not_taken_for_one() {
+        for line in ["namespace Real", "open Finset", "end Real", "export Nat", "variable Real"] {
+            let name = DeclName::new(line.split(' ').nth(1).unwrap());
+            assert!(!declares_name(line, &name), "{line}");
+        }
+        // Not a command at all: a line of a proof, which is indented.
+        assert!(!declares_name("  exact foo", &DeclName::new("foo")));
+    }
+
+    #[test]
+    fn the_namespace_a_file_leaves_implicit_is_not_part_of_the_name() {
+        // `alias IsRkFinite.diff_singleton_iff := ...` inside `namespace
+        // Matroid`: the file writes whatever suffix the namespaces leave, and
+        // that suffix is more than the last component.
+        let src = "@[deprecated (since := \"2026-06-03\")]\nalias IsRkFinite.diff_singleton_iff := IsRkFinite.sdiff_singleton_iff";
+        assert!(declares_name(src, &DeclName::new("Matroid.IsRkFinite.diff_singleton_iff")));
+        assert!(!declares_name(src, &DeclName::new("Matroid.IsRkFinite.sdiff_singleton_iff")));
+        assert!(
+            !declares_name(src, &DeclName::new("Matroid.diff_singleton_iff")),
+            "a suffix is whole components"
+        );
+
+        // `_root_.` says to ignore the namespaces, and the name after it is the
+        // whole of the one Lean prints.
+        let root = "alias _root_.isSolvable_of_top_eq_bot := Group.isSolvable_of_top_eq_bot";
+        assert!(declares_name(root, &DeclName::new("isSolvable_of_top_eq_bot")));
+    }
+
+    #[test]
+    fn an_alias_binds_both_halves_of_an_iff() {
+        let one = "protected alias \u{27e8}_, biUnion\u{27e9} := Set.Finite.absorbs_biUnion";
+        assert!(declares_name(one, &DeclName::new("Absorbs.biUnion")));
+        assert!(!declares_name(one, &DeclName::new("Absorbs.absorbs_biUnion")));
+
+        let both =
+            "alias \u{27e8}LowerSemicontinuous.le_liminf, of_le_liminf\u{27e9} := iff_le_liminf";
+        assert!(declares_name(both, &DeclName::new("LowerSemicontinuous.le_liminf")));
+        assert!(declares_name(both, &DeclName::new("LowerSemicontinuous.of_le_liminf")));
+    }
+
+    #[test]
+    fn a_comment_is_not_read_as_syntax() {
+        // A docstring may hold anything, including prose at column zero that
+        // reads like a command.
+        let doc = "/-- theorem foo says that\ninstance Bar is a Baz. -/\n";
+        assert!(!declares(doc));
+        assert!(!declares_name(doc, &DeclName::new("foo")));
+        assert!(!declares("-- def f : Nat := 0"));
+        // `/- -/` nests, and `/--` is a `/-` like any other.
+        assert!(!declares("/- outer /- inner -/ theorem f : True := trivial -/"));
+        assert!(declares("/- a -/\ntheorem f : True := trivial"), "and the block does end");
+    }
+
+    #[test]
+    fn the_head_of_a_range_is_its_first_line_of_code() {
+        // What `dt show` prints when the range holds no declaration. A
+        // docstring is the one thing it must not be: quoting the declaration's
+        // own documentation back names it and says nothing about why its source
+        // is not here.
+        let src = "/-- The Bochner integral -/\nirreducible_def integral (\u{3bc} : Measure \u{3b1}) : G :=";
+        assert_eq!(
+            first_code_line(src),
+            "irreducible_def integral (\u{3bc} : Measure \u{3b1}) : G :="
+        );
+        assert_eq!(first_code_line("\n\n@[to_additive]\n"), "@[to_additive]");
+        assert_eq!(
+            first_code_line("/-- all of it -/"),
+            "/-- all of it -/",
+            "a range with nothing else falls back to it"
+        );
+        assert_eq!(first_code_line(""), "");
     }
 
     #[test]
