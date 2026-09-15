@@ -2,6 +2,59 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## Re-indexing after one edit costs 37 s, and 36 of them are spent on work that was already done
+
+Found 2026-09-15, dt 0.8.1, on a Lean project of my own (1864 declarations,
+Mathlib and Batteries beside it). Editing a `.lean` file and asking `dt` about
+it again means `dt dump project && dt index`, and that is the loop a developer
+runs all day:
+
+    $ dt dump project
+    real    0m23.057s
+    $ dt index
+    real    0m13.856s
+
+Both numbers are almost entirely fixed cost, and neither is about the 1864
+declarations that changed.
+
+The dump, measured by asking for a prefix that matches nothing:
+
+    DISCRTREE_MODULES=Nope         22.01 s
+    DISCRTREE_MODULES=Transformer  23.09 s
+
+So elaborating the whole project is one second; the other twenty-two are
+`workList` folding over `env.constants` -- every constant `import Mathlib`
+brought in, four hundred thousand of them -- and calling `keep` and
+`moduleOf` on each to decide it is not wanted. The environment already knows
+the answer structurally: `env.header.moduleNames` says which modules match the
+prefix, and `moduleData[i].constNames` lists exactly their declarations. Test
+four hundred module names instead of four hundred thousand constants.
+
+The index, measured statement by statement against a copy of the database:
+
+    INSERT INTO decl_fts(decl_fts) VALUES('rebuild')   5.90 s
+    INSERT INTO decl_fts(decl_fts) VALUES('optimize')  1.00 s
+    ANALYZE                                            1.48 s
+    DROP INDEX uses_const                              1.31 s
+    CREATE INDEX uses_const ON uses(const, decl_id)    5.33 s
+
+That is 15 s of the 14 measured, so inserting the rows themselves is noise.
+Every one of these is right for the load they were written for -- Mathlib, 326
+000 rows at once -- and wrong for a load that replaces one row in two hundred.
+`decl_fts` is an external-content table, so it can be maintained in place:
+`'delete'` with the old column values before `clear_source`, plain inserts
+after. The side index does not have to come down for 1864 rows, and `ANALYZE`
+has nothing to learn from a 0.5 % change.
+
+The fix is one decision made twice: a load that replaces a small share of the
+index maintains it, and a load that replaces most of it rebuilds. The
+threshold is not a tuning knob to expose -- it is the point where rebuilding
+becomes cheaper, and the index knows the row counts on both sides of it.
+
+Expected after: 2-3 s for the dump (the 2.2 s `import Transformer` floor is
+irreducible, and the project's own elaboration is the second), and well under
+a second for the index. Thirty-seven seconds to four.
+
 ## `find`, `show` and `deps` answer from a stale source without saying so
 
 Found 2026-09-13, dt 0.5.0, on a Lean project of my own. Fixed 2026-09-13 in
