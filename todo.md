@@ -627,3 +627,40 @@ refresh after every bump.
 Reported from the transformer repo, 2026-09-15, bumping Lean v4.33.1 to
 v4.34.0.
 
+Fixed 2026-09-15 in dt 0.13.0, as a diagnosis rather than as a rule about
+`Mathlib.olean`:
+
+    dt: lake env lean failed for source `nope` (exit 1); `Nope.olean` was built
+    by Lean 4.33.1 and lean-toolchain says 4.34.0 -- run `lake build` first
+
+An `.olean` carries the Lean that wrote it in its header -- the magic, two
+bytes of format version, then the version string -- and `lean-toolchain` says
+which Lean was meant to write it, so the diagnosis is two files and a
+comparison, with no Lean and no lake in it.  The repair names the module when
+the `.olean` belongs to a package (`lake build Mathlib`) and does not when it
+is the project's own build (`lake build`), which is the only thing that differs
+between the two cases.  The script path is what is printed when there is no
+diagnosis, which is where it belongs: for a failure that is not a stale build
+-- a syntax error in the script, an import the root does not pull in -- the
+script is exactly what to look at.
+
+Nothing is claimed unless both files can be read and the toolchain is a
+released version.  A nightly names no version an `.olean` could be compared
+against, and a confident wrong diagnosis is worse than an exit code on its own.
+
+The header was calibrated against real files: `Mathlib.olean` from a v4.34.0
+build reads `4.34.0` at offset 7, and the reproduction is an `.olean` edited to
+carry v4.33.1's version string *and* git hash -- both, because Lean accepts a
+header whose version string alone was changed.  The git hash is what it
+compares; the version string is what a reader can act on.
+
+What is not done is the paragraph above this one.  The dump still imports
+`Mathlib` and still needs `Mathlib.olean`.  Splicing the 8 531 import lines of
+`Mathlib.lean` in its place would save three minutes once per toolchain bump,
+and would cost a text parse of an umbrella file that is no longer a list of
+`import` lines -- Mathlib v4.34.0 opens with `module` and every line reads
+`public import` -- plus a rule for umbrella files that declare something of
+their own.  A new failure surface on the one path that cannot be tested without
+a Lean on the machine, for three minutes a month, is the wrong trade; the
+sentence naming the repair is what the session that reported this actually
+needed.

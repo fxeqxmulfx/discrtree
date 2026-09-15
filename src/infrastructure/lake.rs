@@ -77,11 +77,15 @@ impl Elaborator for LakeElaborator {
                 ))
             })?;
         if !status.success() {
+            // The script is where a reader looks last and the build is where
+            // the repair almost always is, so the diagnosis goes first and the
+            // script path is what is left when there is none.
+            let why = stale_build(&self.project_root, &spec.root)
+                .unwrap_or_else(|| format!("the script is at {}", script.display()));
             bail!(
-                "lake env lean failed for source `{}` (exit {}); the script is at {}",
+                "lake env lean failed for source `{}` (exit {}); {why}",
                 spec.source,
-                status.code().unwrap_or(-1),
-                script.display()
+                status.code().unwrap_or(-1)
             )
         }
         if !spec.out.exists() {
@@ -154,6 +158,82 @@ fn toolchain(cfg: &Config) -> Option<Toolchain> {
 /// its prefix. `Init/Data/List/Basic.lean` sits directly under this, so the
 /// module-to-path rule every other source follows works here unchanged.
 const CORE_SRC: &str = "src/lean";
+
+/// Where a build puts its `.olean`s, relative to the package that owns them.
+const BUILD_LIB: &str = ".lake/build/lib/lean";
+
+/// Why a dump of `root` failed, when the reason is a build the toolchain has
+/// moved past.
+///
+/// A toolchain bump invalidates every `.olean` on the machine at once, and the
+/// error Lean gives for one is `incompatible header` and an exit code -- true,
+/// and no help at all to a reader who has to work out which of a project, its
+/// packages and its toolchain is the one that moved. The `.olean` says which
+/// Lean wrote it and `lean-toolchain` says which Lean is meant to, so the whole
+/// diagnosis is two files and a comparison.
+///
+/// Nothing is claimed unless both can be read and the toolchain is a released
+/// version: a nightly's name carries no version to compare against, and a
+/// confident wrong diagnosis is worse than the exit code alone.
+fn stale_build(project_root: &Path, root: &str) -> Option<String> {
+    let want = release(&std::fs::read_to_string(project_root.join("lean-toolchain")).ok()?)?;
+    let (olean, repair) = root_olean(project_root, root)?;
+    let built_by = lean_version(&std::fs::read(&olean).ok()?)?;
+    if built_by == want {
+        return None;
+    }
+    Some(format!(
+        "`{}` was built by Lean {built_by} and lean-toolchain says {want} -- run `{repair}` first",
+        olean.file_name()?.to_string_lossy()
+    ))
+}
+
+/// The `.olean` a dump of `root` reads first, and the command that rebuilds it.
+///
+/// Two places to look, because a root module belongs either to the project
+/// being indexed or to one of the packages it resolved, and the repair differs
+/// only in whether the module has to be named.
+fn root_olean(project_root: &Path, root: &str) -> Option<(PathBuf, String)> {
+    let file = format!("{}.olean", root.replace('.', "/"));
+    let own = project_root.join(BUILD_LIB).join(&file);
+    if own.is_file() {
+        return Some((own, "lake build".to_owned()));
+    }
+    for e in std::fs::read_dir(project_root.join(PACKAGES)).ok()?.flatten() {
+        let p = e.path().join(BUILD_LIB).join(&file);
+        if p.is_file() {
+            return Some((p, format!("lake build {root}")));
+        }
+    }
+    None
+}
+
+/// The Lean version that wrote an `.olean`, out of its header.
+///
+/// The header is the magic `olean`, two bytes of format version, then the Lean
+/// version as a NUL-padded string. Reading it needs no Lean and no lake.
+fn lean_version(olean: &[u8]) -> Option<String> {
+    const VERSION_AT: usize = 7;
+    const VERSION_LEN: usize = 33;
+    if !olean.starts_with(b"olean") || olean.len() < VERSION_AT + VERSION_LEN {
+        return None;
+    }
+    let field = &olean[VERSION_AT..VERSION_AT + VERSION_LEN];
+    let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+    let v = std::str::from_utf8(&field[..end]).ok()?;
+    (!v.is_empty()).then(|| v.to_owned())
+}
+
+/// `leanprover/lean4:v4.34.0` -> `4.34.0`, and nothing for a name that carries
+/// no version an `.olean` could be compared against.
+fn release(toolchain: &str) -> Option<String> {
+    let name = toolchain.trim().rsplit(':').next()?.trim();
+    let v = name.strip_prefix('v')?;
+    let released = !v.is_empty()
+        && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && v.split('.').count() == 3;
+    released.then(|| v.to_owned())
+}
 
 /// The directory holding core's source text, or nothing.
 ///
@@ -288,6 +368,60 @@ mod tests {
     #[test]
     fn a_script_without_markers_is_reported_not_silently_mangled() {
         assert!(splice_imports("import Mathlib\n#eval 1", "X").is_err());
+    }
+
+    /// The head of a real `.olean`: the magic, two bytes of format version,
+    /// the Lean version NUL-padded to a fixed field, then the git hash.
+    fn olean_header(version: &str) -> Vec<u8> {
+        let mut h = b"olean\x02\x01".to_vec();
+        h.extend_from_slice(version.as_bytes());
+        h.resize(7 + 33, 0);
+        h.extend_from_slice(b"293d5d0c0c3f3dded4688b3c");
+        h
+    }
+
+    #[test]
+    fn an_olean_says_which_lean_wrote_it() {
+        assert_eq!(lean_version(&olean_header("4.34.0")).as_deref(), Some("4.34.0"));
+        assert_eq!(lean_version(&olean_header("4.33.1")).as_deref(), Some("4.33.1"));
+        assert_eq!(lean_version(b"olean"), None, "too short to hold a version");
+        assert_eq!(lean_version(&[0u8; 64]), None, "not an olean");
+    }
+
+    /// A nightly names no version an `.olean` could be compared against, so it
+    /// buys silence rather than a guess.
+    #[test]
+    fn only_a_released_toolchain_carries_a_version_to_compare() {
+        assert_eq!(release("leanprover/lean4:v4.34.0\n").as_deref(), Some("4.34.0"));
+        assert_eq!(release("leanprover/lean4:nightly-2026-09-01"), None);
+        assert_eq!(release("leanprover/lean4:v4.34.0-rc1"), None);
+        assert_eq!(release("my-own-build"), None);
+    }
+
+    #[test]
+    fn a_bumped_toolchain_is_the_reason_a_dump_failed() {
+        let root = std::env::temp_dir().join("dt_stale_build");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(PACKAGES).join("mathlib").join(BUILD_LIB)).unwrap();
+        std::fs::create_dir_all(root.join(BUILD_LIB)).unwrap();
+        std::fs::write(root.join("lean-toolchain"), "leanprover/lean4:v4.34.0\n").unwrap();
+        let mathlib = root.join(PACKAGES).join("mathlib").join(BUILD_LIB).join("Mathlib.olean");
+        std::fs::write(&mathlib, olean_header("4.33.1")).unwrap();
+
+        let why = stale_build(&root, "Mathlib").expect("a package left on the old toolchain");
+        assert!(why.contains("Mathlib.olean"), "{why}");
+        assert!(why.contains("4.33.1") && why.contains("4.34.0"), "{why}");
+        assert!(why.contains("lake build Mathlib"), "the repair names the module: {why}");
+
+        // The project's own build is rebuilt without naming anything.
+        std::fs::write(root.join(BUILD_LIB).join("Own.olean"), olean_header("4.33.1")).unwrap();
+        let why = stale_build(&root, "Own").unwrap();
+        assert!(why.contains("run `lake build` first"), "{why}");
+
+        // A build made by the toolchain in use is no diagnosis at all.
+        std::fs::write(&mathlib, olean_header("4.34.0")).unwrap();
+        assert_eq!(stale_build(&root, "Mathlib"), None);
+        assert_eq!(stale_build(&root, "NoSuchRoot"), None);
     }
 
     /// A project whose `.lake/packages` holds `mathlib` and `batteries`, with
