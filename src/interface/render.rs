@@ -9,9 +9,10 @@ use crate::application::deps::DepsResult;
 use crate::application::find::{Asked, Duplicate, Empty, Hits};
 use crate::application::ports::Missing;
 use crate::application::show::{Shown, Source};
-use crate::application::status::{Report, SourceStatus};
+use crate::application::status::{Report, SourceStatus, Stale};
 use crate::domain::decl::Decl;
 use crate::domain::lean_core;
+use crate::domain::source::SourceKind;
 use std::collections::BTreeMap;
 
 /// The marker every text row carries.
@@ -412,6 +413,38 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
     out
 }
 
+/// The warning a search prints when the index is behind the source, with its
+/// newline.
+///
+/// It says which value differs, because the previous wording — "`project`
+/// moved since it was indexed" — was read as a claim about a path, and the
+/// path had not moved. What had changed was the build the project was dumped
+/// from, and a reader who could not see that filed the check as broken rather
+/// than re-indexing. A revision pair is checkable; "moved" is not.
+///
+/// The project is the one source whose revision is not a name: it is a
+/// fingerprint of the build tree, which nobody can read and nobody pastes into
+/// `git show`. So it gets the fact instead of the values.
+pub fn stale(s: &Stale, kind: Option<SourceKind>) -> String {
+    let id = &s.id;
+    let what = match kind {
+        Some(SourceKind::Local) => "was rebuilt since it was indexed".to_string(),
+        _ => format!("is at {}, the index at {}", short_rev(&s.current), short_rev(&s.indexed)),
+    };
+    format!("dt: `{id}` {what}; rows may be missing — `dt refresh {id}`\n")
+}
+
+/// A revision as short as it can still be read. A git hash is recognisable at
+/// seven characters and is what `git show` wants; a toolchain name is not a
+/// hash, and cutting `leanprover/lean4:v4.34.0` to `leanpro` loses the only
+/// part of it that says anything.
+fn short_rev(rev: &str) -> String {
+    match rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        true => rev.chars().take(7).collect(),
+        false => rev.to_string(),
+    }
+}
+
 /// The revision the index was built from, and — when the source has moved
 /// since — the one it is at now. Both, because "stale" alone says a re-dump is
 /// due and nothing else, while the pair says how far behind and against what:
@@ -745,5 +778,48 @@ mod tests {
     #[test]
     fn an_empty_result_says_so_rather_than_printing_nothing() {
         assert_eq!(find(&hits(vec![]), false), "no match\n");
+    }
+
+    /// The line a search prints when the index is behind. It has to name the
+    /// values, because the reader who saw "moved since it was indexed" checked
+    /// the path, found it unmoved, and reported the check as broken.
+    #[test]
+    fn a_stale_line_says_which_value_differs() {
+        let s = Stale {
+            id: crate::domain::source::SourceId::new("mathlib"),
+            indexed: "5ed2965256430c3649e86755f9576b54eca72435".into(),
+            current: "4f8b12c56430c3649e86755f9576b54eca724359".into(),
+        };
+        let line = stale(&s, Some(SourceKind::Lake));
+        assert!(line.contains("is at 4f8b12c, the index at 5ed2965"), "{line}");
+        assert!(line.contains("`dt refresh mathlib`"), "{line}");
+        assert!(!line.contains("moved"), "a revision is not a path: {line}");
+    }
+
+    /// The project's revision is a fingerprint of its build tree. Printing two
+    /// of them side by side says nothing a reader can act on, so the line says
+    /// what happened instead.
+    #[test]
+    fn the_project_is_rebuilt_not_moved() {
+        let s = Stale {
+            id: crate::domain::source::SourceId::new("project"),
+            indexed: "b57d6d7986c61d4a".into(),
+            current: "04e1042c1f0b2e55".into(),
+        };
+        let line = stale(&s, Some(SourceKind::Local));
+        assert!(line.contains("`project` was rebuilt since it was indexed"), "{line}");
+        assert!(!line.contains("b57d6d7"), "a build fingerprint is not worth reading: {line}");
+    }
+
+    /// A toolchain is not a hash and must not be cut to seven characters:
+    /// `leanpro` is not a version anybody can compare.
+    #[test]
+    fn a_toolchain_keeps_its_version() {
+        let s = Stale {
+            id: crate::domain::source::SourceId::new("core"),
+            indexed: "leanprover/lean4:v4.33.1".into(),
+            current: "leanprover/lean4:v4.34.0".into(),
+        };
+        assert!(stale(&s, Some(SourceKind::Core)).contains("v4.34.0, the index at leanprover"));
     }
 }

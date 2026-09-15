@@ -44,6 +44,22 @@ fn moved(was: &Option<String>, now: &Option<String>) -> bool {
     matches!((was, now), (Some(was), Some(now)) if was != now)
 }
 
+/// A source the index has fallen behind, with the two values that say so.
+///
+/// Both, because one of them alone is not believable. "`project` moved since
+/// it was indexed" was read as a claim about a path -- which had not moved --
+/// and filed as a bug in the check; what had changed was the build the project
+/// was dumped from, and saying which value differs is what makes the line
+/// something a reader can check rather than argue with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stale {
+    pub id: SourceId,
+    /// The revision the index was built from.
+    pub indexed: String,
+    /// The revision the source is at now.
+    pub current: String,
+}
+
 /// Which of these sources have moved since they were indexed.
 ///
 /// The same comparison `dt status` reports, minus the row counts — and that is
@@ -59,12 +75,13 @@ pub fn stale_among(
     repo: &dyn DeclRepo,
     revisions: &dyn Revisions,
     among: impl IntoIterator<Item = SourceId>,
-) -> Result<Vec<SourceId>> {
+) -> Result<Vec<Stale>> {
     let mut out = Vec::new();
     for id in among {
         let was = repo.provenance(&id)?.and_then(|p| p.revision);
-        if moved(&was, &revisions.current(&id)?) {
-            out.push(id);
+        let now = revisions.current(&id)?;
+        if let (true, Some(indexed), Some(current)) = (moved(&was, &now), was, now) {
+            out.push(Stale { id, indexed, current });
         }
     }
     Ok(out)

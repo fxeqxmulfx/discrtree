@@ -297,7 +297,14 @@ fn a_source_is_stale_only_when_both_revisions_are_known_and_differ() {
     ]);
     let ids = ["project", "mathlib", "flt", "never-indexed"].map(SourceId::new);
     let stale = status::stale_among(&db, &revs, ids).unwrap();
-    assert_eq!(stale, vec![SourceId::new("project")]);
+    assert_eq!(
+        stale,
+        vec![status::Stale {
+            id: SourceId::new("project"),
+            indexed: "4f21c8e".into(),
+            current: "9ab0d31".into(),
+        }]
+    );
 }
 
 /// The bug this comparison was added for: a local source whose revision is a
@@ -330,7 +337,12 @@ fn a_module_compiled_after_the_dump_makes_the_project_stale() {
 
     std::fs::write(lib.join("HullProbe.olean"), "compiled since").unwrap();
     assert_ne!(revision::build_stamp(dir.path()).as_deref(), Some(dumped.as_str()));
-    assert_eq!(status::stale_among(&db, &unchanged, [id.clone()]).unwrap(), vec![id]);
+    let stale = status::stale_among(&db, &unchanged, [id.clone()]).unwrap();
+    assert_eq!(stale.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id]);
+    // What differs is the build, and the line that reports it has to be able
+    // to show both values rather than assert a move.
+    assert_eq!(stale[0].indexed, dumped);
+    assert_ne!(stale[0].current, dumped);
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,

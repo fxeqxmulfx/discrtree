@@ -224,8 +224,8 @@ impl App {
         Ok(())
     }
 
-    /// One line on stderr when a source a search touched has moved since it was
-    /// indexed.
+    /// One line on stderr when a source a search touched has changed since it
+    /// was indexed.
     ///
     /// `dt status` reports this already, and nobody runs `dt status` before a
     /// search. What a stale index gives back is not a poor answer but a
@@ -246,11 +246,9 @@ impl App {
         // A search that failed because its warning failed would be a worse
         // outcome than the staleness the warning was about to report.
         let Ok(stale) = status::stale_among(repo, &revs, among) else { return };
-        for id in stale {
-            eprintln!(
-                "dt: `{id}` moved since it was indexed; this answer may be out of date \
-                 — re-run `dt refresh {id}`"
-            );
+        for s in stale {
+            let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
+            eprint!("{}", render::stale(&s, kind));
         }
     }
 
@@ -502,12 +500,12 @@ impl App {
                 let among = self.workspace.sources.iter().map(|s| s.id.clone());
                 status::stale_among(repo.as_ref(), &revs, among)?
                     .into_iter()
-                    .map(|id| id.as_str().to_owned())
+                    .map(|s| s.id.as_str().to_owned())
                     .collect()
             }
         };
         if targets.is_empty() {
-            println!("nothing has moved since it was indexed");
+            println!("nothing has changed since it was indexed");
             return Ok(());
         }
         // Reported where it happens rather than in the summary: a refresh is

@@ -745,3 +745,33 @@ Verified against the real index:
 
     $ dt find 'a ≤ b → b⁻¹ ≤ a⁻¹'
     ENNReal.inv_le_inv'  ...  Filter.inv_le_inv  ...  inv_le_inv'  ...
+
+Fixed in 0.17.0, though not where it was looked for.  The check was right and
+the word was wrong.  Nothing compares paths: a `local` source's revision is a
+fingerprint of `.lake/build/lib`, and in that project it really had changed --
+`b57d6d7` when the dump was taken, `04e1042` at the time of the report, which
+`dt status` had been showing all along as `b57d6d7 (now 04e1042, stale)`.  The
+project was being rebuilt between searches, which during development it always
+is.  But "moved since it was indexed" reads as a claim about a directory, the
+directory had not moved, and the only conclusion left was that the check was
+broken.
+
+So the line says which value differs, and says it in the words that fit the
+source:
+
+    dt: `project` was rebuilt since it was indexed; rows may be missing
+        — `dt refresh project`
+    dt: `mathlib` is at 4f8b12c, the index at 5ed2965; rows may be missing
+        — `dt refresh mathlib`
+
+A revision pair is something a reader can check; "moved" is something they can
+only argue with.  The project gets the fact rather than the pair because its
+revision is a build fingerprint -- two of those side by side say nothing, and
+nobody pastes one into `git show`.  A toolchain keeps its whole name for the
+same reason: `leanprover/lean4:v4.34.0` cut to seven characters is `leanpro`.
+
+What is left standing is the volume.  A project that is being compiled while it
+is being searched is behind its own build most of the time, and the warning is
+correct every time it fires.  Narrowing it -- to the sources a failed search
+could plausibly have drawn on, rather than all of them -- is a separate change
+and needs the query's own conditions to say which those are.
