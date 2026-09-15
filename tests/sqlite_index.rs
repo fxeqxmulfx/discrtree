@@ -46,6 +46,39 @@ fn a_row_survives_the_round_trip_through_sqlite() {
     assert_eq!(got.consts, vec![DeclName::new("Real.exp")]);
 }
 
+/// The SQL counts the same thing the in-memory stores count, which is the
+/// only reason a pattern means the same in a project with an index and in one
+/// reading its dumps directly. `Inner.inner` heads two rows here and
+/// `Std.HashMap.inner` one, and the `LIKE` that fetches them is a filter, not
+/// the answer.
+#[test]
+fn an_unqualified_word_resolves_to_the_commonest_constant_called_that() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let head = |name: &str, arg: &str| {
+        let mut d = theorem(name, "mathlib", "Mathlib.Analysis.Inner", "Eq", &[]);
+        d.shape = Shape::new(
+            Some(DeclName::new("Eq")),
+            vec![ArgHead::Named(DeclName::new(arg)), ArgHead::Any],
+        );
+        d
+    };
+    let rows = vec![
+        head("Real.inner_apply", "Inner.inner"),
+        head("Complex.inner_apply", "Inner.inner"),
+        head("Std.HashMap.inner_eq", "Std.HashMap.inner"),
+    ];
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let called = db.heads_called("inner").unwrap();
+    assert_eq!(
+        called.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+        ["Inner.inner", "Std.HashMap.inner"]
+    );
+    // A word nothing is called resolves to nothing, rather than to whatever
+    // the `LIKE` happened to sweep up.
+    assert!(db.heads_called("nonesuch").unwrap().is_empty());
+}
+
 #[test]
 fn the_conclusion_head_narrows_the_search() {
     let db = loaded();

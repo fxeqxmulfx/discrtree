@@ -1,7 +1,7 @@
 //! `dt find` — shape search, the main mode, plus `dt dup`.
 
 use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
-use crate::domain::decl::{Decl, DeclKind};
+use crate::domain::decl::{ArgHead, Decl, DeclKind};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::{self, Query};
@@ -42,6 +42,13 @@ pub enum Empty {
     /// every instance as `def` -- so the flag is right, the index is old, and
     /// the repair is a re-dump rather than an edit to the query.
     InstancesAreDefs,
+    /// A bare word in the pattern is the last component of constants the index
+    /// does hold, and none of them answered either. `export Inner (inner)`
+    /// makes Lean print `inner` for `Inner.inner`, so a pattern copied back out
+    /// of a goal is spelled the way it printed rather than the way it is
+    /// stored -- and "matches nothing on its own" would send the reader to
+    /// correct a word that is not misspelled.
+    Unqualified { written: String, candidates: Vec<DeclName> },
 }
 
 /// Which condition led outside the index, as it was written.
@@ -81,6 +88,36 @@ pub struct Hits {
     pub truncated: bool,
     /// `None` when something matched.
     pub empty: Option<Empty>,
+    /// What a bare word in the pattern was read as, when that is the only
+    /// reason there is anything to show. Reported rather than applied
+    /// silently: the rows below answer a question spelled differently from
+    /// the one that was asked.
+    pub read_as: Vec<(String, DeclName)>,
+}
+
+/// The query with each bare word replaced by the constant it most likely
+/// names. `None` when there was nothing to replace.
+fn qualified(query: &Query, called: &[(String, Vec<DeclName>)]) -> Option<Query> {
+    let top = |n: &DeclName| {
+        called.iter().find(|(w, _)| w == n.as_str()).and_then(|(_, c)| c.first()).cloned()
+    };
+    let mut out = query.clone();
+    let mut any = false;
+    if let Some(c) = &out.shape.concl
+        && let Some(resolved) = top(c)
+    {
+        out.shape.concl = Some(resolved);
+        any = true;
+    }
+    for a in &mut out.shape.args {
+        if let ArgHead::Named(n) = a
+            && let Some(resolved) = top(n)
+        {
+            *a = ArgHead::Named(resolved);
+            any = true;
+        }
+    }
+    any.then_some(out)
 }
 
 impl Find<'_> {
@@ -91,16 +128,73 @@ impl Find<'_> {
             )
         }
         let mut rows = self.repo.find(query)?;
-        rows.sort_by_key(|d| query::rank(query, d));
-        let truncated = rows.len() > query.limit;
-        rows.truncate(query.limit);
-        let empty = if rows.is_empty() { Some(self.diagnose(query)?) } else { None };
-        Ok(Hits { rows, truncated, empty })
+        // What the query is ranked and truncated by: the one that found the
+        // rows, which is not the one that was typed when a bare word had to be
+        // resolved first.
+        let mut asked = query.clone();
+        let mut read_as = Vec::new();
+        let mut called = Vec::new();
+        if rows.is_empty() {
+            called = self.resolve(query)?;
+            if let Some(retry) = qualified(query, &called) {
+                let found = self.repo.find(&retry)?;
+                if !found.is_empty() {
+                    read_as = called
+                        .iter()
+                        .filter_map(|(w, c)| c.first().map(|n| (w.clone(), n.clone())))
+                        .collect();
+                    rows = found;
+                    asked = retry;
+                }
+            }
+        }
+        rows.sort_by_key(|d| query::rank(&asked, d));
+        let truncated = rows.len() > asked.limit;
+        rows.truncate(asked.limit);
+        let empty = if rows.is_empty() { Some(self.diagnose(query, &called)?) } else { None };
+        Ok(Hits { rows, truncated, empty, read_as })
+    }
+
+    /// The constants each bare word in the pattern could be naming, commonest
+    /// first, for the words that name any.
+    ///
+    /// Asked only of a search that found nothing: a word that answered as
+    /// written is a word that meant what it said, and resolving it anyway
+    /// would be two scans of the index to change nothing.
+    fn resolve(&self, query: &Query) -> Result<Vec<(String, Vec<DeclName>)>> {
+        let mut out = Vec::new();
+        for head in query.shape.heads() {
+            // A word written twice -- `exp _ ≤ exp _` -- is one word to
+            // resolve and one line to report.
+            if head.as_str().contains('.') || out.iter().any(|(w, _)| w == head.as_str()) {
+                continue;
+            }
+            let called = self.repo.heads_called(head.as_str())?;
+            // A word that is itself a head symbol means what it says. `Eq` is
+            // spelled `Eq` in the index, and a query that failed with it in
+            // the pattern failed for some other reason.
+            if called.iter().any(|c| c.as_str() == head.as_str()) {
+                continue;
+            }
+            if !called.is_empty() {
+                out.push((head.as_str().to_owned(), called));
+            }
+        }
+        Ok(out)
     }
 
     /// Ask each condition on its own. One row each, so the diagnosis costs
     /// about as much as the search that failed.
-    fn diagnose(&self, query: &Query) -> Result<Empty> {
+    fn diagnose(&self, query: &Query, called: &[(String, Vec<DeclName>)]) -> Result<Empty> {
+        // First, because it is the only diagnosis about the words themselves:
+        // every other one takes the query at its word and reports what the
+        // index said about it.
+        if let Some((written, candidates)) = called.first() {
+            return Ok(Empty::Unqualified {
+                written: written.clone(),
+                candidates: candidates.clone(),
+            });
+        }
         // A module prefix is the one condition that can fail for a reason no
         // probe can see. Every other empty answer means the index was asked and
         // said no; this one means the index was never told. The build is asked

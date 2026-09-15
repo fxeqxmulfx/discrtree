@@ -915,3 +915,95 @@ on its own; drop one", the one repair that could not have helped.
 Existing indexes need `dt refresh <source>` per elaborated source to pick the
 kind up; for Mathlib that is a full dump again, and there is no shortcut, the
 kind is written by the dumper and nowhere else.
+
+## A pattern head that the row prints as `inner` has to be spelled `Inner.inner`
+
+Looking for the coordinate formula of the inner product on `EuclideanSpace`,
+every shape query with `inner` as the head fails, and one of them fails with a
+message that says the head is the problem:
+
+    $ dt find 'inner _ _ = ∑ _, _'
+    no match: `inner` in the pattern matches nothing on its own
+    $ dt find 'inner _ _ _'
+    no match
+    $ dt find '⟪_, _⟫_ℝ = _'
+    no match: `_ℝ` in the pattern matches nothing on its own
+
+The rows are there, and they print the head as `inner`:
+
+    $ dt find --name inner_apply --in Mathlib.Analysis
+    Real.inner_apply  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+      ∀ (x y : ℝ), inner ℝ x y = x * y
+
+What matches is the qualified name, which appears nowhere in the output:
+
+    $ dt find 'Inner.inner _ _ = _'
+    Real.inner_apply  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+      ∀ (x y : ℝ), inner ℝ x y = x * y
+
+`inner` is an `export Inner (inner)`, so the pretty-printer drops the namespace
+and the pattern parser does not put it back.  The same will hold for every
+other exported class field one might reach for as a head (`compl`, `toDual`,
+`smul`...), and the message is confidently wrong about it: `inner` matches
+nothing on its own *as written*, but the constant it abbreviates is the head of
+hundreds of indexed rows.
+
+Two repairs, either of which would have saved the guessing:
+
+- resolve an unqualified pattern head through the same `export`/`open`
+  aliases Lean uses, so `inner _ _ = _` finds `Inner.inner`;
+- failing that, have the message name the candidates it knows about --
+  "`inner` matches nothing on its own; did you mean `Inner.inner`?" -- since
+  the index already holds the qualified constant and the unqualified suffix.
+
+Note also that `inner _ _ _` -- the arity the row actually prints, `𝕜` being
+explicit since the 2025 signature change -- returns a bare `no match` while
+`inner _ _ = _` returns the diagnosed one, so the more accurate query gets the
+less informative answer.
+
+Fixed in 0.21.0, by the first repair: an unqualified head is resolved through
+the index itself.  There is no alias table to consult -- the dump records
+constants, not the `export` statements that name them -- but the index knows
+something better than the aliases do, which is how often each candidate is
+actually the head of a row.  A pattern word with no dot in it is looked up
+among the head symbols whose last component is that word, and the commonest
+wins: `inner` finds 78 constants ending in `.inner`, `Inner.inner` heads 376
+rows and the runner-up heads 8.  Ties go to the shorter name, then
+alphabetically, so the answer does not depend on the order the rows arrived in.
+
+The lookup runs only when the query as written found nothing, and the rewrite
+is announced, because a search that silently answered a different question than
+the one asked would be worse than an empty result:
+
+    $ dt find 'inner _ _ = ∑ _, _'
+    dt: `inner` read as `Inner.inner`
+    sum_inner  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+    ...
+    PiLp.inner_apply  theorem  Mathlib.Analysis.InnerProductSpace.PiL2
+
+The line goes to stderr, so a pipe still carries only results.  A word that is
+itself a head symbol is left alone -- `Eq` is spelled `Eq` in the index and is
+also the last component of several other constants -- and a word written twice
+in one pattern is resolved once and reported once.
+
+When the rewrite finds nothing either, the message says what the index calls
+the word instead of leaving the user to guess, which is the entry's second
+repair and costs nothing once the first is in place:
+
+    $ dt find 'inner _ _ _'
+    no match: `inner` is `Inner.inner` in the index — Lean prints an exported
+    name without its namespace — and that matches nothing either; also
+    `Std.DTreeMap.Internal.Impl.inner`, `Std.DTreeMap.Internal.Cell.inner`
+
+so the more accurate query now gets the more informative answer, which is the
+last paragraph of the entry.
+
+Ranking is read from `decl`, whose `concl` is indexed, not from the `uses`
+side table: on the real 1.2 GB index a `decl` scan is 0.14-0.23 s against 3.8 s
+cold for `uses`, and both count the same thing.  The rule itself lives in
+`domain::decl::commonest_called`, so the in-memory stores and the SQL count
+agree by construction rather than by inspection.
+
+Not fixed: `⟪_, _⟫_ℝ`, the notation spelling from the third query above.  That
+is the parser's problem, not the resolver's -- notation is not a name, and the
+index holds no notation -- and it wants its own entry.

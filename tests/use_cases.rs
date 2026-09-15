@@ -369,6 +369,67 @@ fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
     );
 }
 
+/// `Real.inner_apply` in miniature: the row's conclusion is `Eq`, one of its
+/// argument heads is `Inner.inner`, and the type Lean printed for it says
+/// `inner`. That is what a reader copies back into a pattern.
+fn exported() -> FakeRepo {
+    let mut repo = repo();
+    let mut apply = theorem("Real.inner_apply", "mathlib", "Mathlib.Analysis.Inner", "Eq", &[]);
+    apply.ty = "∀ (x y : ℝ), inner ℝ x y = x * y".into();
+    apply.shape = discrtree::domain::decl::Shape::new(
+        Some(DeclName::new("Eq")),
+        vec![
+            discrtree::domain::decl::ArgHead::Named(DeclName::new("Inner.inner")),
+            discrtree::domain::decl::ArgHead::Named(DeclName::new("HMul.hMul")),
+        ],
+    );
+    repo.decls.push(apply);
+    // A second constant with the same last component, so the answer has to be
+    // chosen rather than found: `Inner.inner` heads the row above and this one
+    // heads nothing, which is the whole difference between them.
+    let mut other = theorem("Std.HashMap.inner", "mathlib", "Std.HashMap", "Eq", &[]);
+    other.shape = discrtree::domain::decl::Shape::new(Some(DeclName::new("Eq")), Vec::new());
+    repo.decls.push(other);
+    repo
+}
+
+/// `export Inner (inner)` makes the pretty-printer drop the namespace, so the
+/// pattern a reader writes from a goal is `inner _ _ = _` and the index holds
+/// `Inner.inner`. Correcting that by hand is a round trip spent on a word that
+/// is not misspelled.
+#[test]
+fn a_pattern_word_lean_prints_without_its_namespace_still_finds_the_row() {
+    let repo = exported();
+    let mut q = Query::new();
+    q.shape = discrtree::domain::decl::Shape::new(
+        Some(DeclName::new("Eq")),
+        vec![discrtree::domain::decl::ArgHead::Named(DeclName::new("inner"))],
+    );
+    let hits = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
+    assert_eq!(hits.rows.len(), 1, "{:?}", hits.rows);
+    assert_eq!(hits.rows[0].name.as_str(), "Real.inner_apply");
+    // And says so: the rows answer a question spelled differently from the
+    // one that was asked.
+    assert_eq!(hits.read_as, vec![("inner".to_string(), DeclName::new("Inner.inner"))]);
+}
+
+/// The word is resolved and the search still fails -- `Inner.inner` heads no
+/// conclusion. "matches nothing on its own" would send the reader to correct a
+/// word that is spelled exactly as Lean prints it.
+#[test]
+fn a_word_that_resolves_to_a_constant_that_answers_nothing_names_the_constant() {
+    let repo = exported();
+    let mut q = Query::new();
+    q.shape = discrtree::domain::decl::Shape::new(Some(DeclName::new("inner")), vec![]);
+    match (Find { repo: &repo, build: &NoBuild }).run(&q).unwrap().empty {
+        Some(Empty::Unqualified { written, candidates }) => {
+            assert_eq!(written, "inner");
+            assert_eq!(candidates.first().map(|c| c.as_str()), Some("Inner.inner"));
+        }
+        other => panic!("expected the word to be resolved, got {other:?}"),
+    }
+}
+
 /// An index whose text rows are the only ones marked `instance`.
 fn with_instances(elaborated_too: bool) -> FakeRepo {
     let mut repo = repo();

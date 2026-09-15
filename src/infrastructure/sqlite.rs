@@ -3,7 +3,7 @@
 //! with `AND` and a query is milliseconds rather than a scan.
 
 use crate::application::ports::{DeclRepo, DeclSink, Provenance};
-use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
+use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
@@ -378,6 +378,31 @@ impl DeclRepo for SqliteIndex {
             self.attach_lists(std::slice::from_mut(d))?;
         }
         Ok(decl)
+    }
+
+    /// One scan of `decl`, counted in Rust.
+    ///
+    /// `concl` is indexed and `concl_args` is a space-joined list, so neither
+    /// a suffix nor a member test can use an index; both `LIKE`s are there to
+    /// cut the rows that reach the counting, not to decide anything. They also
+    /// over-match -- `_` is a wildcard to `LIKE` and a letter in half the
+    /// names in Mathlib -- which costs a few rows and changes no answer,
+    /// because what a head is called is decided again in `commonest_called`.
+    fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
+        let ends = format!("%.{word}");
+        let mentions = format!("%.{word}%");
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT concl, concl_args FROM decl WHERE concl LIKE ?1 OR concl_args LIKE ?2",
+        )?;
+        let mut heads: Vec<DeclName> = Vec::new();
+        let mut rows = stmt.query(params![ends, mentions])?;
+        while let Some(row) = rows.next()? {
+            let concl: Option<String> = row.get(0)?;
+            let args: String = row.get(1)?;
+            heads.extend(concl.into_iter().map(DeclName::new));
+            heads.extend(args.split_whitespace().map(DeclName::new));
+        }
+        Ok(decl::commonest_called(heads.iter(), word))
     }
 
     fn enclosing(&self, of: &Decl) -> Result<Option<Decl>> {

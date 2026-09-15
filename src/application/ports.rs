@@ -18,6 +18,18 @@ pub trait DeclRepo {
     fn get_many(&self, names: &[DeclName]) -> Result<Vec<Decl>>;
     /// Declarations per source, for `dt status`.
     fn counts(&self) -> Result<Vec<(SourceId, usize)>>;
+    /// Constants the index uses as a head symbol -- of a conclusion or of one
+    /// of its arguments -- whose last component is `word`, commonest first.
+    ///
+    /// This is how a pattern written the way Lean prints reaches the constant
+    /// the index stores. `export Inner (inner)` makes the pretty-printer drop
+    /// the namespace, so a reader copying a goal back into `dt find` writes
+    /// `inner _ _ = _` for a row whose argument head is `Inner.inner`. Ranked
+    /// because the last component is rarely unique -- seventy-eight constants
+    /// end in `.inner` -- and the exported one is the one nearly every row
+    /// means: it heads 376 rows against 8 for the next.
+    fn heads_called(&self, word: &str) -> Result<Vec<DeclName>>;
+
     /// Names that exist at all, for turning scanned identifiers into
     /// dependencies.
     fn contains(&self, name: &DeclName) -> Result<bool> {

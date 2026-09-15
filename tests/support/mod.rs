@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use discrtree::application::ports::{DeclRepo, ProjectWriter, SourceFiles};
-use discrtree::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
+use discrtree::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::{SourceId, SourceKind, SourceMeta, Sources};
@@ -116,6 +116,10 @@ impl DeclRepo for FakeRepo {
 
     fn get_many(&self, names: &[DeclName]) -> Result<Vec<Decl>> {
         Ok(names.iter().filter_map(|n| self.decls.iter().find(|d| &d.name == n).cloned()).collect())
+    }
+
+    fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
+        Ok(decl::commonest_called(self.decls.iter().flat_map(|d| d.shape.heads()), word))
     }
 
     /// The same rule SQLite applies: the smallest strictly-containing span in

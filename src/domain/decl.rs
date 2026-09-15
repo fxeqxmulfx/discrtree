@@ -132,6 +132,15 @@ impl Shape {
         self.concl.is_none() && self.args.is_empty()
     }
 
+    /// Every constant the shape names: the conclusion head, then the argument
+    /// heads that are not `_`.
+    pub fn heads(&self) -> impl Iterator<Item = &DeclName> {
+        self.concl.iter().chain(self.args.iter().filter_map(|a| match a {
+            ArgHead::Named(n) => Some(n),
+            ArgHead::Any => None,
+        }))
+    }
+
     /// Whether `self`, read as a pattern, matches `other`, read as a statement.
     ///
     /// Argument matching is positional but tolerant of arity: a pattern with
@@ -208,6 +217,28 @@ impl Decl {
     }
 }
 
+/// The head symbols whose last component is `word`, commonest first.
+///
+/// The rule for reading an unqualified pattern token, in one place: the
+/// in-memory stores count over this, SQLite counts the same thing in SQL, and
+/// the two agreeing is what makes either trustworthy. Ties go to the shorter
+/// name and then alphabetically, so the answer does not depend on what order
+/// the rows arrived in.
+pub fn commonest_called<'a>(
+    heads: impl Iterator<Item = &'a DeclName>,
+    word: &str,
+) -> Vec<DeclName> {
+    let mut count: std::collections::HashMap<&DeclName, usize> = std::collections::HashMap::new();
+    for h in heads.filter(|h| h.base() == word) {
+        *count.entry(h).or_default() += 1;
+    }
+    let mut ranked: Vec<(&DeclName, usize)> = count.into_iter().collect();
+    ranked.sort_by(|(an, ac), (bn, bc)| {
+        bc.cmp(ac).then(an.as_str().len().cmp(&bn.as_str().len())).then(an.cmp(bn))
+    });
+    ranked.into_iter().map(|(n, _)| n.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +291,21 @@ mod tests {
         let mut d = Decl::stub("Foo", "mathlib", "Mathlib.Foo");
         d.doc = Some("\n  The sum is monotone.\nMore detail.".into());
         assert_eq!(d.summary(), Some("The sum is monotone."));
+    }
+
+    /// Seventy-eight constants in Mathlib end in `.inner` and one of them is
+    /// what nearly every row means: `Inner.inner` heads 376 of them, the next
+    /// heads 8. Frequency is what tells an `export`ed name from a field on
+    /// somebody's structure, and nothing else in the index does.
+    #[test]
+    fn the_commonest_constant_with_a_name_comes_first() {
+        let n = DeclName::new;
+        let heads = [n("Inner.inner"), n("Std.HashMap.inner"), n("Inner.inner"), n("Eq")];
+        assert_eq!(
+            commonest_called(heads.iter(), "inner"),
+            vec![n("Inner.inner"), n("Std.HashMap.inner")]
+        );
+        // The last component, not a substring: `inner_apply` is not `inner`.
+        assert!(commonest_called([n("Real.inner_apply")].iter(), "inner").is_empty());
     }
 }

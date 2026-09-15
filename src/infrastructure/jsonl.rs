@@ -6,7 +6,7 @@
 //! file and nothing else.
 
 use crate::application::ports::DeclRepo;
-use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
+use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
@@ -226,6 +226,10 @@ impl DeclRepo for JsonlRepo {
             names.iter().enumerate().map(|(i, n)| (n, i)).collect();
         found.sort_by_key(|d| position.get(&d.name).copied().unwrap_or(usize::MAX));
         Ok(found)
+    }
+
+    fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
+        Ok(decl::commonest_called(self.decls.iter().flat_map(|d| d.shape.heads()), word))
     }
 
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {

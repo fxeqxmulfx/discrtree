@@ -83,6 +83,27 @@ pub fn find(hits: &Hits, long: bool) -> String {
                     missing.fix()
                 )
             }
+            // The word is not misspelled and no condition needs dropping:
+            // what it names is spelled differently in the index than it is on
+            // the screen, and only the index's spelling can be searched for.
+            Some(Empty::Unqualified { written, candidates }) => {
+                let (first, rest) = candidates.split_first().expect("a candidate, or no variant");
+                let others = match rest.len() {
+                    0 => String::new(),
+                    _ => format!(
+                        "; also {}",
+                        rest.iter()
+                            .take(2)
+                            .map(|n| format!("`{n}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                format!(
+                    "no match: `{written}` is `{first}` in the index — Lean prints an exported \
+                     name without its namespace — and that matches nothing either{others}\n"
+                )
+            }
             // Naming a source is not optional in the repair: the dump is out
             // of date and nothing on disk has moved, so a bare `dt refresh`
             // reports that there is nothing to do.
@@ -522,7 +543,7 @@ mod tests {
     use crate::domain::decl::Span;
 
     fn hits(rows: Vec<Decl>) -> Hits {
-        Hits { rows, truncated: false, empty: None }
+        Hits { rows, truncated: false, empty: None, read_as: Vec::new() }
     }
 
     fn decl(elaborated: bool) -> Decl {
@@ -560,7 +581,10 @@ mod tests {
     #[test]
     fn a_truncated_search_says_so_instead_of_looking_complete() {
         let full = find(&hits(vec![decl(true)]), false);
-        let cut = find(&Hits { rows: vec![decl(true)], truncated: true, empty: None }, false);
+        let cut = find(
+            &Hits { rows: vec![decl(true)], truncated: true, empty: None, read_as: Vec::new() },
+            false,
+        );
         assert!(full.contains("1 result"));
         assert!(cut.contains("more match"), "got: {cut}");
     }
@@ -632,13 +656,43 @@ mod tests {
         assert!(!status(&report(&[]), std::path::Path::new("/p/index.db")).contains("not indexed"));
     }
 
+    /// The reader wrote what Lean printed. Telling them it "matches nothing on
+    /// its own" sends them to correct a word that is spelled correctly, so the
+    /// line says what the index calls it instead.
+    #[test]
+    fn an_empty_result_on_an_exported_name_says_what_the_index_calls_it() {
+        let r = find(
+            &Hits {
+                rows: Vec::new(),
+                truncated: false,
+                empty: Some(Empty::Unqualified {
+                    written: "inner".into(),
+                    candidates: vec![
+                        crate::domain::name::DeclName::new("Inner.inner"),
+                        crate::domain::name::DeclName::new("Std.HashMap.inner"),
+                    ],
+                }),
+                read_as: Vec::new(),
+            },
+            false,
+        );
+        assert!(r.contains("`inner` is `Inner.inner`"), "{r}");
+        assert!(r.contains("Std.HashMap.inner"), "the other candidate is worth naming: {r}");
+        assert!(!r.contains("matches nothing on its own"), "that is the wrong repair: {r}");
+    }
+
     /// The flag is right and the index is old: the repair is a re-read, and
     /// it has to name a source, because nothing on disk has moved and a bare
     /// `dt refresh` would report that there is nothing to do.
     #[test]
     fn an_instance_search_against_an_old_dump_asks_for_a_re_read() {
         let r = find(
-            &Hits { rows: Vec::new(), truncated: false, empty: Some(Empty::InstancesAreDefs) },
+            &Hits {
+                rows: Vec::new(),
+                truncated: false,
+                empty: Some(Empty::InstancesAreDefs),
+                read_as: Vec::new(),
+            },
             false,
         );
         assert!(r.contains("`instance`"), "{r}");
@@ -650,7 +704,12 @@ mod tests {
     /// "matches nothing on its own" sends them to correct it anyway.
     #[test]
     fn an_empty_result_from_an_unindexed_package_names_the_package() {
-        let empty = |e: Empty| Hits { rows: Vec::new(), truncated: false, empty: Some(e) };
+        let empty = |e: Empty| Hits {
+            rows: Vec::new(),
+            truncated: false,
+            empty: Some(e),
+            read_as: Vec::new(),
+        };
         let r = find(
             &empty(Empty::NotIndexed {
                 asked: Asked::Module("Batteries".into()),
@@ -699,6 +758,7 @@ mod tests {
                     asked: Asked::Module("Init.Data.Int".into()),
                     missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
                 }),
+                read_as: Vec::new(),
             },
             false,
         );
@@ -719,6 +779,7 @@ mod tests {
                     asked: Asked::Name(crate::domain::name::DeclName::new("Int.emod_emod_of_dvd")),
                     missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
                 }),
+                read_as: Vec::new(),
             },
             false,
         );

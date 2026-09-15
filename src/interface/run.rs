@@ -219,6 +219,12 @@ impl App {
         let repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
         let hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
+        // On stderr, and before the rows: the answer below is to a question
+        // spelled differently from the one that was asked, and a reader who
+        // is piping the rows somewhere should still be told.
+        for (written, read) in &hits.read_as {
+            eprintln!("dt: `{written}` read as `{read}`");
+        }
         print!("{}", render::find(&hits, args.long));
         self.warn_stale(repo.as_ref(), hits.rows.iter().map(|d| d.source.clone()).collect());
         Ok(())
