@@ -127,6 +127,13 @@ pub enum Command {
     /// reason to name one is that you know something the timestamps do not.
     /// With no name, exactly the sources that have fallen behind — never all
     /// of them, which would mean dumping Mathlib again for nothing.
+    ///
+    /// Exit status is what a `&&` chain reads: 0 only when every source it
+    /// tried was read and indexed, and 0 as well when none had fallen behind.
+    /// A source that could not be read exits non-zero with the reason on
+    /// stderr; over several targets each failure is named as it happens, the
+    /// last line says how many of how many were left as they were, and the
+    /// sources that did refresh stay refreshed.
     Refresh {
         /// Source name. Every stale source when omitted.
         source: Option<String>,

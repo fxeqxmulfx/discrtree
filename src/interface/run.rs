@@ -512,18 +512,13 @@ impl App {
         // minutes long, and a reader watching one wants to know that the
         // project failed before Mathlib has finished dumping.
         let many = targets.len() > 1;
-        let (read, mut failed) = read_each(&targets, |name| {
+        let (read, failed) = read_each(&targets, |name| {
             self.reread(name).inspect_err(|e| {
                 if many {
                     eprintln!("dt: `{name}`: {e}");
                 }
             })
         });
-        // One name, one failure, nothing else attempted: the reason is the
-        // whole answer, and a summary over a list of one would only bury it.
-        if !many && failed.len() == 1 {
-            return Err(failed.remove(0).1);
-        }
         if !read.is_empty() {
             // Forced: the source was named, or measured stale. Either way the
             // fingerprint check has already been answered, and answering it
@@ -531,16 +526,7 @@ impl App {
             // does nothing.
             self.index(Some(&read), false, true)?;
         }
-        if !failed.is_empty() {
-            let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
-            bail!(
-                "{} of {} sources could not be read and were left as they were: {}",
-                failed.len(),
-                targets.len(),
-                names.join(", ")
-            )
-        }
-        Ok(())
+        outcome(targets.len(), failed)
     }
 
     /// Read one source again, from wherever its declarations come from: the
@@ -617,6 +603,29 @@ impl App {
 /// likely to have broken. Stopping there leaves Mathlib and core on the
 /// previous toolchain's declarations, which is the index the next question is
 /// about to be asked of.
+/// What a refresh reports once every target has been tried.
+///
+/// A refresh is the one command whose caller is usually not a reader: a `&&`
+/// chain, a Makefile, an agent deciding whether the index it is about to
+/// search can be trusted. So a source left as it was is an error and not a
+/// remark, however many others were read.
+///
+/// One name, one failure, nothing else attempted: the reason is the whole
+/// answer, and a summary over a list of one would only bury it.
+fn outcome(targets: usize, mut failed: Vec<(String, Error)>) -> Result<()> {
+    match failed.len() {
+        0 => Ok(()),
+        1 if targets == 1 => Err(failed.remove(0).1),
+        n => {
+            let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+            bail!(
+                "{n} of {targets} sources could not be read and were left as they were: {}",
+                names.join(", ")
+            )
+        }
+    }
+}
+
 fn read_each(
     targets: &[String],
     mut read: impl FnMut(&str) -> Result<()>,
@@ -838,6 +847,35 @@ mod tests {
         });
         assert_eq!(read, ["b"]);
         assert_eq!(failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+    }
+
+    /// Reported from a project whose `dt refresh` was said to exit 0 after
+    /// the dump failed. Every version that has a `refresh` propagates the
+    /// error, and the transcript could not be reproduced -- but nothing held
+    /// the convention in place, which is what these three tests are for. A
+    /// refresh is read by a `&&` chain more often than by a person.
+    #[test]
+    fn one_source_that_could_not_be_read_fails_with_its_own_reason() {
+        let e = outcome(1, vec![("project".to_owned(), Error::new("lake env lean failed"))])
+            .expect_err("a refresh that read nothing is not a success");
+        assert_eq!(e.to_string(), "lake env lean failed");
+    }
+
+    /// The interesting case: Mathlib was refreshed, the project was not. The
+    /// index is now half what was asked for, so the command says so.
+    #[test]
+    fn a_partly_refreshed_index_is_still_a_failure() {
+        let e = outcome(2, vec![("project".to_owned(), Error::new("lake env lean failed"))])
+            .expect_err("a source left as it was is an error");
+        assert_eq!(
+            e.to_string(),
+            "1 of 2 sources could not be read and were left as they were: project"
+        );
+    }
+
+    #[test]
+    fn everything_read_is_the_only_success() {
+        assert!(outcome(3, Vec::new()).is_ok());
     }
 
     #[test]

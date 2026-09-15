@@ -775,3 +775,65 @@ is being searched is behind its own build most of the time, and the warning is
 correct every time it fires.  Narrowing it -- to the sources a failed search
 could plausibly have drawn on, rather than all of them -- is a separate change
 and needs the query's own conditions to say which those are.
+
+## `dt refresh` exits 0 after failing to rebuild a source
+
+Reported 2026-09-15, from the transformer project, dt 0.17.x.
+
+The project did not compile at the moment `dt refresh` ran (a file mid-edit).
+The dump script could not load one module, and `dt refresh` said so -- and then
+exited `0`:
+
+    $ dt refresh; echo "[exited with code $?]"
+    .../dump_project.lean:20:0: error: object file '.../Section8_General.olean'
+      of module Transformer.Perspective.Section8_General does not exist
+    dt: lake env lean failed for source `project` (exit 1); the script is at
+        .../.discrtree/jsonl/scripts/dump_project.lean
+    [exited with code 0]
+
+The message is clear and names the script, so a human reading the terminal is
+fine.  A caller is not: anything that runs `dt refresh` before a batch of
+queries -- a shell `&&` chain, a Makefile, a pre-commit hook, an agent -- sees
+success and goes on to search a stale index, which is the exact state the
+refresh was meant to leave behind.
+
+Expected: a non-zero exit when no source was refreshed.  A partial refresh
+(mathlib fresh, project failed) is the interesting case: either non-zero with
+the per-source status kept in the output, or a documented convention, but not
+`0`.
+
+Not reproduced, and the convention written down instead, in 0.19.0.
+
+Every version that has a `refresh` at all -- it arrived in 0.10.0 -- propagates
+the failure with `?` and `main` turns any `Err` into `dt: <reason>` and exit 1.
+Reading the whole path again (`refresh`, `read_each`, `dispatch`, `run`, `main`,
+`dump`, `LakeElaborator::dump`) found nothing that swallows one.  Then the
+report's own failure was staged on a toy project by deleting a module's
+`.olean`, which is the error it quotes:
+
+    $ dt refresh toy; echo "[exit $?]"
+    .../dump_toy.lean:20:0: error: object file '.../Toy/Basic.olean' of module
+      Toy.Basic does not exist
+    dt: lake env lean failed for source `toy` (exit 1); the script is at
+        .../dump_toy.lean
+    [exit 1]
+
+    $ dt refresh; echo "[exit $?]"          # two stale sources, both broken
+    dt: `nope`: lake env lean failed for source `nope` (exit 1); ...
+    dt: `toy`: lake env lean failed for source `toy` (exit 1); ...
+    dt: 2 of 2 sources could not be read and were left as they were: nope, toy
+    [exit 1]
+
+A missing name, one stale source, two stale sources, a partial failure: exit 1
+every time.  So the `0` came from somewhere the binary cannot see -- a pipeline
+whose `$?` belonged to the last stage, a shell function, an older build on the
+`PATH` -- and there is nothing here to fix.
+
+What there was, was nothing holding the convention in place: no test covered
+the single-target failure, and `--help` said what a refresh does but not what it
+exits.  The decision now lives in one function, `outcome(targets, failed)`, with
+the three cases named as tests -- one source fails with its own reason, a
+partial refresh is still a failure, everything read is the only success -- and
+`dt refresh --help` states it for the caller that reads exit codes rather than
+terminals.  A report of the same thing against a version that has these tests
+would be worth chasing; this one is closed as unreproducible.

@@ -72,8 +72,7 @@ pub struct Parsed {
 /// becomes the conclusion head and the rest become arguments.
 pub fn parse(pattern: &str) -> Parsed {
     let all = tokenize(pattern);
-    let vars: Vec<String> =
-        dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
+    let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
     let (hypotheses, tokens) = split_on_arrows(&all);
     let assumed = conditions_of(&hypotheses);
     let count = hypotheses.len();
@@ -89,7 +88,13 @@ pub fn parse(pattern: &str) -> Parsed {
             let (right_head, right_rest) = side(&rhs);
             query.shape = Shape::new(concl, vec![left_head, right_head]);
             query.uses = dedup(left_rest.into_iter().chain(right_rest).chain(assumed).collect());
-            Parsed { query, operator: Some(op), extra_constants: Vec::new(), variables: vars, hypotheses: count }
+            Parsed {
+                query,
+                operator: Some(op),
+                extra_constants: Vec::new(),
+                variables: vars,
+                hypotheses: count,
+            }
         }
         None => {
             let ids = constants(&tokens);
@@ -104,13 +109,25 @@ pub fn parse(pattern: &str) -> Parsed {
                         .collect();
                     query.shape = Shape::new(Some(head.clone()), args);
                     query.uses = dedup(rest.iter().cloned().chain(assumed).collect());
-                    Parsed { query, operator: None, extra_constants: Vec::new(), variables: vars, hypotheses: count }
+                    Parsed {
+                        query,
+                        operator: None,
+                        extra_constants: Vec::new(),
+                        variables: vars,
+                        hypotheses: count,
+                    }
                 }
                 None => {
                     // Nothing recognisable: fall back to free text rather than
                     // returning an unconstrained query.
                     query.text = Some(pattern.trim().to_string());
-                    Parsed { query, operator: None, extra_constants: Vec::new(), variables: vars, hypotheses: count }
+                    Parsed {
+                        query,
+                        operator: None,
+                        extra_constants: Vec::new(),
+                        variables: vars,
+                        hypotheses: count,
+                    }
                 }
             }
         }
