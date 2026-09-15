@@ -67,14 +67,19 @@ CREATE TABLE IF NOT EXISTS dep (
 ) WITHOUT ROWID;
 
 -- What each source was when it was indexed. Without this the index cannot
--- answer the two questions that decide whether it can be trusted: has the
--- input changed since, and is the input itself behind upstream.
+-- answer the three questions that decide whether it can be trusted: has the
+-- input changed since, is the input itself behind upstream, and did this build
+-- write the rows. `writer` and `row_format` answer the third: a source can be
+-- current against its upstream and still hold rows read differently from the
+-- way they were written.
 CREATE TABLE IF NOT EXISTS source (
   id         TEXT PRIMARY KEY,
   revision   TEXT,
   stamp      TEXT,
   indexed_at INTEGER NOT NULL,
-  decls      INTEGER NOT NULL
+  decls      INTEGER NOT NULL,
+  writer     TEXT,
+  row_format INTEGER
 );
 "#;
 
@@ -87,7 +92,7 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// The one index the side tables have, and the one thing a load does not need.
 ///
@@ -145,13 +150,33 @@ fn check_version(conn: &Connection) -> Result<()> {
         .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'decl'")
         .and_then(|mut s| s.exists([]))
         .unwrap_or(false);
-    if !populated || found == SCHEMA_VERSION {
+    if !populated || found == SCHEMA_VERSION || migrate(conn, found)? {
         return Ok(());
     }
     bail!(
         "this index was written by a different version of dt (schema {found}, this build \
          expects {SCHEMA_VERSION}); run `dt index --rebuild`"
     )
+}
+
+/// The shape changes an existing file can satisfy, applied in place.
+///
+/// Refusing to open is the honest answer when the rows would be read wrong, and
+/// a schema bump that only adds nullable columns to `source` is the one case
+/// where nothing would be: every column the old build wrote is still there and
+/// still means what it did, and the two new ones read as "written by a dt that
+/// did not record it" — which is exactly what that file is. Rebuilding a 1.2 GB
+/// index to learn a fact the empty column already states is the cost of not
+/// having this.
+fn migrate(conn: &Connection, found: i64) -> Result<bool> {
+    if found != 2 {
+        return Ok(false);
+    }
+    conn.execute_batch(
+        "ALTER TABLE source ADD COLUMN writer TEXT; \
+         ALTER TABLE source ADD COLUMN row_format INTEGER;",
+    )?;
+    Ok(true)
 }
 
 pub struct SqliteIndex {
@@ -201,13 +226,18 @@ impl SqliteIndex {
     pub fn provenance_of(&self, source: &SourceId) -> Result<Option<Provenance>> {
         let row = self
             .conn
-            .prepare_cached("SELECT revision, stamp, indexed_at, decls FROM source WHERE id = ?1")?
+            .prepare_cached(
+                "SELECT revision, stamp, indexed_at, decls, writer, row_format \
+                 FROM source WHERE id = ?1",
+            )?
             .query_row(params![source.as_str()], |r| {
                 Ok(Provenance {
                     revision: r.get(0)?,
                     stamp: r.get(1)?,
                     indexed_at: r.get::<_, i64>(2)? as u64,
                     decls: r.get::<_, i64>(3)? as usize,
+                    writer: r.get(4)?,
+                    row_format: r.get(5)?,
                 })
             })
             .optional()?;
@@ -617,15 +647,18 @@ impl DeclSink for SqliteIndex {
     fn record(&mut self, source: &SourceId, was: &Provenance) -> Result<()> {
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO source (id, revision, stamp, indexed_at, decls) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO source \
+             (id, revision, stamp, indexed_at, decls, writer, row_format) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![
                 source.as_str(),
                 was.revision.as_deref(),
                 was.stamp.as_deref(),
                 was.indexed_at as i64,
-                was.decls as i64
+                was.decls as i64,
+                was.writer.as_deref(),
+                was.row_format
             ])?;
         Ok(())
     }

@@ -9,11 +9,11 @@ use crate::application::deps::DepsResult;
 use crate::application::find::{Asked, Duplicate, Empty, Hits};
 use crate::application::ports::Missing;
 use crate::application::show::{Shown, Source};
-use crate::application::status::{Report, SourceStatus, Stale};
+use crate::application::status::{Report, SourceStatus, Stale, Why};
 use crate::domain::decl::Decl;
 use crate::domain::lean_core;
 use crate::domain::source::SourceKind;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The marker every text row carries.
 pub fn mark(d: &Decl) -> &'static str {
@@ -423,9 +423,37 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
     // text one — because the reader had to run the right half themselves.
     // `dt refresh` picks the half, and with no argument it refreshes exactly
     // the sources this line names, so the advice is the command.
-    let stale: Vec<&str> = rows.iter().filter(|r| r.stale()).map(|r| r.name.as_str()).collect();
+    // Named with the reason, because the two reasons look nothing alike in the
+    // table above: a source that moved shows it in the revision column, and one
+    // whose rows an older `dt` wrote shows nothing at all — every column of it
+    // is what it was, and the rows behind them are not.
+    let stale: Vec<&SourceStatus> = rows.iter().filter(|r| r.stale()).collect();
     if !stale.is_empty() {
-        out.push_str(&format!("\nbehind: {} — re-run `dt refresh`\n", stale.join(", ")));
+        let names: Vec<&str> = stale.iter().map(|r| r.name.as_str()).collect();
+        // Upgrading `dt` puts every source behind at once and for the same
+        // reason. Repeating it per name is five copies of one sentence, so a
+        // reason they all share is said once and only a mixed list spells it
+        // out row by row.
+        let reasons: BTreeSet<&Option<Option<String>>> =
+            stale.iter().map(|r| &r.written_by).collect();
+        let why = match reasons.iter().next() {
+            Some(Some(by)) if reasons.len() == 1 => {
+                format!(" — indexed by {}", wrote(by.as_deref()))
+            }
+            _ => String::new(),
+        };
+        let listed = match why.is_empty() && reasons.len() > 1 {
+            true => stale
+                .iter()
+                .map(|r| match &r.written_by {
+                    Some(by) => format!("{} (indexed by {})", r.name, wrote(by.as_deref())),
+                    None => r.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            false => names.join(", "),
+        };
+        out.push_str(&format!("\nbehind: {listed}{why} — re-run `dt refresh`\n"));
     }
     // The gap no row above can show. A project declares Mathlib and stops, and
     // everything Mathlib is built on is importable from the project already and
@@ -474,11 +502,36 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
 /// `git show`. So it gets the fact instead of the values.
 pub fn stale(s: &Stale, kind: Option<SourceKind>) -> String {
     let id = &s.id;
-    let what = match kind {
-        Some(SourceKind::Local) => "was rebuilt since it was indexed".to_string(),
-        _ => format!("is at {}, the index at {}", short_rev(&s.current), short_rev(&s.indexed)),
+    let what = match (&s.why, kind) {
+        // The rows are as old as the dt that wrote them, and that dt is the
+        // value a reader can check: it is printed by `dt --version`.
+        (Why::Written { by }, _) => {
+            format!("was indexed by {}, and this is dt {}", wrote(by.as_deref()), version())
+        }
+        (Why::Moved { .. }, Some(SourceKind::Local)) => {
+            "was rebuilt since it was indexed".to_string()
+        }
+        (Why::Moved { indexed, current }, _) => {
+            format!("is at {}, the index at {}", short_rev(current), short_rev(indexed))
+        }
     };
     format!("dt: `{id}` {what}; rows may be missing — `dt refresh {id}`\n")
+}
+
+/// The `dt` that wrote a source's rows. A version too old to have recorded its
+/// own is named by what is known about it rather than by a guess: it is every
+/// version before the one that started recording, and "an older dt" is the
+/// whole of what the index can say.
+fn wrote(by: Option<&str>) -> String {
+    match by {
+        Some(v) => format!("dt {v}"),
+        None => "an older dt".to_string(),
+    }
+}
+
+/// This build's version, as `dt --version` prints it.
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 /// A revision as short as it can still be read. A git hash is recognisable at
@@ -627,6 +680,7 @@ mod tests {
             indexed_rev: Some("4f21c8e".into()),
             current_rev: Some("9ab0d31".into()),
             age: Some(3600),
+            written_by: None,
         }
     }
 
@@ -902,8 +956,10 @@ mod tests {
     fn a_stale_line_says_which_value_differs() {
         let s = Stale {
             id: crate::domain::source::SourceId::new("mathlib"),
-            indexed: "5ed2965256430c3649e86755f9576b54eca72435".into(),
-            current: "4f8b12c56430c3649e86755f9576b54eca724359".into(),
+            why: Why::Moved {
+                indexed: "5ed2965256430c3649e86755f9576b54eca72435".into(),
+                current: "4f8b12c56430c3649e86755f9576b54eca724359".into(),
+            },
         };
         let line = stale(&s, Some(SourceKind::Lake));
         assert!(line.contains("is at 4f8b12c, the index at 5ed2965"), "{line}");
@@ -918,8 +974,10 @@ mod tests {
     fn the_project_is_rebuilt_not_moved() {
         let s = Stale {
             id: crate::domain::source::SourceId::new("project"),
-            indexed: "b57d6d7986c61d4a".into(),
-            current: "04e1042c1f0b2e55".into(),
+            why: Why::Moved {
+                indexed: "b57d6d7986c61d4a".into(),
+                current: "04e1042c1f0b2e55".into(),
+            },
         };
         let line = stale(&s, Some(SourceKind::Local));
         assert!(line.contains("`project` was rebuilt since it was indexed"), "{line}");
@@ -932,9 +990,66 @@ mod tests {
     fn a_toolchain_keeps_its_version() {
         let s = Stale {
             id: crate::domain::source::SourceId::new("core"),
-            indexed: "leanprover/lean4:v4.33.1".into(),
-            current: "leanprover/lean4:v4.34.0".into(),
+            why: Why::Moved {
+                indexed: "leanprover/lean4:v4.33.1".into(),
+                current: "leanprover/lean4:v4.34.0".into(),
+            },
         };
         assert!(stale(&s, Some(SourceKind::Core)).contains("v4.34.0, the index at leanprover"));
+    }
+
+    /// The other way an index falls behind, and the one no revision can show:
+    /// the source is where it was and the rows in it are not what this build
+    /// writes. The line names both versions, because "out of date" without a
+    /// pair of values is the wording that was read as a claim about a path and
+    /// filed as a bug.
+    #[test]
+    fn a_stale_line_names_the_dt_that_wrote_the_rows() {
+        let by = |v: Option<&str>| Stale {
+            id: crate::domain::source::SourceId::new("mathlib"),
+            why: Why::Written { by: v.map(str::to_string) },
+        };
+        let line = stale(&by(Some("0.22.0")), Some(SourceKind::Lake));
+        assert!(line.contains("was indexed by dt 0.22.0"), "{line}");
+        assert!(line.contains(&format!("this is dt {}", env!("CARGO_PKG_VERSION"))), "{line}");
+        assert!(line.contains("`dt refresh mathlib`"), "{line}");
+        // A dt too old to have recorded which it was says that much and no
+        // more: a version it never wrote down cannot be guessed at.
+        assert!(stale(&by(None), Some(SourceKind::Lake)).contains("an older dt"));
+    }
+
+    /// `behind:` is the only place the status table can report this, because
+    /// every column of such a row is exactly what it was: same revision, same
+    /// count, same age. So the reason travels with the name.
+    #[test]
+    fn the_status_line_says_when_it_is_the_writer_that_is_behind() {
+        use crate::domain::source::SourceKind;
+        let rows = [SourceStatus {
+            current_rev: Some("4f21c8e".into()),
+            written_by: Some(Some("0.22.0".into())),
+            ..behind("mathlib", SourceKind::Lake, true)
+        }];
+        let r = status(&report(&rows), std::path::Path::new("/p/index.db"));
+        assert!(r.contains("behind: mathlib — indexed by dt 0.22.0 — re-run `dt refresh`"), "{r}");
+    }
+
+    /// Upgrading puts every source behind at once, and five copies of one
+    /// sentence is not five facts. A reason they all share is said once; a
+    /// list where they differ is spelled out, because then it is five facts.
+    #[test]
+    fn a_reason_every_source_shares_is_said_once() {
+        use crate::domain::source::SourceKind;
+        let old = |name: &str| SourceStatus {
+            current_rev: Some("4f21c8e".into()),
+            written_by: Some(None),
+            ..behind(name, SourceKind::Lake, true)
+        };
+        let r = status(&report(&[old("mathlib"), old("core")]), std::path::Path::new("/p/i.db"));
+        assert!(r.contains("behind: mathlib, core — indexed by an older dt"), "{r}");
+
+        // One moved and one was written by an older dt: two facts, two notes.
+        let mixed = [old("mathlib"), behind("project", SourceKind::Local, true)];
+        let r = status(&report(&mixed), std::path::Path::new("/p/i.db"));
+        assert!(r.contains("behind: mathlib (indexed by an older dt), project —"), "{r}");
     }
 }

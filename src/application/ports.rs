@@ -78,6 +78,9 @@ pub trait DeclSink {
 /// tells you the dump is older than the Mathlib you are now building against.
 /// An index can be perfectly current with respect to its input and months
 /// behind the library.
+///
+/// `writer` and `row_format` answer the third: is this build the one that wrote
+/// these rows. See [`ROW_FORMAT`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
     pub revision: Option<String>,
@@ -90,6 +93,50 @@ pub struct Provenance {
     /// makes the reader do the subtraction.
     pub indexed_at: u64,
     pub decls: usize,
+    /// The `dt` that wrote these rows, for the line that reports them as old.
+    /// `None` is a `dt` from before this was recorded, which is older than any
+    /// version that could have written it.
+    pub writer: Option<String>,
+    /// The row format those rows are in. `None` reads as older than [`ROW_FORMAT`].
+    pub row_format: Option<i64>,
+}
+
+/// What this build writes into a row, as a number that changes when the rows do.
+///
+/// Not the crate version, and the difference is the whole point of it being a
+/// separate number: a version bump that changes ranking, parsing or output
+/// leaves every stored row exactly as it was, and re-dumping Mathlib to
+/// discover that is an hour for nothing. Bump this when a dump would now
+/// produce different rows -- a new column, a different `kind`, a shape read
+/// another way -- and leave it alone otherwise. The cost of getting it wrong in
+/// each direction is not symmetric: too eager wastes an hour, too lazy leaves
+/// an index that looks current and answers `no match` for what is in it.
+pub const ROW_FORMAT: i64 = 1;
+
+impl Provenance {
+    /// The writer half, filled in by this build, with the rest left to the
+    /// caller: `Provenance { revision, .., ..Provenance::by_this_build() }`.
+    pub fn by_this_build() -> Self {
+        Provenance {
+            revision: None,
+            stamp: None,
+            indexed_at: 0,
+            decls: 0,
+            writer: Some(env!("CARGO_PKG_VERSION").to_string()),
+            row_format: Some(ROW_FORMAT),
+        }
+    }
+
+    /// Whether these rows were written by a `dt` that wrote them differently
+    /// from this one.
+    ///
+    /// Unknown counts as outdated here, the opposite of the rule revisions
+    /// follow, and for the same reason those follow theirs: an unreadable
+    /// revision is no evidence that a source moved, but a missing row format is
+    /// evidence -- only a `dt` older than [`ROW_FORMAT`] leaves it missing.
+    pub fn outdated(&self) -> bool {
+        self.row_format.is_none_or(|f| f < ROW_FORMAT)
+    }
 }
 
 /// The revision a source is at on disk right now, as opposed to the one the

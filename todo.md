@@ -1192,3 +1192,74 @@ exists -- `--name e`, 463 306 matching rows -- is 0.37 s.
 Neither half works without the other, and each is testable on its own: the
 ranking against a handful of rows in the domain, the window against 301 rows
 in SQLite with the answer written last.
+
+## A dt version bump leaves the old index silently incomplete
+
+After upgrading 0.22.0 → 0.24.0, `dt status` reported only `project` as behind:
+`mathlib` was "1h ago, revision 5ed2965", no warning. But that index had been
+dumped by 0.22.0, and lookups against it came back empty:
+
+    $ dt show ContinuousLinearMap.adjoint
+    dt: ContinuousLinearMap.adjoint is not in the index; try `dt find --name adjoint`
+    $ dt find --name adjoint --in Mathlib.Analysis.InnerProductSpace --kind def
+    no match: every condition matches on its own; drop one
+
+`dt refresh mathlib` — which `dt status` said was unnecessary, and which
+`dt refresh` with no argument therefore skips — fixed both: the same two
+queries now answer with `Mathlib.Analysis.InnerProductSpace.Adjoint`.
+
+Staleness is tracked against the *source* revision only, never against the
+version of `dt` that wrote the rows. So the failure mode is an index that
+looks current and answers `no match` for declarations that are in it. The
+answer is wrong rather than late, and `--kind def` makes it look like a
+deliberately narrowed query returning nothing.
+
+Suggestion: stamp the writer's version into the index, and have `dt status`
+mark every source written by an older `dt` as stale, so plain `dt refresh`
+picks them up.
+
+Fixed in 0.25.0. The suggestion, with one number added to it: the index now
+records both the `dt` that wrote each source and the *row format* it wrote it
+in, and staleness is decided by the second rather than the first. They are not
+the same test. Most versions of this tool change what it does with a row —
+ranking, parsing, what it prints — and leave every stored row exactly as it
+was; marking Mathlib stale on those would cost an hour of Lean to rediscover
+that nothing had changed, and a warning that fires on every upgrade is a
+warning that gets refreshed past without reading. `ROW_FORMAT` is a single
+constant bumped by hand when a dump would now produce different rows, and the
+comment on it says which way to err.
+
+A row format nobody recorded reads as older than the current one. That is the
+opposite of the rule revisions follow — unknown is not stale there, because a
+revision nobody could read is no evidence a source moved — and the asymmetry is
+the point: a missing row format is not a gap in what could be read, it is a
+positive fact about who wrote it. Only a `dt` from before this existed leaves
+it empty. So an index like the one in the report says so about itself the first
+time the new build opens it.
+
+Which it does open. A schema bump refuses the file and asks for
+`dt index --rebuild`, and that is right when the columns would be misread —
+here they would not be: every old column still means what it meant, and the two
+new ones are nullable and empty, which is exactly the fact worth having. So
+schema 2 is migrated in place by two `ALTER TABLE`s. Verified on a copy of the
+1.2 GB index from the report: `PRAGMA user_version` 2 → 3, all 494 731 rows
+kept, `dt status` then naming every source as behind.
+
+The repair is split from the diagnosis, because the two kinds of staleness do
+not cost the same. A source that has *moved* has to be read again — dumped,
+fetched — before it can be loaded. A source that holds old rows has not moved:
+the dump on disk is the right dump, and re-reading it out of Lean would spend
+an hour producing bytes that are already there. So `Stale` now carries why, and
+`dt refresh` re-reads only what moved and re-loads the rest. On that same copy,
+with the dumps it already had, the whole re-load was 83 seconds.
+
+`dt status` says it in the line that was silent:
+
+    behind: project, mathlib, flt, batteries, core — indexed by an older dt — re-run `dt refresh`
+
+and a search that touched such a source says it per source on stderr, with both
+versions, the way the revision warning says both revisions. An upgrade puts
+every source behind at once and for one reason, so the shared reason is said
+once; a mixed list spells it out per name, because then it is more than one
+fact. `dt index` no longer skips such a source either: its stamp answers "is
+the input the same input", which was never the question being asked.

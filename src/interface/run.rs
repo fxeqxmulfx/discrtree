@@ -376,7 +376,13 @@ impl App {
             let decls = db.count_source(&id)?;
             db.record(
                 &id,
-                &Provenance { stamp: revision.clone(), revision, indexed_at: now(), decls },
+                &Provenance {
+                    stamp: revision.clone(),
+                    revision,
+                    indexed_at: now(),
+                    decls,
+                    ..Provenance::by_this_build()
+                },
             )?;
             println!(
                 "{}: {} declarations scanned [text]{}",
@@ -455,6 +461,7 @@ impl App {
                 stamp: revision::file_stamp(&path),
                 indexed_at: now(),
                 decls: 0,
+                ..Provenance::by_this_build()
             };
             if self.up_to_date(&sqlite, &id, &was, force)? {
                 continue;
@@ -477,7 +484,13 @@ impl App {
             // its fingerprint. A directory that is not a checkout has neither,
             // and is read again every time.
             let revision = revs.current(&id)?;
-            let was = Provenance { stamp: revision.clone(), revision, indexed_at: now(), decls: 0 };
+            let was = Provenance {
+                stamp: revision.clone(),
+                revision,
+                indexed_at: now(),
+                decls: 0,
+                ..Provenance::by_this_build()
+            };
             if self.up_to_date(&sqlite, &id, &was, force)? {
                 continue;
             }
@@ -507,15 +520,19 @@ impl App {
     /// tempting alternative — refresh everything — is how a one-word command
     /// turns into a Mathlib dump nobody asked for.
     fn refresh(&self, source: Option<&str>) -> Result<()> {
-        let targets: Vec<String> = match source {
-            Some(n) => vec![self.cfg.source(n)?.name.clone()],
+        // Each target with what it actually needs: a source that moved has to
+        // be read again, one whose rows an older `dt` wrote only has to be
+        // loaded again from the dump already on disk. A source named outright
+        // is read again, because that is what naming it asks for.
+        let targets: Vec<(String, bool)> = match source {
+            Some(n) => vec![(self.cfg.source(n)?.name.clone(), true)],
             None => {
                 let repo = self.repo()?;
                 let revs = OnDisk::read(&self.cfg);
                 let among = self.workspace.sources.iter().map(|s| s.id.clone());
                 status::stale_among(repo.as_ref(), &revs, among)?
                     .into_iter()
-                    .map(|s| s.id.as_str().to_owned())
+                    .map(|s| (s.id.as_str().to_owned(), s.why.needs_reread()))
                     .collect()
             }
         };
@@ -527,7 +544,15 @@ impl App {
         // minutes long, and a reader watching one wants to know that the
         // project failed before Mathlib has finished dumping.
         let many = targets.len() > 1;
-        let (read, failed) = read_each(&targets, |name| {
+        let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
+        let (read, failed) = read_each(&names, |name| {
+            let reread = targets.iter().any(|(n, reread)| n == name && *reread);
+            if !reread {
+                // Not a dump, not a fetch: the input on disk is the right
+                // input, and only the rows it turns into have changed.
+                println!("{name}: indexed by an older dt, loading it again");
+                return Ok(());
+            }
             self.reread(name).inspect_err(|e| {
                 if many {
                     eprintln!("dt: `{name}`: {e}");
@@ -574,7 +599,11 @@ impl App {
             return Ok(false);
         }
         let Some(was) = db.provenance_of(id)? else { return Ok(false) };
-        if was.stamp != now.stamp || db.count_source(id)? == 0 {
+        // The stamp answers "is the input the same input"; it cannot answer
+        // "does this build read that input the way the last one did". A dump
+        // that has not moved a byte still has to be loaded again when the rows
+        // it turns into have changed.
+        if was.stamp != now.stamp || was.outdated() || db.count_source(id)? == 0 {
             return Ok(false);
         }
         println!("{id}: unchanged, {} declarations kept", was.decls);

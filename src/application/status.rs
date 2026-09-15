@@ -11,7 +11,9 @@
 //! report also names the lake packages no source claims, and the toolchain,
 //! whose `Init` and `Std` sit under every one of them.
 
-use crate::application::ports::{Build, DeclRepo, Package, Revisions, Toolchain, Workspace};
+use crate::application::ports::{
+    Build, DeclRepo, Package, Provenance, Revisions, Toolchain, Workspace,
+};
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 
@@ -28,12 +30,18 @@ pub struct SourceStatus {
     pub current_rev: Option<String>,
     /// How long ago it was indexed, in seconds.
     pub age: Option<u64>,
+    /// The `dt` that wrote these rows, when it is not the one reading them.
+    /// `Some(None)` is a `dt` too old to have recorded which it was.
+    pub written_by: Option<Option<String>>,
 }
 
 impl SourceStatus {
-    /// Whether the source has moved since it was indexed.
+    /// Whether the index can be trusted for this source: whether the source has
+    /// moved since it was indexed, and whether the rows were written by a `dt`
+    /// that wrote them differently. Either one makes the answers wrong rather
+    /// than late, which is what the column cannot show and this has to.
     pub fn stale(&self) -> bool {
-        moved(&self.indexed_rev, &self.current_rev)
+        moved(&self.indexed_rev, &self.current_rev) || self.written_by.is_some()
     }
 }
 
@@ -44,23 +52,46 @@ fn moved(was: &Option<String>, now: &Option<String>) -> bool {
     matches!((was, now), (Some(was), Some(now)) if was != now)
 }
 
-/// A source the index has fallen behind, with the two values that say so.
+/// A source the index has fallen behind, and what it fell behind.
 ///
-/// Both, because one of them alone is not believable. "`project` moved since
-/// it was indexed" was read as a claim about a path -- which had not moved --
-/// and filed as a bug in the check; what had changed was the build the project
-/// was dumped from, and saying which value differs is what makes the line
-/// something a reader can check rather than argue with.
+/// The reason is carried rather than reduced to a flag, because one value alone
+/// is not believable. "`project` moved since it was indexed" was read as a
+/// claim about a path -- which had not moved -- and filed as a bug in the
+/// check; what had changed was the build the project was dumped from, and
+/// saying which value differs is what makes the line something a reader can
+/// check rather than argue with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stale {
     pub id: SourceId,
-    /// The revision the index was built from.
-    pub indexed: String,
-    /// The revision the source is at now.
-    pub current: String,
+    pub why: Why,
 }
 
-/// Which of these sources have moved since they were indexed.
+/// The two ways an index falls behind, which are not the same fact and do not
+/// have the same repair.
+///
+/// A source that moved has to be read again — dumped, fetched — before it can
+/// be indexed. A source whose rows were written by an older `dt` has not moved:
+/// the dump on disk is the right dump, and re-reading it from Lean would cost
+/// an hour to produce the bytes that are already there. Only the load has to
+/// run again. Keeping the distinction here is what lets `dt refresh` charge the
+/// cheap price when the cheap price is the right one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    /// Indexed at one revision, on disk at another.
+    Moved { indexed: String, current: String },
+    /// The rows are in an older row format. `by` is the `dt` that wrote them,
+    /// when it recorded which it was.
+    Written { by: Option<String> },
+}
+
+impl Why {
+    /// Whether the source itself has to be read again, or only re-indexed.
+    pub fn needs_reread(&self) -> bool {
+        matches!(self, Why::Moved { .. })
+    }
+}
+
+/// Which of these sources the index has fallen behind, and how.
 ///
 /// The same comparison `dt status` reports, minus the row counts — and that is
 /// the point of it existing separately. This runs on every search, so that a
@@ -78,10 +109,17 @@ pub fn stale_among(
 ) -> Result<Vec<Stale>> {
     let mut out = Vec::new();
     for id in among {
-        let was = repo.provenance(&id)?.and_then(|p| p.revision);
+        let Some(was) = repo.provenance(&id)? else { continue };
         let now = revisions.current(&id)?;
-        if let (true, Some(indexed), Some(current)) = (moved(&was, &now), was, now) {
-            out.push(Stale { id, indexed, current });
+        // A source that has moved *and* holds old rows is reported as moved:
+        // it needs the re-read, and the load that follows it is the other
+        // repair anyway.
+        if let (true, Some(indexed), Some(current)) =
+            (moved(&was.revision, &now), &was.revision, now)
+        {
+            out.push(Stale { id, why: Why::Moved { indexed: indexed.clone(), current } });
+        } else if was.outdated() {
+            out.push(Stale { id, why: Why::Written { by: was.writer } });
         }
     }
     Ok(out)
@@ -128,7 +166,8 @@ impl Status<'_> {
                 decls: counts.iter().find(|(id, _)| id == &s.id).map_or(0, |(_, n)| *n),
                 indexed_rev: was.as_ref().and_then(|p| p.revision.clone()),
                 current_rev: self.revisions.current(&s.id)?,
-                age: was.map(|p| self.now.saturating_sub(p.indexed_at)),
+                age: was.as_ref().map(|p| self.now.saturating_sub(p.indexed_at)),
+                written_by: was.filter(Provenance::outdated).map(|p| p.writer),
             });
         }
         Ok(Report {

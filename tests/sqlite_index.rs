@@ -295,6 +295,7 @@ fn provenance_survives_a_reopen() {
         stamp: Some("12345:1700000000".into()),
         indexed_at: 1_700_000_000,
         decls: 225_508,
+        ..Provenance::by_this_build()
     };
     {
         let mut db = SqliteIndex::open(&path).unwrap();
@@ -317,6 +318,7 @@ fn a_source_is_stale_only_when_both_revisions_are_known_and_differ() {
         stamp: rev.map(str::to_string),
         indexed_at: 1,
         decls: 1,
+        ..Provenance::by_this_build()
     };
     db.record(&SourceId::new("project"), &p(Some("4f21c8e"))).unwrap();
     db.record(&SourceId::new("mathlib"), &p(Some("0df444a"))).unwrap();
@@ -334,8 +336,7 @@ fn a_source_is_stale_only_when_both_revisions_are_known_and_differ() {
         stale,
         vec![status::Stale {
             id: SourceId::new("project"),
-            indexed: "4f21c8e".into(),
-            current: "9ab0d31".into(),
+            why: status::Why::Moved { indexed: "4f21c8e".into(), current: "9ab0d31".into() },
         }]
     );
 }
@@ -361,6 +362,7 @@ fn a_module_compiled_after_the_dump_makes_the_project_stale() {
             stamp: Some("1:1".into()),
             indexed_at: 1,
             decls: 718,
+            ..Provenance::by_this_build()
         },
     )
     .unwrap();
@@ -374,8 +376,11 @@ fn a_module_compiled_after_the_dump_makes_the_project_stale() {
     assert_eq!(stale.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), vec![id]);
     // What differs is the build, and the line that reports it has to be able
     // to show both values rather than assert a move.
-    assert_eq!(stale[0].indexed, dumped);
-    assert_ne!(stale[0].current, dumped);
+    let status::Why::Moved { indexed, current } = &stale[0].why else {
+        panic!("a rebuilt project moved, {:?}", stale[0].why)
+    };
+    assert_eq!(indexed, &dumped);
+    assert_ne!(current, &dumped);
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,
@@ -399,6 +404,7 @@ fn re_indexing_replaces_the_provenance() {
         stamp: Some(rev.into()),
         indexed_at: 1,
         decls: 1,
+        ..Provenance::by_this_build()
     };
     db.record(&id, &stamp("aaaaaaa")).unwrap();
     db.record(&id, &stamp("bbbbbbb")).unwrap();
@@ -615,4 +621,77 @@ fn the_row_called_exactly_what_was_asked_for_is_inside_the_window() {
         got.iter().any(|d| d.name.as_str() == "Real.sin_sq"),
         "the exact row is missing from the window entirely"
     );
+}
+
+/// The index the user upgraded into: rows written by an older `dt`, a source
+/// that has not moved, and a `dt status` that reported neither. Two things have
+/// to hold at once. The file must still open — refusing it would mean rebuilding
+/// 1.2 GB to learn a fact the empty column already states — and the source must
+/// come back as behind, because the rows in it are not the rows this build
+/// writes.
+#[test]
+fn an_index_written_by_an_older_dt_opens_and_says_so() {
+    let dir = TempDir::new("dt-writer");
+    let path = dir.path().join("index.db");
+    let id = SourceId::new("mathlib");
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        index::load(&mut db, &[theorem("Real.exp_pos", "mathlib", "M", "LT.lt", &[])]).unwrap();
+        db.record(
+            &id,
+            &Provenance {
+                revision: Some("5ed2965".into()),
+                stamp: Some("5ed2965".into()),
+                indexed_at: 1,
+                decls: 1,
+                ..Provenance::by_this_build()
+            },
+        )
+        .unwrap();
+    }
+    // What a dt from before the writer was recorded left behind: the same rows,
+    // the same revision, and no answer to the question of who wrote them.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format;",
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 2i64).unwrap();
+    drop(conn);
+
+    let db = SqliteIndex::open(&path).expect("an older index is migrated, not refused");
+    assert_eq!(db.count_source(&id).unwrap(), 1, "the rows survive the migration");
+    let was = db.provenance(&id).unwrap().unwrap();
+    assert_eq!(was.writer, None);
+    assert!(was.outdated(), "rows nobody stamped are older than this build's");
+
+    // The revision has not moved, which is exactly why the old check said
+    // nothing and this one has to.
+    let revs = FakeRevisions::at(&[("mathlib", "5ed2965")]);
+    let stale = status::stale_among(&db, &revs, [id.clone()]).unwrap();
+    assert_eq!(stale, vec![status::Stale { id, why: status::Why::Written { by: None } }]);
+}
+
+/// A source that moved *and* holds old rows is reported as moved. Both repairs
+/// end in a load, and only one of them starts with an hour of Lean: saying
+/// "moved" is what asks for it.
+#[test]
+fn a_source_that_moved_and_was_written_by_an_older_dt_is_reported_as_moved() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let id = SourceId::new("mathlib");
+    db.record(
+        &id,
+        &Provenance {
+            revision: Some("5ed2965".into()),
+            stamp: None,
+            indexed_at: 1,
+            decls: 1,
+            writer: Some("0.22.0".into()),
+            row_format: Some(0),
+        },
+    )
+    .unwrap();
+    let revs = FakeRevisions::at(&[("mathlib", "4f8b12c")]);
+    let stale = status::stale_among(&db, &revs, [id]).unwrap();
+    assert!(stale[0].why.needs_reread(), "a moved source is read again: {:?}", stale[0].why);
 }
