@@ -47,30 +47,39 @@ pub fn find(hits: &Hits, long: bool) -> String {
             }
             // Not "matches nothing on its own", which would be true and would
             // send the reader to correct a prefix that is already correct.
-            Some(Empty::NotIndexed { asked, missing: Missing::Package(pkg) }) => format!(
-                "no match: `{}` is in the lake package `{pkg}`, which is not a source \
-                 of this index; add it to discrtree.toml and re-run `dt dump {pkg}` and \
-                 `dt index`\n",
-                asked.as_str()
-            ),
-            // No `dt dump` line to offer: core is not a directory under
-            // `.lake/packages` that a source can be pointed at in one line, and
-            // printing a command that does not work is worse than printing
-            // none. `dt status` has the toolchain and the reader has the call.
-            Some(Empty::NotIndexed { asked: Asked::Module(m), missing: Missing::Core(tc) }) => {
+            Some(Empty::NotIndexed { asked, missing: missing @ Missing::Package(pkg) }) => {
+                format!(
+                    "no match: `{}` is in the lake package `{pkg}`, which is not a source \
+                     of this index; {}\n",
+                    asked.as_str(),
+                    missing.fix()
+                )
+            }
+            // There is a repair to offer now. Core used to be the one corpus
+            // with no source to point at, so this line named the toolchain and
+            // stopped; `kind = "core"` is two lines of TOML and one command.
+            Some(Empty::NotIndexed {
+                asked: Asked::Module(m),
+                missing: missing @ Missing::Core(tc),
+            }) => {
                 format!(
                     "no match: `{m}` is a module of Lean core ({tc}), which is not a source \
-                     of this index\n"
+                     of this index; {}\n",
+                    missing.fix()
                 )
             }
             // A name says less than a module does: the namespace is core's,
             // the declaration may be anyone's. Claiming the second would be
             // claiming to know what is in a corpus nobody has read.
-            Some(Empty::NotIndexed { asked: Asked::Name(n), missing: Missing::Core(tc) }) => {
+            Some(Empty::NotIndexed {
+                asked: Asked::Name(n),
+                missing: missing @ Missing::Core(tc),
+            }) => {
                 format!(
                     "no match: `{}` is a namespace Lean core declares in, and core ({tc}) is \
-                     not a source of this index\n",
-                    n.namespace_root()
+                     not a source of this index; {}\n",
+                    n.namespace_root(),
+                    missing.fix()
                 )
             }
             _ => "no match\n".into(),
@@ -394,7 +403,8 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
         out.push_str(&format!(
             "\nnot indexed: Lean core ({})\n  — {} live in the toolchain, not under \
              `.lake/packages`; a `no match` under `Int.`, `Nat.`, `List.` or `Array.` \
-             is often theirs\n",
+             is often theirs\n  — add `[[source]]` with `name = \"core\"` and \
+             `kind = \"core\"`, then `dt refresh core`\n",
             tc.name,
             lean_core::ROOTS.join(", "),
         ));
@@ -615,16 +625,18 @@ mod tests {
         assert!(r.contains("toolchain: leanprover/lean4:v4.33.1"), "named either way: {r}");
         assert!(r.contains("not indexed: Lean core"), "{r}");
         assert!(r.contains("Init"), "the roots a source would have to import: {r}");
+        assert!(r.contains("kind = \"core\""), "and how to index them: {r}");
 
         let r = status(&with(true), db);
         assert!(r.contains("toolchain: leanprover/lean4:v4.33.1"), "{r}");
         assert!(!r.contains("not indexed"), "nothing to repair, nothing to print: {r}");
     }
 
-    /// No `dt dump` line here: core is not a directory a source can be pointed
-    /// at in one line, and a command that does not work is worse than none.
+    /// The toolchain, and the repair. The repair is the newer half: core was
+    /// the one corpus with no source to point at, and `kind = "core"` is what
+    /// turned "this is not indexed" into something a reader can act on.
     #[test]
-    fn an_empty_result_from_core_names_the_toolchain() {
+    fn an_empty_result_from_core_names_the_toolchain_and_the_repair() {
         let r = find(
             &Hits {
                 rows: Vec::new(),
@@ -638,7 +650,7 @@ mod tests {
         );
         assert!(r.contains("Lean core (leanprover/lean4:v4.33.1)"), "{r}");
         assert!(!r.contains("matches nothing"), "that is the wrong repair: {r}");
-        assert!(!r.contains("dt dump"), "there is no one-line dump to offer: {r}");
+        assert!(r.contains("`dt refresh core`"), "the repair that does work: {r}");
     }
 
     /// A name says less than a module does, and the line has to say less too:

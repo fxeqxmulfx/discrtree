@@ -322,11 +322,11 @@ impl App {
             verbose: self.verbose,
         };
         for s in self.select(source, |s| s.elaborated())? {
-            let Some(root_module) = &s.root else { continue };
+            let Some(root_module) = s.root_module() else { continue };
             let out = self.cfg.jsonl_path(s);
             let path = index::dump_source(
                 &s.meta(),
-                root_module,
+                &root_module,
                 &s.module_prefixes(),
                 out,
                 with_deps,

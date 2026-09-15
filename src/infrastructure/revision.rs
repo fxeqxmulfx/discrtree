@@ -7,6 +7,11 @@
 //! directory is deliberate: the manifest is what the next `lake build` will
 //! honour, so it is the revision the project actually compiles against.
 //!
+//! Core is pinned too, and by a file in the project: `lean-toolchain` is what
+//! `elan` resolves before anything is built, so the toolchain name is core's
+//! revision. A bump to it is a different core, and one that has to be dumped
+//! again -- which is exactly what a revision is for.
+//!
 //! The project itself has neither. Nobody pins it, and its working tree is
 //! ahead of its last commit by definition — that is what working on it means.
 //! What a dump of it actually reads is the build, so the build is what gets
@@ -27,6 +32,8 @@ pub struct OnDisk {
     pub builds: BTreeMap<SourceId, PathBuf>,
     /// Package name → revision, from `lake-manifest.json`.
     pub manifest: BTreeMap<String, String>,
+    /// Source → the toolchain it ships with, for the core sources.
+    pub toolchains: BTreeMap<SourceId, String>,
 }
 
 impl OnDisk {
@@ -50,7 +57,17 @@ impl OnDisk {
         // same fact for all of them.
         let lib = cfg.root().join(BUILD_LIB);
         let builds = of_kind(Kind::Local).into_iter().map(|id| (id, lib.clone())).collect();
-        OnDisk { checkouts, builds, manifest: manifest(&cfg.root().join("lake-manifest.json")) }
+        let toolchain = cfg.toolchain();
+        let toolchains = of_kind(Kind::Core)
+            .into_iter()
+            .filter_map(|id| toolchain.clone().map(|t| (id, t)))
+            .collect();
+        OnDisk {
+            checkouts,
+            builds,
+            manifest: manifest(&cfg.root().join("lake-manifest.json")),
+            toolchains,
+        }
     }
 }
 
@@ -61,6 +78,9 @@ impl Revisions for OnDisk {
         }
         if let Some(lib) = self.builds.get(source) {
             return Ok(build_stamp(lib));
+        }
+        if let Some(toolchain) = self.toolchains.get(source) {
+            return Ok(Some(toolchain.clone()));
         }
         Ok(self.manifest.get(source.as_str()).cloned())
     }
@@ -201,6 +221,41 @@ pub fn file_stamp(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::lake;
+
+    /// Core moves when the toolchain moves and at no other time, so the
+    /// toolchain name is its revision. Without this a core source has no
+    /// revision at all, which reads as "nothing is known" -- and an index of
+    /// v4.33.1 core would go on answering v4.34 questions without a word.
+    #[test]
+    fn a_core_source_is_at_whatever_the_toolchain_says() {
+        let dir = std::env::temp_dir().join("dt-core-revision-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(lake::TOOLCHAIN), "leanprover/lean4:v4.33.1\n").unwrap();
+        let text = r#"
+[project]
+root = "."
+src = "src"
+namespace = "T"
+imports = "src/T.lean"
+vendor = "src/T/Vendor"
+
+[[source]]
+name = "core"
+kind = "core"
+"#;
+        let cfg = Config::parse(text, &dir).unwrap();
+        let revs = OnDisk::read(&cfg);
+        assert_eq!(
+            revs.current(&SourceId::new("core")).unwrap().as_deref(),
+            Some("leanprover/lean4:v4.33.1")
+        );
+        // A project with no `lean-toolchain` says nothing rather than guessing.
+        let bare = std::env::temp_dir().join("dt-core-revision-bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let cfg = Config::parse(text, &bare).unwrap();
+        assert_eq!(OnDisk::read(&cfg).current(&SourceId::new("core")).unwrap(), None);
+    }
 
     #[test]
     fn a_manifest_maps_packages_to_revisions() {

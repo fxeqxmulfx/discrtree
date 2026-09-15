@@ -11,6 +11,11 @@
 /// to `import` to dump it, and what an `--in` filter would have to name.
 pub const ROOTS: &[&str] = &["Init", "Std", "Lean"];
 
+/// The module a dump of core imports. Importing `Lean` brings `Init` and
+/// `Std` with it -- the compiler is built on both -- so one import reaches all
+/// three roots, and there is no import that reaches fewer of them usefully.
+pub const IMPORT: &str = "Lean";
+
 /// Root namespaces core declares in.
 ///
 /// Not the same list as [`ROOTS`] and that is the whole difficulty:

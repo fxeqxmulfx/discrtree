@@ -43,6 +43,12 @@ pub enum SourceKind {
     Local,
     /// A checkout read as text. Nothing here runs Lean.
     Git,
+    /// The toolchain's own library: `Init`, `Std`, `Lean`. Compiled like a
+    /// lake package and importable like one, and a kind of its own because
+    /// nothing else about it is the same: it has no directory under
+    /// `.lake/packages`, nobody pins it in a manifest, and what it is at any
+    /// moment is whatever `lean-toolchain` says.
+    Core,
 }
 
 impl SourceKind {
@@ -61,6 +67,7 @@ impl SourceKind {
             SourceKind::Lake => "lake",
             SourceKind::Local => "local",
             SourceKind::Git => "git",
+            SourceKind::Core => "core",
         }
     }
 }
@@ -136,6 +143,11 @@ mod tests {
     fn flags_follow_from_kind() {
         let m = SourceMeta::derived("mathlib", SourceKind::Lake);
         assert!(m.elaborated && m.importable);
+
+        // Core is read by the elaborator and reached by an `import` line,
+        // like a lake package and unlike a checkout.
+        let c = SourceMeta::derived("core", SourceKind::Core);
+        assert!(c.elaborated && c.importable);
 
         let f = SourceMeta::derived("flt", SourceKind::Git);
         assert!(!f.elaborated && !f.importable);

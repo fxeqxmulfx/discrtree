@@ -2,9 +2,11 @@
 //! writes and what it indexes; everything else is derived.
 
 use crate::application::ports::Workspace;
+use crate::domain::lean_core;
 use crate::domain::name::ModuleName;
 use crate::domain::source::{SourceId, SourceKind, SourceMeta, Sources};
 use crate::error::{Error, Result, bail};
+use crate::infrastructure::lake;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -57,6 +59,9 @@ pub enum Kind {
     Lake,
     Local,
     Git,
+    /// The toolchain's own library. Configured by kind alone: what to import
+    /// and which module roots to keep are facts about Lean, not decisions.
+    Core,
 }
 
 impl From<Kind> for SourceKind {
@@ -65,6 +70,7 @@ impl From<Kind> for SourceKind {
             Kind::Lake => SourceKind::Lake,
             Kind::Local => SourceKind::Local,
             Kind::Git => SourceKind::Git,
+            Kind::Core => SourceKind::Core,
         }
     }
 }
@@ -77,7 +83,8 @@ pub struct Source {
     #[serde(default)]
     pub path: Option<PathBuf>,
     /// Root Lean module, e.g. `Mathlib`: what the dump imports and what filters
-    /// the environment walk. Required for a compiled source.
+    /// the environment walk. Required for a compiled source, except a `core`
+    /// one, which knows its own.
     #[serde(default)]
     pub root: Option<String>,
     /// Extra module prefixes to keep beyond `root`.
@@ -127,7 +134,27 @@ impl Source {
         self.importable.unwrap_or(SourceKind::from(self.kind).default_importable())
     }
 
+    /// The module a dump of this source imports.
+    ///
+    /// Core's is not the reader's choice and so is not asked for: core is
+    /// whatever the toolchain ships, and the module that pulls all of it in is
+    /// a fact about Lean. Spelling `root` anyway still works, for the reader
+    /// who wants `Init` alone.
+    pub fn root_module(&self) -> Option<String> {
+        match self.root.clone() {
+            Some(r) => Some(r),
+            None if self.kind == Kind::Core => Some(lean_core::IMPORT.to_owned()),
+            None => None,
+        }
+    }
+
+    /// Which modules a dump keeps. Core keeps all three of its roots rather
+    /// than only the one it imports: `Lean` is what the dump has to import to
+    /// see `Init` and `Std`, not what the reader was asking for.
     pub fn module_prefixes(&self) -> Vec<String> {
+        if self.kind == Kind::Core && self.root.is_none() && self.modules.is_empty() {
+            return lean_core::ROOTS.iter().map(|r| (*r).to_owned()).collect();
+        }
         let mut v = self.modules.clone();
         if let Some(r) = &self.root {
             v.push(r.clone());
@@ -174,7 +201,7 @@ impl Config {
             if !seen.insert(&s.name) {
                 bail!("{FILE_NAME}: two sources named `{}`", s.name);
             }
-            if s.elaborated() && s.root.is_none() {
+            if s.elaborated() && s.root_module().is_none() {
                 bail!(
                     "{FILE_NAME}: source `{}` is compiled, so it needs `root = \"<Module>\"` \
                      — the module the dump imports",
@@ -212,12 +239,30 @@ impl Config {
         self.resolve(&self.project.imports)
     }
 
-    /// Where a `git` source is checked out when it declares no `path`.
+    /// Where a `git` source is checked out when it declares no `path`, and
+    /// where core's source text is read from.
+    ///
+    /// Core is the one source nothing here put on disk: it came with the
+    /// toolchain, so it is found rather than placed. A `path` still wins --
+    /// somebody reading a checkout of lean4 itself has the better answer.
     pub fn source_dir(&self, s: &Source) -> PathBuf {
+        let placed =
+            || self.raw_dir().parent().unwrap_or(Path::new(".")).join("sources").join(&s.name);
         match &s.path {
             Some(p) => self.resolve(p),
-            None => self.raw_dir().parent().unwrap_or(Path::new(".")).join("sources").join(&s.name),
+            None if s.kind == Kind::Core => {
+                lake::core_src(&self.root(), self.toolchain().as_deref()).unwrap_or_else(placed)
+            }
+            None => placed(),
         }
+    }
+
+    /// The toolchain the project pins, as written in `lean-toolchain`.
+    pub fn toolchain(&self) -> Option<String> {
+        std::fs::read_to_string(self.root().join(lake::TOOLCHAIN))
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
     }
 
     pub fn jsonl_path(&self, s: &Source) -> PathBuf {
@@ -318,6 +363,15 @@ kind = "lake"
 path = ".lake/packages/mathlib"
 root = "Mathlib"
 rev  = "v4.33.1"
+
+# The toolchain's own library: `Init`, `Std`, `Lean`. Nothing to point at and
+# nothing to fetch -- it is already in every build -- and without it a question
+# about `List.head?`, `Nat.succ_le_succ` or `Option.map` has nowhere to go.
+# About 98 000 declarations, dumped in half a minute. Delete these two lines if
+# you would rather not have them in every search.
+[[source]]
+name = "core"
+kind = "core"
 "#;
 
 #[cfg(test)]
@@ -425,13 +479,43 @@ license = "Apache-2.0"
     #[test]
     fn the_template_parses() {
         let c = Config::parse(TEMPLATE, Path::new("/p")).unwrap();
-        assert_eq!(c.sources.len(), 2);
+        assert_eq!(c.sources.len(), 3);
         assert_eq!(c.workspace().namespace, "Transformer");
+        // Core is in the template rather than in a comment: a reader who never
+        // edits this file still gets `Nat`, `List` and `Option` answered.
+        assert_eq!(c.source("core").unwrap().kind, Kind::Core);
     }
 
     #[test]
     fn module_prefixes_include_the_root() {
         let c = cfg();
         assert_eq!(c.source("mathlib").unwrap().module_prefixes(), vec!["Mathlib"]);
+    }
+
+    /// A `core` source is configured by kind alone, and what it then dumps is
+    /// not what it imports: importing `Lean` is how `Init` and `Std` become
+    /// visible, and all three are what the reader asked for.
+    #[test]
+    fn a_core_source_knows_what_to_import_and_what_to_keep() {
+        let text = SAMPLE.to_string() + "\n[[source]]\nname = \"core\"\nkind = \"core\"\n";
+        let c = Config::parse(&text, Path::new("/p")).unwrap();
+        let core = c.source("core").unwrap();
+        assert_eq!(core.root_module().as_deref(), Some("Lean"));
+        assert_eq!(core.module_prefixes(), ["Init", "Std", "Lean"]);
+        // Compiled and importable, like a lake package: it is in the build
+        // already, which is the whole reason it needs no path and no fetch.
+        assert!(core.elaborated() && core.importable());
+    }
+
+    /// The reader who wants `Init` alone still gets it: `root` is a choice
+    /// when it is made and a fact about Lean when it is not.
+    #[test]
+    fn a_core_source_that_names_a_root_is_taken_at_its_word() {
+        let text = SAMPLE.to_string()
+            + "\n[[source]]\nname = \"core\"\nkind = \"core\"\nroot = \"Init\"\n";
+        let c = Config::parse(&text, Path::new("/p")).unwrap();
+        let core = c.source("core").unwrap();
+        assert_eq!(core.root_module().as_deref(), Some("Init"));
+        assert_eq!(core.module_prefixes(), ["Init"]);
     }
 }

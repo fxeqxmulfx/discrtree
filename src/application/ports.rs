@@ -141,8 +141,8 @@ impl Missing {
     pub fn about(&self, name: &DeclName) -> String {
         match self {
             Missing::Package(pkg) => format!(
-                "{name} is in the lake package `{pkg}`, which is not a source of this index; \
-                 add it to discrtree.toml and re-run `dt dump {pkg}` and `dt index`"
+                "{name} is in the lake package `{pkg}`, which is not a source of this index; {}",
+                self.fix()
             ),
             // Weaker, because the evidence is weaker: a package owns a
             // directory and its namespace is its own, while `Int` is a
@@ -152,9 +152,29 @@ impl Missing {
             // not exist.
             Missing::Core(tc) => format!(
                 "{name} is not in the index, and `{}` is a namespace Lean core declares in; \
-                 core ({tc}) is not a source of this index, so no search here can reach it",
-                name.namespace_root()
+                 core ({tc}) is not a source of this index, so no search here can reach it -- {}",
+                name.namespace_root(),
+                self.fix()
             ),
+        }
+    }
+
+    /// What ends the dead end.
+    ///
+    /// Core used to have none to offer: it is no directory under
+    /// `.lake/packages`, so there was nothing to point a source at and the
+    /// honest answer was to name the toolchain and stop. It has a kind of its
+    /// own now, and a kind is all it needs -- what to import and which roots to
+    /// keep are facts about Lean, not choices -- so the reader who reads this
+    /// line has a command at the end of it.
+    pub fn fix(&self) -> String {
+        match self {
+            Missing::Package(pkg) => {
+                format!("add it to discrtree.toml and re-run `dt refresh {pkg}`")
+            }
+            Missing::Core(_) => "add a source with `kind = \"core\"` to discrtree.toml and re-run \
+                 `dt refresh core`"
+                .to_owned(),
         }
     }
 }

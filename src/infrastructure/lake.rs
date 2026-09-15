@@ -9,7 +9,7 @@
 use crate::application::ports::{Build, DumpSpec, Elaborator, Package, Toolchain};
 use crate::domain::lean_core;
 use crate::error::{Error, Result, bail};
-use crate::infrastructure::config::Config;
+use crate::infrastructure::config::{Config, Source};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -139,9 +139,61 @@ fn toolchain(cfg: &Config) -> Option<Toolchain> {
     if name.is_empty() {
         return None;
     }
-    let indexed =
-        cfg.sources.iter().filter_map(|s| s.root.as_deref()).any(|r| lean_core::ROOTS.contains(&r));
+    // By the module it dumps rather than by its kind: a `lake` source pointed
+    // at `Init` indexes core just as truly as a `core` one does, and what this
+    // flag decides is whether a `no match` under `Nat.` gets blamed on core.
+    let indexed = cfg
+        .sources
+        .iter()
+        .filter_map(Source::root_module)
+        .any(|r| lean_core::ROOTS.contains(&r.as_str()));
     Some(Toolchain { name: name.to_owned(), indexed })
+}
+
+/// Where a toolchain keeps the `.lean` sources of its own library, relative to
+/// its prefix. `Init/Data/List/Basic.lean` sits directly under this, so the
+/// module-to-path rule every other source follows works here unchanged.
+const CORE_SRC: &str = "src/lean";
+
+/// The directory holding core's source text, or nothing.
+///
+/// Two ways of asking, cheapest first. Elan lays its toolchains out under
+/// `$ELAN_HOME/toolchains/<name with its separators folded into dashes>`, which
+/// costs one directory test and no process at all. When that misses -- a
+/// toolchain installed some other way, or a name elan spells differently --
+/// `lean` is asked where it lives.
+///
+/// Asked from the project root, always: `lean --print-prefix` run anywhere else
+/// resolves elan's *default* toolchain, and if that one is not installed the
+/// question becomes a three-gigabyte download nobody asked for.
+pub fn core_src(project_root: &Path, toolchain: Option<&str>) -> Option<PathBuf> {
+    if let Some(name) = toolchain {
+        let dir = elan_home()?.join("toolchains").join(elan_dir_name(name)).join(CORE_SRC);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    let out = Command::new("lean")
+        .arg("--print-prefix")
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let prefix = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let dir = PathBuf::from(prefix).join(CORE_SRC);
+    dir.is_dir().then_some(dir)
+}
+
+/// `leanprover/lean4:v4.33.1` as elan spells it on disk.
+fn elan_dir_name(toolchain: &str) -> String {
+    toolchain.replace('/', "--").replace(':', "---")
+}
+
+fn elan_home() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("ELAN_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".elan"))
 }
 
 impl Build for LakeBuild {
@@ -338,6 +390,29 @@ root = "Mathlib"
         let cfg = Config::parse(&with_core, &cfg.root()).unwrap();
         assert!(LakeBuild::read(&cfg).toolchain().unwrap().indexed);
         assert!(LakeBuild::read(&cfg).declaring("Int.add_one_le_iff").is_none());
+    }
+
+    /// The kind that exists so nobody has to know the trick above: a `core`
+    /// source names no module at all, and the module it imports is filled in
+    /// from what Lean is rather than from what the reader typed.
+    #[test]
+    fn a_core_source_needs_no_root_to_count_as_core_indexed() {
+        let cfg = project("dt-core-kind");
+        std::fs::write(cfg.root().join(TOOLCHAIN), "leanprover/lean4:v4.33.1\n").unwrap();
+        let with_core = format!("{CONFIG}\n[[source]]\nname = \"core\"\nkind = \"core\"\n");
+        let cfg = Config::parse(&with_core, &cfg.root()).unwrap();
+        assert!(LakeBuild::read(&cfg).toolchain().unwrap().indexed);
+        assert!(LakeBuild::read(&cfg).declaring("Int.add_one_le_iff").is_none());
+        assert!(LakeBuild::read(&cfg).module("Init.Data.Int.Order").is_none());
+    }
+
+    /// The one piece of elan's layout this relies on, pinned so that a change
+    /// to it is a failing test rather than a `dt show` that quietly stops
+    /// printing core's source text.
+    #[test]
+    fn a_toolchain_name_is_a_directory_name_with_its_separators_folded() {
+        assert_eq!(elan_dir_name("leanprover/lean4:v4.33.1"), "leanprover--lean4---v4.33.1");
+        assert_eq!(elan_dir_name("stable"), "stable");
     }
 
     /// A project that pins no toolchain is not one this can speak about, and

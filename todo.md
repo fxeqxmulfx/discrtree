@@ -511,3 +511,40 @@ pointing at the toolchain's `src/lean` would cover `Init.Data.List`,
 data-structure proof reaches for.
 
 Reported from the transformer repo, 2026-09-15.
+
+Fixed 2026-09-15 in dt 0.11.0.  `kind = "core"` is a source configured by
+kind alone: no path, no url, no root.  What it imports (`Lean`, which is what
+pulls `Init` and `Std` in with it) and which module roots it keeps (all three)
+are facts about Lean rather than choices, and asking the reader for them would
+be asking them to know the trick -- that a `lake` source pointed at `Init`
+would have worked all along.  It is in the `dt init` template as a live
+source, not a commented one, because the reader who never edits that file is
+exactly the reader who will otherwise grep `.lake/packages` for `List.head?`.
+
+Nothing new had to be built to dump it.  The environment walk added in 0.9.0
+reads `env.header.moduleData`, and core's modules are in there in every build
+-- the project already imports them transitively -- so `dt refresh core` costs
+one import of `Lean` and the same per-module walk every other source pays:
+97 609 declarations in 20 s of dumping and 23 s of indexing, 84 MB of JSONL.
+On the transformer project the index went from 390 408 rows to 488 017.
+
+Core has no directory this tool put on disk, and `dt show` needs one to print
+source text.  It is found rather than placed: elan lays its toolchains out
+under `$ELAN_HOME/toolchains/<name with its separators folded>`, which is one
+directory test, and when that misses `lean --print-prefix` is asked -- from the
+project root, because run anywhere else it resolves elan's *default* toolchain
+and can start a three-gigabyte download of a toolchain nobody wanted.  Under
+either answer `src/lean` holds `Init/Data/List/Basic.lean`, so the module-to-
+path rule every other source uses works unchanged, and `dt show List.head?`
+prints the import line, the docstring and the body.
+
+Core's revision is the toolchain name.  That is not a placeholder: core moves
+when `lean-toolchain` moves and at no other time, so a bump makes `dt status`
+report core as behind and a bare `dt refresh` re-dump it -- the same machinery
+a Mathlib bump gets, for the same reason.
+
+The messages that used to dead-end now carry the repair.  `Missing::fix()` is
+one sentence, written once and printed by `dt show`, `dt deps`, the `no match`
+line and `dt status` alike: for a package, add it and `dt refresh <pkg>`; for
+core, add a source with `kind = "core"` and `dt refresh core`.  The old
+comment explaining that core had no command to offer has gone with it.
