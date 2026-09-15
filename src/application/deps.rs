@@ -4,7 +4,7 @@
 //! list only when asked again, because the full closure of a two-line lemma
 //! about `exp` is 5154 declarations.
 
-use crate::application::ports::{DeclRepo, Workspace};
+use crate::application::ports::{Build, DeclRepo, Workspace};
 use crate::domain::closure::{self, ClosureStats, DeclSource};
 use crate::domain::decl::Decl;
 use crate::domain::name::DeclName;
@@ -36,11 +36,20 @@ pub enum DepsResult {
 pub struct Deps<'a> {
     pub repo: &'a dyn DeclRepo,
     pub workspace: &'a Workspace,
+    /// Consulted only when the name is missing. `dt deps` is where a reader
+    /// arrives holding a fully qualified name they read somewhere, which is
+    /// exactly the case a namespace can be read off.
+    pub build: &'a dyn Build,
 }
 
 impl Deps<'_> {
     pub fn run(&self, name: &DeclName, depth: Option<usize>) -> Result<DepsResult> {
-        let Some(root) = self.repo.get(name)? else { bail!("{name} is not in the index") };
+        let Some(root) = self.repo.get(name)? else {
+            if let Some(missing) = self.build.declaring(name.as_str()) {
+                bail!("{}", missing.about(name))
+            }
+            bail!("{name} is not in the index")
+        };
         // A text row's dependencies were guessed from imports and identifiers.
         // Saying so is not optional: a list that mixed the two silently would
         // be worse than no list.

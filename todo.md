@@ -328,3 +328,48 @@ against what the index holds -- with `unindexed()` for the packages,
 `toolchain()` for core, and the two questions separated, `module(prefix)` and
 `declaring(name)`, because for a package they have the same answer and for core
 they do not.
+
+### Follow-up: `find --name` and `deps` do not say it
+
+0.7.0 ships the note on `dt show` and the `dt status` line, and both are
+exactly right:
+
+    $ dt show Int.add_one_le_iff
+    dt: Int.add_one_le_iff is not in the index, and `Int` is a namespace Lean
+    core declares in; core (leanprover/lean4:v4.33.1) is not a source of this
+    index, so `--name` cannot reach it either
+
+The other two entry points still end where they did:
+
+    $ dt find --name Int.emod_emod_of_dvd
+    no match
+
+    $ dt deps Int.add_one_le_iff
+    dt: Int.add_one_le_iff is not in the index
+
+Both were handed a qualified name whose root namespace is core's, which is
+the one case the note can be derived from, and the `show` message even
+promises what `--name` will do -- so a reader who follows that sentence to
+`find --name` gets the bare `no match` the note was written to prevent. The
+unqualified `dt find --name add_one_le_iff` cannot be repaired this way and
+should not be: there is no namespace in it to read.
+
+Fixed 2026-09-15 in dt 0.8.0. The sentence itself moved into the domain of
+the answer: `Missing::about(name)` writes it once, and `dt show` and
+`dt deps` both print exactly that, so the two commands that dead-end on a
+qualified name can no longer disagree. `dt deps` had no way to ask -- it
+held only a repo and a workspace -- and now takes a `Build` it consults on
+the miss alone.
+
+`dt find --name` asks only when the value it was handed is qualified, and
+only after the search has come back empty, so the common fragment search
+pays nothing. What it says is not what `show` says, because what it was
+asked is not a declaration: an empty search reports the *namespace* it
+could not reach, not the name typed into it, and `Empty::NotIndexed` now
+carries an `Asked` to keep `--in Init.Data.Int` (a module of core) and
+`--name Int.emod_emod_of_dvd` (a namespace core declares in) phrased apart.
+The unqualified search stays a bare `no match`, pinned by a test.
+
+The one promise that had to be withdrawn is the one this entry quotes: the
+`show` message no longer says `--name` cannot reach it either, because now
+`--name` answers for itself. It says no search here can reach it.

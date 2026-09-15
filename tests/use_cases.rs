@@ -7,7 +7,7 @@ mod support;
 
 use discrtree::application::add::Add;
 use discrtree::application::deps::{Deps, DepsResult};
-use discrtree::application::find::{Dup, Empty, Find};
+use discrtree::application::find::{Asked, Dup, Empty, Find};
 use discrtree::application::ports::{Missing, NoBuild, Workspace};
 use discrtree::application::show::{Show, Source};
 use discrtree::application::status::Status;
@@ -178,8 +178,9 @@ fn show_says_which_name_it_could_not_find() {
 #[test]
 fn deps_lists_one_level_at_a_time() {
     let (repo, ws) = (repo(), workspace());
-    let result =
-        Deps { repo: &repo, workspace: &ws }.run(&DeclName::new("Other.top"), Some(2)).unwrap();
+    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild }
+        .run(&DeclName::new("Other.top"), Some(2))
+        .unwrap();
     match result {
         DepsResult::Levels { levels, approximate, .. } => {
             assert!(!approximate, "an elaborated root has exact dependencies");
@@ -201,8 +202,9 @@ fn deps_of_a_text_row_are_reported_as_approximate() {
     // The whole invariant in one assertion: a guessed list must never be
     // presented as the set of constants a proof term uses.
     let (repo, ws) = (repo(), workspace());
-    let result =
-        Deps { repo: &repo, workspace: &ws }.run(&DeclName::new("FLT.guessed"), Some(1)).unwrap();
+    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild }
+        .run(&DeclName::new("FLT.guessed"), Some(1))
+        .unwrap();
     match result {
         DepsResult::Levels { approximate, .. } => assert!(approximate),
         _ => panic!("asked for levels"),
@@ -212,7 +214,10 @@ fn deps_of_a_text_row_are_reported_as_approximate() {
 #[test]
 fn deps_with_no_depth_reports_the_size_rather_than_the_contents() {
     let (repo, ws) = (repo(), workspace());
-    match (Deps { repo: &repo, workspace: &ws }).run(&DeclName::new("Other.top"), None).unwrap() {
+    match (Deps { repo: &repo, workspace: &ws, build: &NoBuild })
+        .run(&DeclName::new("Other.top"), None)
+        .unwrap()
+    {
         DepsResult::Summary { stats, .. } => assert!(stats.total >= 2, "got {}", stats.total),
         _ => panic!("asked for a summary"),
     }
@@ -413,8 +418,8 @@ fn a_prefix_from_an_unindexed_package_is_not_reported_as_a_bad_prefix() {
     q.module = Some("Batteries".into());
     let find = Find { repo: &repo, build: &build };
     match find.run(&q).unwrap().empty {
-        Some(Empty::NotIndexed { prefix, missing: Missing::Package(pkg) }) => {
-            assert_eq!((prefix.as_str(), pkg.as_str()), ("Batteries", "batteries"));
+        Some(Empty::NotIndexed { asked, missing: Missing::Package(pkg) }) => {
+            assert_eq!((asked.as_str(), pkg.as_str()), ("Batteries", "batteries"));
         }
         other => panic!("expected the package to be named, got {other:?}"),
     }
@@ -510,12 +515,65 @@ fn a_module_prefix_from_lean_core_names_core_and_not_a_bad_prefix() {
     q.module = Some("Init.Data.Int".into());
     let find = Find { repo: &repo, build: &build };
     match find.run(&q).unwrap().empty {
-        Some(Empty::NotIndexed { prefix, missing: Missing::Core(tc) }) => {
+        Some(Empty::NotIndexed { asked: Asked::Module(prefix), missing: Missing::Core(tc) }) => {
             assert_eq!(prefix, "Init.Data.Int");
             assert_eq!(tc, "leanprover/lean4:v4.33.1");
         }
         other => panic!("expected core to be named, got {other:?}"),
     }
+}
+
+/// The note has to reach every command that can be handed a qualified name,
+/// not only the one it was written in. `dt show` sends the reader to
+/// `dt find --name`, and a bare `no match` there argues them straight back out
+/// of what they were just told.
+#[test]
+fn a_qualified_name_search_from_an_unindexed_corpus_says_so() {
+    let (repo, build) = (repo(), FakeBuild::with(&[]).without_core());
+    let mut q = Query::new();
+    q.name = Some("Int.emod_emod_of_dvd".into());
+    let find = Find { repo: &repo, build: &build };
+    match find.run(&q).unwrap().empty {
+        Some(Empty::NotIndexed { asked: Asked::Name(n), missing: Missing::Core(_) }) => {
+            assert_eq!(n.namespace_root(), "Int");
+        }
+        other => panic!("expected core to be named, got {other:?}"),
+    }
+
+    // An unqualified fragment has no namespace to read, and guessing one from
+    // a substring would be inventing the evidence. `--name` takes fragments
+    // most of the time, so this is the common case and it stays quiet.
+    let mut q = Query::new();
+    q.name = Some("emod_emod_of_dvd".into());
+    assert_eq!(find.run(&q).unwrap().empty, Some(Empty::Plain));
+
+    // And a name whose namespace is indexed keeps the plain answer.
+    let mut q = Query::new();
+    q.name = Some("Real.exp_nowhere".into());
+    assert_eq!(find.run(&q).unwrap().empty, Some(Empty::Plain));
+}
+
+/// The third entry point, and the one a reader reaches already holding a fully
+/// qualified name they read somewhere else.
+#[test]
+fn deps_on_a_name_from_an_unindexed_corpus_names_the_corpus() {
+    let (repo, ws) = (repo(), workspace());
+    let build = FakeBuild::with(&[("batteries", "Batteries")]).without_core();
+    let fails = |n: &str| match (Deps { repo: &repo, workspace: &ws, build: &build })
+        .run(&DeclName::new(n), Some(1))
+    {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("{n} is not in this index"),
+    };
+    let err = fails("Int.add_one_le_iff");
+    assert!(err.contains("Lean core"), "{err}");
+
+    let err = fails("Batteries.RBNode.Balanced");
+    assert!(err.contains("lake package `batteries`"), "{err}");
+
+    // Nothing to blame, nothing added: the message is the one it always was.
+    let err = fails("Real.exp_nowhere");
+    assert_eq!(err, "Real.exp_nowhere is not in the index");
 }
 
 /// Where a reader looks when an answer seems thin, and the one corpus that

@@ -6,7 +6,7 @@
 
 use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
-use crate::application::find::{Duplicate, Empty, Hits};
+use crate::application::find::{Asked, Duplicate, Empty, Hits};
 use crate::application::ports::Missing;
 use crate::application::show::{Shown, Source};
 use crate::application::status::{Report, SourceStatus};
@@ -47,19 +47,32 @@ pub fn find(hits: &Hits, long: bool) -> String {
             }
             // Not "matches nothing on its own", which would be true and would
             // send the reader to correct a prefix that is already correct.
-            Some(Empty::NotIndexed { prefix, missing: Missing::Package(pkg) }) => format!(
-                "no match: `{prefix}` is in the lake package `{pkg}`, which is not a source \
+            Some(Empty::NotIndexed { asked, missing: Missing::Package(pkg) }) => format!(
+                "no match: `{}` is in the lake package `{pkg}`, which is not a source \
                  of this index; add it to discrtree.toml and re-run `dt dump {pkg}` and \
-                 `dt index`\n"
+                 `dt index`\n",
+                asked.as_str()
             ),
             // No `dt dump` line to offer: core is not a directory under
             // `.lake/packages` that a source can be pointed at in one line, and
             // printing a command that does not work is worse than printing
             // none. `dt status` has the toolchain and the reader has the call.
-            Some(Empty::NotIndexed { prefix, missing: Missing::Core(tc) }) => format!(
-                "no match: `{prefix}` is a module of Lean core ({tc}), which is not a source \
-                 of this index\n"
-            ),
+            Some(Empty::NotIndexed { asked: Asked::Module(m), missing: Missing::Core(tc) }) => {
+                format!(
+                    "no match: `{m}` is a module of Lean core ({tc}), which is not a source \
+                     of this index\n"
+                )
+            }
+            // A name says less than a module does: the namespace is core's,
+            // the declaration may be anyone's. Claiming the second would be
+            // claiming to know what is in a corpus nobody has read.
+            Some(Empty::NotIndexed { asked: Asked::Name(n), missing: Missing::Core(tc) }) => {
+                format!(
+                    "no match: `{}` is a namespace Lean core declares in, and core ({tc}) is \
+                     not a source of this index\n",
+                    n.namespace_root()
+                )
+            }
             _ => "no match\n".into(),
         };
     }
@@ -587,7 +600,7 @@ mod tests {
         let empty = |e: Empty| Hits { rows: Vec::new(), truncated: false, empty: Some(e) };
         let r = find(
             &empty(Empty::NotIndexed {
-                prefix: "Batteries".into(),
+                asked: Asked::Module("Batteries".into()),
                 missing: Missing::Package("batteries".into()),
             }),
             false,
@@ -628,7 +641,7 @@ mod tests {
                 rows: Vec::new(),
                 truncated: false,
                 empty: Some(Empty::NotIndexed {
-                    prefix: "Init.Data.Int".into(),
+                    asked: Asked::Module("Init.Data.Int".into()),
                     missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
                 }),
             },
@@ -637,6 +650,26 @@ mod tests {
         assert!(r.contains("Lean core (leanprover/lean4:v4.33.1)"), "{r}");
         assert!(!r.contains("matches nothing"), "that is the wrong repair: {r}");
         assert!(!r.contains("dt dump"), "there is no one-line dump to offer: {r}");
+    }
+
+    /// A name says less than a module does, and the line has to say less too:
+    /// the namespace is core's, the declaration may be anyone's.
+    #[test]
+    fn an_empty_name_search_from_core_names_the_namespace_not_the_declaration() {
+        let r = find(
+            &Hits {
+                rows: Vec::new(),
+                truncated: false,
+                empty: Some(Empty::NotIndexed {
+                    asked: Asked::Name(crate::domain::name::DeclName::new("Int.emod_emod_of_dvd")),
+                    missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
+                }),
+            },
+            false,
+        );
+        assert!(r.contains("`Int` is a namespace"), "{r}");
+        assert!(!r.contains("emod_emod_of_dvd"), "the claim is about the namespace: {r}");
+        assert!(!r.contains("module of Lean core"), "nothing said a module was asked for: {r}");
     }
 
     #[test]

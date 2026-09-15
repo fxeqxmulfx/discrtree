@@ -7,7 +7,7 @@
 //! contain it at all.
 
 use crate::application::generated;
-use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles, Workspace};
+use crate::application::ports::{Build, DeclRepo, SourceFiles, Workspace};
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::DeclName;
@@ -65,23 +65,8 @@ impl Show<'_> {
             // package nothing indexed, that search returns the same nothing, or
             // worse, a page of near-misses from Mathlib that read like an
             // answer. Say which corpus is missing instead.
-            match self.build.declaring(name.as_str()) {
-                Some(Missing::Package(pkg)) => bail!(
-                    "{name} is in the lake package `{pkg}`, which is not a source of this index; \
-                     add it to discrtree.toml and re-run `dt dump {pkg}` and `dt index`"
-                ),
-                // Weaker, because the evidence is weaker: a package owns a
-                // directory and its namespace is its own, while `Int` is a
-                // namespace core and Mathlib both declare in. What is certain
-                // is that core is absent and that `--name` cannot reach it,
-                // and that is what stops a reader concluding the lemma does
-                // not exist.
-                Some(Missing::Core(tc)) => bail!(
-                    "{name} is not in the index, and `{}` is a namespace Lean core declares in; \
-                     core ({tc}) is not a source of this index, so `--name` cannot reach it either",
-                    name.namespace_root()
-                ),
-                None => {}
+            if let Some(missing) = self.build.declaring(name.as_str()) {
+                bail!("{}", missing.about(name))
             }
             bail!("{name} is not in the index; try `dt find --name {}`", name.base())
         };

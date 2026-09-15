@@ -167,7 +167,8 @@ impl App {
         // Not `?`: a declaration the index has not heard of is exactly what a
         // stale source hides, and the root is the one row whose absence ends
         // the command. So the warning is reached on both paths.
-        let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace };
+        let build = LakeBuild::read(&self.cfg);
+        let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace, build: &build };
         match deps.run(&DeclName::new(name), depth) {
             Ok(result) => {
                 print!("{}", render::deps(&result));

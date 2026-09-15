@@ -130,6 +130,35 @@ pub enum Missing {
     Core(String),
 }
 
+impl Missing {
+    /// What to say when a name the index does not have belongs to a corpus
+    /// that is not a source.
+    ///
+    /// Written once because `dt show` and `dt deps` are the same dead end
+    /// reached by two commands, and because the first of them sends the reader
+    /// to `dt find`: a note that appears in one of the three and not the others
+    /// is a note the reader is shown and then argued out of.
+    pub fn about(&self, name: &DeclName) -> String {
+        match self {
+            Missing::Package(pkg) => format!(
+                "{name} is in the lake package `{pkg}`, which is not a source of this index; \
+                 add it to discrtree.toml and re-run `dt dump {pkg}` and `dt index`"
+            ),
+            // Weaker, because the evidence is weaker: a package owns a
+            // directory and its namespace is its own, while `Int` is a
+            // namespace core and Mathlib both declare in. What is certain is
+            // that core is absent and that no search of this index can reach
+            // it, and that is what stops a reader concluding the lemma does
+            // not exist.
+            Missing::Core(tc) => format!(
+                "{name} is not in the index, and `{}` is a namespace Lean core declares in; \
+                 core ({tc}) is not a source of this index, so no search here can reach it",
+                name.namespace_root()
+            ),
+        }
+    }
+}
+
 /// What the build can import, as against what the index holds.
 ///
 /// A `discrtree.toml` names Mathlib and stops there, and everything Mathlib is

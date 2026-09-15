@@ -29,13 +29,37 @@ pub enum Empty {
     /// Every condition matches something; no row satisfies all of them. Drop
     /// one rather than correcting any.
     Combination,
-    /// `--in` names a module of a corpus the build can import and no source
+    /// The search was asked about a corpus the build can import and no source
     /// indexes. Neither repair above applies: nothing is misspelled and no
     /// condition needs dropping, the corpus was never dumped. Told apart from
     /// `Barren` because they look identical from the index and lead opposite
     /// ways — one says edit the flag, and editing the flag here can only
     /// produce another empty answer.
-    NotIndexed { prefix: String, missing: Missing },
+    NotIndexed { asked: Asked, missing: Missing },
+}
+
+/// Which condition led outside the index, as it was written.
+///
+/// Two of them, because what can honestly be said differs. A module prefix
+/// belongs to a corpus outright; a name only says its namespace does, and only
+/// when it has one — `--name add_one_le_iff` is unqualified, has no namespace
+/// to read, and gets no note rather than a guessed one.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// `--in`, as written.
+    Module(String),
+    /// `--name`, when what was written was a qualified name.
+    Name(DeclName),
+}
+
+impl Asked {
+    /// The condition as the reader typed it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Asked::Module(m) => m,
+            Asked::Name(n) => n.as_str(),
+        }
+    }
 }
 
 /// What a search found, and the two things about it a caller would otherwise
@@ -83,7 +107,22 @@ impl Find<'_> {
                 .find(&Query { module: Some(m.clone()), limit: 1, ..Query::new() })?
                 .is_empty()
         {
-            return Ok(Empty::NotIndexed { prefix: m.clone(), missing });
+            return Ok(Empty::NotIndexed { asked: Asked::Module(m.clone()), missing });
+        }
+        // And the same for a name that carries its namespace. `--name` is a
+        // substring search, so most of what is passed to it is a fragment with
+        // nothing to read; a qualified name is the case where the reader
+        // already knows what they are looking for, which is also the case where
+        // `no match` is most readily believed to mean the lemma does not exist.
+        if let Some(n) = &query.name
+            && n.contains('.')
+            && let Some(missing) = self.build.declaring(n)
+            && self
+                .repo
+                .find(&Query { name: Some(n.clone()), limit: 1, ..Query::new() })?
+                .is_empty()
+        {
+            return Ok(Empty::NotIndexed { asked: Asked::Name(DeclName::new(n.clone())), missing });
         }
         let conditions = query.conditions();
         if conditions.len() < 2 {
