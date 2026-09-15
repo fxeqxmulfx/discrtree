@@ -201,10 +201,14 @@ impl App {
             if let Some(p) = &args.pattern {
                 let parsed = pattern::parse(p);
                 eprintln!(
-                    "dt: `{p}` read as conclusion {}, {} argument(s){}",
+                    "dt: `{p}` read as conclusion {}, {} argument(s){}{}",
                     parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
                     parsed.query.shape.args.len(),
                     parsed.operator.map_or(String::new(), |o| format!(", operator `{o}`")),
+                    match parsed.variables.is_empty() {
+                        true => String::new(),
+                        false => format!(", `{}` as `_`", parsed.variables.join("`, `")),
+                    },
                 );
             }
         }

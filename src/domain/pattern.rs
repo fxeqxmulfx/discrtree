@@ -50,6 +50,8 @@ pub struct Parsed {
     pub operator: Option<String>,
     /// Identifiers that could not be placed in the shape and became `--uses`.
     pub extra_constants: Vec<DeclName>,
+    /// Tokens read as wildcards rather than as constants. See [`is_variable`].
+    pub variables: Vec<String>,
 }
 
 /// Parse a pattern such as `Real.exp _ ≤ _` or `Finset.sum _ _ = _`.
@@ -61,6 +63,8 @@ pub struct Parsed {
 /// becomes the conclusion head and the rest become arguments.
 pub fn parse(pattern: &str) -> Parsed {
     let tokens = tokenize(pattern);
+    let vars: Vec<String> =
+        dedup_strings(tokens.iter().filter(|t| is_variable(t)).cloned().collect());
     let mut query = Query::new();
 
     match split_on_operator(&tokens) {
@@ -71,28 +75,28 @@ pub fn parse(pattern: &str) -> Parsed {
             let (right_head, right_rest) = side(&rhs);
             query.shape = Shape::new(concl, vec![left_head, right_head]);
             query.uses = dedup(left_rest.into_iter().chain(right_rest).collect());
-            Parsed { query, operator: Some(op), extra_constants: Vec::new() }
+            Parsed { query, operator: Some(op), extra_constants: Vec::new(), variables: vars }
         }
         None => {
-            let ids = idents(&tokens);
+            let ids = constants(&tokens);
             match ids.split_first() {
                 Some((head, rest)) => {
                     let args = tokens
                         .iter()
-                        .skip_while(|t| !is_ident(t))
+                        .skip_while(|t| t.as_str() != head.as_str())
                         .skip(1)
                         .filter(|t| is_ident(t) || *t == "_")
-                        .map(|t| ArgHead::parse(t))
+                        .map(|t| arg_head(t))
                         .collect();
                     query.shape = Shape::new(Some(head.clone()), args);
                     query.uses = dedup(rest.to_vec());
-                    Parsed { query, operator: None, extra_constants: Vec::new() }
+                    Parsed { query, operator: None, extra_constants: Vec::new(), variables: vars }
                 }
                 None => {
                     // Nothing recognisable: fall back to free text rather than
                     // returning an unconstrained query.
                     query.text = Some(pattern.trim().to_string());
-                    Parsed { query, operator: None, extra_constants: Vec::new() }
+                    Parsed { query, operator: None, extra_constants: Vec::new(), variables: vars }
                 }
             }
         }
@@ -139,27 +143,67 @@ fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<Stri
 /// norm bracket is `Norm.norm`, and the head of `Real.exp x + y` is `HAdd.hAdd`
 /// with `Real.exp` demoted to a `uses` condition.
 fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
+    let mut rest = constants(tokens);
     let notation = tokens
         .iter()
         .find_map(|t| NOTATION.iter().find(|(sym, _)| sym == t))
         .map(|(_, head)| DeclName::new(*head));
-    match notation {
-        Some(head) => (ArgHead::Named(head), idents(tokens)),
-        None => match tokens.iter().find(|t| is_ident(t)) {
-            Some(t) => (
-                ArgHead::Named(DeclName::new(t.clone())),
-                idents(tokens).into_iter().skip(1).collect(),
-            ),
-            None => (ArgHead::Any, Vec::new()),
-        },
+    if let Some(head) = notation {
+        return (ArgHead::Named(head), rest);
+    }
+    match tokens.iter().find(|t| is_ident(t)) {
+        // The head of this side is a bound variable, so the side constrains
+        // nothing — which is what `_` already means.
+        Some(t) if is_variable(t) => (ArgHead::Any, rest),
+        Some(t) => {
+            if let Some(i) = rest.iter().position(|c| c.as_str() == t.as_str()) {
+                rest.remove(i);
+            }
+            (ArgHead::Named(DeclName::new(t.clone())), rest)
+        }
+        None => (ArgHead::Any, rest),
     }
 }
 
-fn idents(tokens: &[String]) -> Vec<DeclName> {
-    tokens.iter().filter(|t| is_ident(t)).map(|t| DeclName::new(t.clone())).collect()
+/// Whether a token names a bound variable rather than something to look up.
+///
+/// One letter, plus the decorations Lean's own printer adds: `a`, `x'`, `f₁`,
+/// `α`. That is how every binder in a Mathlib statement is spelled and how no
+/// global constant is — a declaration worth searching for has a namespace, or
+/// at least a word. Reading them as constants is what made
+/// `a ≤ b → b⁻¹ ≤ a⁻¹` answer `no match: --uses a, --uses b`: three AND-ed
+/// conditions on names nothing declares, from a pattern that named none.
+///
+/// Syntactic on purpose. Asking the index whether `a` resolves would make the
+/// same pattern mean different things in different projects, and the one
+/// project where something is called `a` is the one where that is a typo.
+fn is_variable(t: &str) -> bool {
+    let mut cs = t.chars();
+    cs.next().is_some_and(char::is_alphabetic) && cs.all(|c| c.is_numeric() || "'_!?".contains(c))
+}
+
+/// The identifiers that name a declaration, which is every identifier that is
+/// not a bound variable.
+fn constants(tokens: &[String]) -> Vec<DeclName> {
+    tokens
+        .iter()
+        .filter(|t| is_ident(t) && !is_variable(t))
+        .map(|t| DeclName::new(t.clone()))
+        .collect()
+}
+
+/// One argument of a prefix pattern. A variable is a wildcard, not a name.
+fn arg_head(token: &str) -> ArgHead {
+    if is_variable(token) { ArgHead::Any } else { ArgHead::parse(token) }
 }
 
 fn dedup(mut v: Vec<DeclName>) -> Vec<DeclName> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn dedup_strings(mut v: Vec<String>) -> Vec<String> {
     v.sort();
     v.dedup();
     v
@@ -186,9 +230,47 @@ mod tests {
         let p = parse("Finset.sum s f = Real.exp x");
         assert_eq!(p.query.shape.concl, Some(DeclName::new("Eq")));
         assert_eq!(p.query.shape.args, vec![arg("Finset.sum"), arg("Real.exp")]);
-        // `s`, `f`, `x` are bound variables in the user's head, but the tool
-        // cannot know that; they become AND-ed constant conditions.
-        assert!(p.query.uses.contains(&DeclName::new("f")));
+        // `s`, `f` and `x` are binders. Nothing declares them, so searching for
+        // them can only subtract matches.
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+        assert_eq!(p.variables, vec!["f", "s", "x"]);
+    }
+
+    /// The pattern from the report: every identifier in it is a binder, and
+    /// reading them as constants made the answer `no match` with four
+    /// conditions to blame, none of which the user had written.
+    #[test]
+    fn a_pattern_of_nothing_but_binders_constrains_only_its_shape() {
+        let p = parse("a ≤ b");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("_")]);
+        assert!(p.query.uses.is_empty());
+    }
+
+    /// A binder is one letter and its decorations. Anything with a word in it
+    /// is a name, and a name is looked up even when it is short.
+    #[test]
+    fn a_short_name_is_still_a_name() {
+        assert!(is_variable("a"));
+        assert!(is_variable("x'"));
+        assert!(is_variable("f₁"));
+        assert!(is_variable("α"));
+        assert!(is_variable("n_1"));
+        assert!(!is_variable("id"));
+        assert!(!is_variable("Ne"));
+        assert!(!is_variable("Nat.succ"));
+        assert!(!is_variable("_"));
+    }
+
+    /// A prefix pattern takes its head from the first identifier that names
+    /// something; the binders after it are arguments, and arguments that are
+    /// binders are wildcards.
+    #[test]
+    fn a_prefix_pattern_skips_binders_for_its_head() {
+        let p = parse("Continuous f");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Continuous")));
+        assert_eq!(p.query.shape.args, vec![arg("_")]);
+        assert!(p.query.uses.is_empty());
     }
 
     #[test]

@@ -664,3 +664,61 @@ their own.  A new failure surface on the one path that cannot be tested without
 a Lean on the machine, for three minutes a month, is the wrong trade; the
 sentence naming the repair is what the session that reported this actually
 needed.
+
+## Single-letter pattern variables are read as constants
+
+`dt find 'a ≤ b → b⁻¹ ≤ a⁻¹'` (looking for `inv_anti₀`) answers
+
+    no match: `a` in the pattern, `Arrow` in the pattern, --uses a, --uses b
+    match nothing on their own
+
+so `a` and `b` were elaborated as names to look up rather than as pattern
+variables, and the arrow shape was searched for as a constant `Arrow`.  The
+same query with `_ ≤ _ → _⁻¹ ≤ _⁻¹` is what one has to write, but a bare
+lowercase identifier that resolves to nothing is far more likely to be a
+metavariable the user spelled the Lean way (`∀ {a b : α}, a ≤ b → ...` is how
+the statement is printed by `dt show` itself) than a declaration named `a`.
+Either treat an unresolvable single-letter identifier as a wildcard, or say so
+in the failure message -- the current one names four conditions and does not
+hint that the fix is `_`.
+
+Hit twice in one session: the fallback both times was `dt find --name`, i.e.
+guessing the name, which is the thing `dt find` exists to avoid.
+
+## Implication patterns do not match hypothesis-shaped lemmas
+
+`dt find 'HasFDerivAt _ _ _ → HasFDerivAt _ _ _ → HasFDerivAt _ _ _'
+--text inner` answers "no match: every condition matches on its own; drop
+one", but `HasFDerivAt.inner` exists and has exactly that shape:
+
+    theorem HasFDerivAt.inner (hf : HasFDerivAt f f' x) (hg : HasFDerivAt g g' x) :
+        HasFDerivAt (fun t => ⟪f t, g t⟫) ((fderivInnerCLM 𝕜 (f x, g x)).comp <| f'.prod g') x
+
+Hypotheses are binders, not arrows, in the elaborated term, so a `→` pattern
+misses every lemma stated with named hypotheses -- which is most of Mathlib.
+A pattern whose top level is `→` should match a pi type over the same
+argument types.
+
+## "`project` moved since it was indexed" on every query
+
+Every `dt` call in this session, in the directory the project was indexed
+from (`/home/misha/lean_projects/transformer`, unmoved), prints
+
+    dt: `project` moved since it was indexed; this answer may be out of date
+    -- re-run `dt refresh project`
+
+It shows up attached to failed searches, where it reads as the explanation for
+the failure and is not.  Whatever the move check compares (a symlinked or
+`/proc`-resolved path?), it is reporting a move that did not happen.
+
+A binder is one letter and whatever decorations the printer put on it -- `a`,
+`x'`, `f₁`, `α` -- and nothing global is spelled that way, so that is the rule:
+a token of that shape is a wildcard, wherever it appears.  It never reaches
+`--uses`, and a side of a relation whose head is one is `_`.  The test is
+syntactic rather than a lookup in the index, because a lookup would make the
+same pattern mean different things in two projects, and the project where
+something really is called `a` is the project where that is a typo.
+
+`dt find -v` now names what it read as a wildcard, which is where a rule this
+quiet belongs: the pattern is echoed as `conclusion LE.le, 2 argument(s),
+operator `≤`, `a`, `b` as `_``.
