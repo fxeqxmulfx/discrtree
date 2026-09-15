@@ -65,6 +65,13 @@ def conclArgs (e : Expr) : Array String :=
     | some n => n.toString
     | none   => "_"
 
+/-- What a declaration is, in the words `dt find --kind` takes.
+
+`instance` is an attribute rather than a `ConstantInfo` constructor: every
+instance is a `defnInfo`, and reading the constructor alone reports them all as
+`def`. That is the kind a reader asks for when the question is whether a type
+already has an instance of a class -- so the attribute is read too, and it wins
+over `def`, which is how the text scanner has always spelled it. -/
 def declKind (env : Environment) (ci : ConstantInfo) : String :=
   match ci with
   | .axiomInfo _  => "axiom"
@@ -74,7 +81,7 @@ def declKind (env : Environment) (ci : ConstantInfo) : String :=
   | .ctorInfo _   => "ctor"
   | .recInfo _    => "rec"
   | .inductInfo _ => if isStructure env ci.name then "structure" else "inductive"
-  | .defnInfo _   => "def"
+  | .defnInfo _   => if isInstanceCore env ci.name then "instance" else "def"
 
 /-- Names a human would never search for, dropped from dependency lists. -/
 def keepDep (n : Name) : Bool := keep n

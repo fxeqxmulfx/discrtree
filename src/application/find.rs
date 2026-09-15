@@ -1,7 +1,7 @@
 //! `dt find` — shape search, the main mode, plus `dt dup`.
 
 use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
-use crate::domain::decl::Decl;
+use crate::domain::decl::{Decl, DeclKind};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::{self, Query};
@@ -36,6 +36,12 @@ pub enum Empty {
     /// ways — one says edit the flag, and editing the flag here can only
     /// produce another empty answer.
     NotIndexed { asked: Asked, missing: Missing },
+    /// `--kind instance` against an index whose elaborated rows have no
+    /// instances in them at all. `instance` is an attribute Lean hangs on a
+    /// `def`, and a dump written before `dt` read that attribute recorded
+    /// every instance as `def` -- so the flag is right, the index is old, and
+    /// the repair is a re-dump rather than an edit to the query.
+    InstancesAreDefs,
 }
 
 /// Which condition led outside the index, as it was written.
@@ -123,6 +129,23 @@ impl Find<'_> {
                 .is_empty()
         {
             return Ok(Empty::NotIndexed { asked: Asked::Name(DeclName::new(n.clone())), missing });
+        }
+        // Asked before the conditions are probed, because `--kind instance`
+        // does match on its own -- text rows have carried the kind since the
+        // scanner was written -- and the answer would otherwise be "drop a
+        // condition", which is the one repair that cannot help here.
+        if query.kind == Some(DeclKind::Instance)
+            && self
+                .repo
+                .find(&Query {
+                    kind: Some(DeclKind::Instance),
+                    elaborated_only: true,
+                    limit: 1,
+                    ..Query::new()
+                })?
+                .is_empty()
+        {
+            return Ok(Empty::InstancesAreDefs);
         }
         let conditions = query.conditions();
         if conditions.len() < 2 {

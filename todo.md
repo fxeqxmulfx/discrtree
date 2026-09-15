@@ -837,3 +837,81 @@ partial refresh is still a failure, everything read is the only success -- and
 `dt refresh --help` states it for the caller that reads exit codes rather than
 terminals.  A report of the same thing against a version that has these tests
 would be worth chasing; this one is closed as unreproducible.
+
+## `--kind instance` matches nothing in an elaborated source
+
+dt 0.17.x, index built from `Mathlib` (lake), `core`, `batteries` and a local
+`project`, plus one text-scanned source.
+
+`dt find --help` lists `instance` among the kinds:
+
+    --kind <KIND>
+        theorem, def, structure, inductive, axiom, instance, ctor
+
+and it does select rows -- but only from the text-scanned source:
+
+    $ dt find --kind instance | head -2
+    AlgebraicGeometry.ThetaLevel.Heis.instMul  [text]  instance  Definitions...
+    AlgebraicGeometry.ThetaLevel.Heis.instOne  [text]  instance  Definitions...
+
+In every elaborated source an instance is recorded as `def`:
+
+    $ dt find --kind instance --in Mathlib.Topology
+    no match: every condition matches on its own; drop one
+
+    $ dt find --name instMeasurableSpace --in Mathlib | head -1
+    Int.instMeasurableSpace  def  Mathlib.MeasureTheory.MeasurableSpace.Instances
+
+So the one filter a user reaches for when asking "does this type have an
+instance here" excludes every instance in the sources they actually search,
+and says so in the vocabulary of an empty result rather than of a missing
+feature. What went wrong on this end: I asked whether the sphere's
+`MeasurableSingletonClass` instance existed, read `no match` as "it does not",
+and went to write it by hand; Lean found it by `infer_instance` on the first
+try.
+
+Either would fix it: record `instance` as its own kind when dumping from Lean
+(`ConstantInfo` carries the attribute), or -- if that is a deliberate
+simplification -- have `--kind instance` say that the kind is not distinguished
+in elaborated sources, the way an unknown `--source` is an error rather than an
+empty result.
+
+Fixed in 0.20.0, in the dump, with a message for the indexes written before it.
+
+Lean has no `instance` constant.  An instance is a `defnInfo` carrying an
+attribute, and `declKind` read the constructor alone, so every instance in
+every elaborated source came out as `def` -- correct about the constant and
+useless for the question being asked.  The attribute is one lookup away
+(`isInstanceCore env ci.name`, the same table `infer_instance` searches), and
+it now wins over `def`, which is how the text scanner has always spelled it:
+
+    $ dt find --kind instance --source toy
+    instInhabitedBox  instance  Toy.Basic
+      Inhabited Toy.Box
+    $ dt find --name plain
+    Toy.plain  def  Toy.Basic
+
+The cost of that is `--kind def` no longer matching an instance.  That is the
+same trade the text scanner made, and it is the one that answers the question
+people actually ask: "is there an instance of this class for this type" is a
+search, "is there a def that happens to be an instance" is not.
+
+The rest of the entry is the indexes that already exist.  A dump written before
+this change records instances as `def` and nothing on disk has moved, so the
+index is not stale by any measure `dt status` has, and `dt refresh` with no
+name will say there is nothing to do.  The empty result says it instead:
+
+    $ dt find --kind instance --in Toy.Basic
+    no match: no elaborated row carries the kind `instance`; a dump older than
+    dt 0.20.0 records every instance as `def` — re-read the source to get them:
+    `dt refresh <source>`
+
+which fires only when the index holds no elaborated instance at all, and stops
+firing the moment one source has been read again.  Reaching it needed a probe
+before the per-condition ones, because `--kind instance` does match on its own
+-- on the text rows -- and the diagnosis was therefore "every condition matches
+on its own; drop one", the one repair that could not have helped.
+
+Existing indexes need `dt refresh <source>` per elaborated source to pick the
+kind up; for Mathlib that is a full dump again, and there is no shortcut, the
+kind is written by the dumper and nowhere else.

@@ -83,6 +83,13 @@ pub fn find(hits: &Hits, long: bool) -> String {
                     missing.fix()
                 )
             }
+            // Naming a source is not optional in the repair: the dump is out
+            // of date and nothing on disk has moved, so a bare `dt refresh`
+            // reports that there is nothing to do.
+            Some(Empty::InstancesAreDefs) => "no match: no elaborated row carries the kind \
+                 `instance`; a dump older than dt 0.20.0 records every instance as `def` — \
+                 re-read the source to get them: `dt refresh <source>`\n"
+                .into(),
             _ => "no match\n".into(),
         };
     }
@@ -623,6 +630,20 @@ mod tests {
         // Silent when there is nothing to report: a line that prints on every
         // run is a line that is read on none.
         assert!(!status(&report(&[]), std::path::Path::new("/p/index.db")).contains("not indexed"));
+    }
+
+    /// The flag is right and the index is old: the repair is a re-read, and
+    /// it has to name a source, because nothing on disk has moved and a bare
+    /// `dt refresh` would report that there is nothing to do.
+    #[test]
+    fn an_instance_search_against_an_old_dump_asks_for_a_re_read() {
+        let r = find(
+            &Hits { rows: Vec::new(), truncated: false, empty: Some(Empty::InstancesAreDefs) },
+            false,
+        );
+        assert!(r.contains("`instance`"), "{r}");
+        assert!(r.contains("dt refresh <source>"), "the repair, not just the complaint: {r}");
+        assert!(!r.contains("drop"), "there is no condition to drop: {r}");
     }
 
     /// `--in Batteries` is not a prefix to correct, and telling the reader it

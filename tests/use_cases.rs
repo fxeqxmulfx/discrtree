@@ -369,6 +369,53 @@ fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
     );
 }
 
+/// An index whose text rows are the only ones marked `instance`.
+fn with_instances(elaborated_too: bool) -> FakeRepo {
+    let mut repo = repo();
+    let mut scanned = theorem("Heis.instMul", "flt", "FLT.Basic", "Mul", &[]);
+    scanned.kind = discrtree::domain::decl::DeclKind::Instance;
+    scanned.elaborated = false;
+    repo.decls.push(scanned);
+    if elaborated_too {
+        let mut dumped =
+            theorem("Real.instTopologicalSpace", "mathlib", "Mathlib.Analysis.Exp", "T", &[]);
+        dumped.kind = discrtree::domain::decl::DeclKind::Instance;
+        repo.decls.push(dumped);
+    }
+    repo
+}
+
+/// Lean has no `instance` constant: an instance is a `def` with an attribute,
+/// and a dump that read only the constructor recorded every one of them as
+/// `def`. `--kind instance` then selected the text-scanned rows and nothing
+/// else -- and "drop a condition" is the one repair that cannot help, because
+/// the flag is right and the index is old.
+#[test]
+fn asking_for_an_instance_where_the_dump_recorded_none_says_the_dump_is_old() {
+    let repo = with_instances(false);
+    let mut q = Query::new();
+    q.kind = Some(discrtree::domain::decl::DeclKind::Instance);
+    q.module = Some("Mathlib.Analysis.Exp".into());
+    assert_eq!(
+        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
+        Some(Empty::InstancesAreDefs)
+    );
+}
+
+/// And once a source has been read again, the same query is diagnosed like
+/// any other: the kind is in the index, so the combination is what failed.
+#[test]
+fn an_index_that_has_instances_diagnoses_them_like_any_other_kind() {
+    let repo = with_instances(true);
+    let mut q = Query::new();
+    q.kind = Some(discrtree::domain::decl::DeclKind::Instance);
+    q.module = Some("Other.Main".into());
+    assert_eq!(
+        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
+        Some(Empty::Combination)
+    );
+}
+
 /// With one condition there is nothing to diagnose, and probing it would only
 /// repeat the query back. The probes are skipped rather than answered.
 #[test]
