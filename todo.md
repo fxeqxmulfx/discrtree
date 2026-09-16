@@ -2296,3 +2296,25 @@ Not every declaration it names, as `find --uses` reads it: a refactor changes
 one, and the users of fifty-two `length`s have nothing in common.  A name
 without a dot is still the whole name, so `dt rdeps exp_le_exp` still says
 it is not in the index.
+
+## `deps` and `add` do not accept `--source`
+
+`show --source` picks the row a source has, since 0.38.0, and then points at
+a command that cannot:
+
+    $ dt show --source flt AddSubgroup.inertia_mono
+    -- source `flt` is not importable; `dt add AddSubgroup.inertia_mono` copies it instead
+    $ dt add AddSubgroup.inertia_mono
+    imports
+      import Mathlib.Algebra.Group.Subgroup.Basic
+    Nothing to copy: every dependency is reachable by an import.
+    $ dt add --source flt AddSubgroup.inertia_mono
+    error: unexpected argument '--source' found
+    $ dt deps --source flt AddSubgroup.inertia_mono
+    error: unexpected argument '--source' found
+
+`dt add` answers for the Mathlib row, which is right without the flag, and
+there is no way to ask for the FLT one the hint was about, or for its
+dependencies.
+
+Seen with dt 0.43.0, 2026-09-16.
