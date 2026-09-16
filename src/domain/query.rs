@@ -22,8 +22,10 @@ pub struct Query {
     pub module: Option<String>,
     pub source: Option<SourceId>,
     pub kind: Option<DeclKind>,
-    /// Free text over type and docstring.
-    pub text: Option<String>,
+    /// Free-text words over type and docstring. ANDed, like `uses`: the flag
+    /// repeats, and a `--text` given several words is those words, because
+    /// that is what the text index does with them anyway.
+    pub text: Vec<String>,
     /// Restrict to rows that came out of the elaborator.
     pub elaborated_only: bool,
     /// Drop rows whose proof is `sorry`.
@@ -52,7 +54,7 @@ impl Query {
             && self.module.is_none()
             && self.source.is_none()
             && self.kind.is_none()
-            && self.text.is_none()
+            && self.text.is_empty()
     }
 
     /// The query's conditions, each on its own, for explaining an empty result.
@@ -100,8 +102,8 @@ impl Query {
         if let Some(k) = &self.kind {
             out.push((format!("--kind {k}"), one(Query { kind: Some(k.clone()), ..Query::new() })));
         }
-        if let Some(x) = &self.text {
-            out.push((format!("--text {x}"), one(Query { text: Some(x.clone()), ..Query::new() })));
+        for x in &self.text {
+            out.push((format!("--text {x}"), one(Query { text: vec![x.clone()], ..Query::new() })));
         }
         out
     }
@@ -149,7 +151,10 @@ impl Query {
         {
             return false;
         }
-        if let Some(t) = &self.text {
+        // Each word on its own, and either field: the text index treats the
+        // three columns of a row as one document, so a word in the type and a
+        // word in the docstring is a match there and has to be one here.
+        for t in &self.text {
             let t = t.to_lowercase();
             let in_type = d.ty.to_lowercase().contains(&t);
             let in_doc = d.doc.as_deref().is_some_and(|s| s.to_lowercase().contains(&t));
@@ -322,12 +327,31 @@ mod tests {
     fn text_search_covers_type_and_docstring() {
         let d = decl();
         let mut q = Query::new();
-        q.text = Some("monotone".into());
+        q.text = vec!["monotone".into()];
         assert!(q.matches(&d));
-        q.text = Some("↔".into());
+        q.text = vec!["↔".into()];
         assert!(q.matches(&d));
-        q.text = Some("Finset".into());
+        q.text = vec!["Finset".into()];
         assert!(!q.matches(&d));
+    }
+
+    /// The report: `--text summable --text monotone` was refused by the
+    /// parser rather than answered. Two words are two conditions, which is
+    /// what the text index makes of them anyway.
+    #[test]
+    fn text_words_combine_with_and() {
+        let d = decl();
+        let mut q = Query::new();
+        // One word out of the type and one out of the docstring: a row is one
+        // document to the text index, so it is one row here too.
+        q.text = vec!["Real.exp".into(), "monotone".into()];
+        assert!(q.matches(&d));
+        q.text.push("Finset".into());
+        assert!(!q.matches(&d));
+        // And each word is a condition of its own, so an empty result can
+        // name the one that matched nothing.
+        let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
+        assert!(labels.contains(&"--text Finset".to_string()), "{labels:?}");
     }
 
     #[test]

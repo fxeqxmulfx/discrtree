@@ -193,7 +193,7 @@ pub fn parse(pattern: &str) -> Parsed {
                 None => {
                     // Nothing recognisable: fall back to free text rather than
                     // returning an unconstrained query.
-                    query.text = Some(pattern.trim().to_string());
+                    query.text = pattern.split_whitespace().map(str::to_string).collect();
                     Parsed {
                         query,
                         operator: None,
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn an_unparseable_pattern_falls_back_to_text_not_to_everything() {
         let p = parse("!!!");
-        assert!(p.query.text.is_some());
+        assert!(!p.query.text.is_empty());
         assert!(!p.query.is_empty(), "the fallback must still constrain the search");
     }
 
@@ -775,7 +775,7 @@ mod tests {
         let p = parse("⟪x, y⟫_ℝ");
         assert_eq!(p.query.shape.concl, Some(DeclName::new("Inner.inner")));
         assert!(p.query.shape.args.is_empty());
-        assert!(p.query.text.is_none());
+        assert!(p.query.text.is_empty());
         assert_eq!(parse("‖x‖").query.shape.concl, Some(DeclName::new("Norm.norm")));
     }
 
@@ -817,7 +817,7 @@ mod tests {
         assert!(parse("Real.exp _ ≤ _ → ⟪_, _⟫_ℝ = _").unknown.is_empty());
         // Nothing was dropped from a pattern that became a text search: the
         // whole of it is what is searched for.
-        assert!(parse("∫ x, f x").query.text.is_some());
+        assert!(!parse("∫ x, f x").query.text.is_empty());
         assert!(parse("∫ x, f x").unknown.is_empty());
     }
 

@@ -168,6 +168,12 @@ pub enum Command {
         /// Print only the import lines, deduplicated.
         #[arg(long)]
         import_only: bool,
+        /// Accepted and ignored. `--long` is a `find` flag, and `show` is
+        /// already long: it prints the declaration's own source, docstring and
+        /// proof included. Taken rather than refused because refusing it costs
+        /// the caller a round trip to learn that it had the answer already.
+        #[arg(long, hide = true)]
+        long: bool,
     },
 
     /// What a proof rests on, level by level.
@@ -267,8 +273,10 @@ pub struct FindArgs {
     pub kind: Option<String>,
 
     /// Free text over name, type and docstring. Whole words, not substrings.
+    /// Repeatable, and several words in one --text mean the same thing: all of
+    /// them must appear.
     #[arg(long, value_name = "WORDS")]
-    pub text: Option<String>,
+    pub text: Vec<String>,
 
     /// Only rows that came out of the elaborator.
     #[arg(long)]

@@ -1418,3 +1418,76 @@ project. A query that says where it is looking can be taken at its word:
 index resolves the prefix for the price of one row. A query that restricts
 nothing still warns about everything, and so does an `--in` that matches
 nothing — a prefix with no rows is exactly what a stale source looks like.
+
+## 0.27.0, from the transformer project
+
+**`--text` once only.** `dt find --text summable --text monotone` is rejected
+with `the argument '--text <WORDS>' cannot be used multiple times`. The other
+filters compose — `--name` narrows, `--in` narrows, `--uses` narrows — and the
+natural way to narrow a text search is a second word from a different part of
+the sentence. `--text` already takes whole words, so either the flag repeats
+and the words are ANDed, or the message says `--text takes several words:
+--text "summable monotone"` instead of naming a clap rule.
+
+**`--long` is a `find` flag.** `dt show Real.log_sqrt --long` errors with
+`unexpected argument '--long' found`, and the tip offers `--config`, which is
+not what anyone meant. `show` is the command one reaches for after `find`
+printed a truncated type, so it is the command `--long` is asked of. Either
+`show` accepts it (and prints the docstring), or the tip says `show` already
+prints the full statement and `--long` belongs to `find`.
+
+**The AND message with one condition.** A bare pattern, no other flag:
+
+    $ dt find 'Real.log _ ≤ Real.sqrt _'
+    no match: every condition matches on its own; drop one
+
+There is one condition and nothing to drop. The same line comes back for
+`--source mathlib` plus a pattern, where the only droppable condition is the
+source the reader deliberately named. When the conditions are a shape and
+nothing else, the answer is about the shape: whether the head is unknown to
+the index, whether it matched with fewer arguments, or whether the sides are
+in the other order.
+
+Fixed in 0.28.0.
+
+**`--text` repeats, and the words are ANDed.** `Query.text` is a list of words
+rather than one string, which is what the text index made of it anyway:
+`fts5` splits a MATCH on whitespace and ANDs the terms, so `--text "summable
+monotone"` already meant both words and only the flag disagreed. Now the flag
+repeats, several words in one `--text` are the same as one word in each, and
+the two rules that were reading the string whole — the domain's `matches` and
+the `LIKE` fallback for a build without FTS5 — read it word by word like the
+index does. Each word is a condition of its own, so `--text summable --text
+zzz` blames `--text zzz` rather than the combination.
+
+**`dt show --long` is taken and answered.** `show` already prints the whole
+declaration, docstring and proof included, so there is nothing for `--long` to
+add — but refusing it costs a round trip to learn that, and clap's tip for the
+refusal offered `--config`. The flag is accepted, hidden from `--help`, and
+says on stderr where it belongs:
+
+    dt: `--long` belongs to `dt find`; `show` prints the whole declaration
+    anyway, source and all
+
+**A pattern is diagnosed as a pattern.** The conditions a shape is taken apart
+into — one `--concl`, one per named argument — are probes, not flags, and
+"drop one" is an answer about flags. When the shape matches nothing with every
+flag dropped, the shape is what the answer is about, and three near misses are
+worth one query each:
+
+    $ dt find 'Finset.sum _ _ ≤ Finset.card _'
+    no match: nothing has that shape; the same two sides the other way round do
+
+    $ dt find 'Real.exp _ ∣ Real.exp _'
+    no match: nothing has that shape; those arguments go together under
+    `HasDerivAt`, `HasStrictDerivAt`, `LE.le`
+
+    $ dt find 'Real.log _ ≤ Real.sqrt _'
+    no match: nothing has that shape; each of `Real.log`, `Real.sqrt` matches
+    without the others
+
+The nearest one only: each is a rewrite to try, and they are offered in the
+order of how little they change. The head that is unknown to the index needs
+no new line — a constant that is nowhere a head is a barren condition and was
+already named as one. A pattern that fails only *with* a flag is still a
+combination, because there the flag is the thing to drop.

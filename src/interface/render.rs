@@ -146,6 +146,34 @@ pub fn find(hits: &Hits, long: bool) -> String {
                      name without its namespace — and that matches nothing either{others}\n"
                 )
             }
+            // A pattern is one thing to whoever wrote it, however many
+            // conditions it becomes inside, so the answer is about the pattern
+            // rather than about which flag to drop. One near miss and not all
+            // three: each is a rewrite to try, and they are offered in the
+            // order of how little they change.
+            Some(Empty::NoSuchShape { under, without, swapped }) => {
+                let near = if *swapped {
+                    "; the same two sides the other way round do".to_string()
+                } else if !under.is_empty() {
+                    let shown: Vec<String> = under
+                        .iter()
+                        .take(3)
+                        .map(|(c, n)| match n {
+                            1 => format!("`{c}`"),
+                            n => format!("`{c}` ({n})"),
+                        })
+                        .collect();
+                    format!("; those arguments go together under {}", shown.join(", "))
+                } else if without.len() > 1 {
+                    let shown: Vec<String> = without.iter().map(|n| format!("`{n}`")).collect();
+                    format!("; each of {} matches without the others", shown.join(", "))
+                } else if let Some(n) = without.first() {
+                    format!("; it matches with `{n}` written as `_`")
+                } else {
+                    String::new()
+                };
+                format!("no match: nothing has that shape{near}\n")
+            }
             // Naming a source is not optional in the repair: the dump is out
             // of date and nothing on disk has moved, so a bare `dt refresh`
             // reports that there is nothing to do.
@@ -636,6 +664,7 @@ fn first_line(s: &str, width: usize) -> std::borrow::Cow<'_, str> {
 mod tests {
     use super::*;
     use crate::domain::decl::Span;
+    use crate::domain::name::DeclName;
 
     fn hits(rows: Vec<Decl>) -> Hits {
         Hits { rows, truncated: false, empty: None, read_as: Vec::new() }
@@ -843,6 +872,48 @@ mod tests {
         let plain = find(&empty(Empty::Combination { elsewhere: Vec::new() }), false);
         assert!(plain.contains("every condition matches on its own; drop one"), "{plain}");
         assert!(!plain.contains("--in"), "{plain}");
+    }
+
+    /// The reader wrote one pattern, and "drop one condition" is an answer
+    /// about flags. What is wanted is the nearest shape that does match.
+    #[test]
+    fn a_shape_that_matches_nothing_says_what_nearly_does() {
+        let empty = |e: Empty| Hits {
+            rows: Vec::new(),
+            truncated: false,
+            empty: Some(e),
+            read_as: Vec::new(),
+        };
+        let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
+            find(
+                &empty(Empty::NoSuchShape {
+                    under: under.into_iter().map(|(c, n)| (DeclName::new(c), n)).collect(),
+                    without: without.into_iter().map(DeclName::new).collect(),
+                    swapped,
+                }),
+                false,
+            )
+        };
+
+        // The cheapest rewrite first: the same sides, written the other way.
+        let r = shape(vec![("Eq", 3)], vec!["Finset.sum"], true);
+        assert!(r.contains("the other way round"), "{r}");
+        assert!(!r.contains("Eq"), "one near miss, the nearest: {r}");
+
+        // Then the right arguments under the wrong relation.
+        let r = shape(vec![("HasDerivAt", 4), ("LE.le", 1)], vec!["Real.exp"], false);
+        assert!(r.contains("`HasDerivAt` (4), `LE.le`"), "a count of one is not worth a note: {r}");
+
+        // Then which argument to give up on.
+        let r = shape(vec![], vec!["Real.log", "Real.sqrt"], false);
+        assert!(r.contains("each of `Real.log`, `Real.sqrt` matches without"), "{r}");
+        let r = shape(vec![], vec!["Filter.atBot"], false);
+        assert!(r.contains("`Filter.atBot` written as `_`"), "{r}");
+
+        // And nothing is offered when nothing is near, which is still not
+        // "drop one": there is no flag here to drop.
+        let r = shape(vec![], vec![], false);
+        assert_eq!(r, "no match: nothing has that shape\n");
     }
 
     /// `--in Batteries` is not a prefix to correct, and telling the reader it

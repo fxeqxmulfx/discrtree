@@ -1,7 +1,7 @@
 //! `dt find` — shape search, the main mode, plus `dt dup`.
 
 use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
-use crate::domain::decl::{ArgHead, Decl, DeclKind};
+use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::{self, Query};
@@ -55,6 +55,28 @@ pub enum Empty {
     /// every instance as `def` -- so the flag is right, the index is old, and
     /// the repair is a re-dump rather than an edit to the query.
     InstancesAreDefs,
+    /// The pattern is the whole of why the search failed: on its own, with
+    /// every other condition dropped, it still matches nothing, and each
+    /// constant in it is in the index.
+    ///
+    /// "Drop one condition" is an answer about flags, and a pattern is one
+    /// thing to whoever wrote it however many conditions it becomes here.
+    /// `Real.log _ ≤ Real.sqrt _` has nothing to drop; what it has is three
+    /// near misses worth checking, and the search that failed already paid for
+    /// most of the work of checking them.
+    NoSuchShape {
+        /// Conclusion heads whose statements do take these arguments,
+        /// commonest first. The common near miss: the right two sides under
+        /// the wrong relation.
+        under: Vec<(DeclName, usize)>,
+        /// Argument heads that match once the others are written `_`. Empty
+        /// unless the pattern named at least two, where it is the difference
+        /// between "this constant is never an argument here" and "these
+        /// constants are never arguments together".
+        without: Vec<DeclName>,
+        /// The same arguments in the other order match.
+        swapped: bool,
+    },
     /// A bare word in the pattern is the last component of constants the index
     /// does hold, and none of them answered either. `export Inner (inner)`
     /// makes Lean print `inner` for `Inner.inner`, so a pattern copied back out
@@ -267,7 +289,77 @@ impl Find<'_> {
         if !barren.is_empty() {
             return Ok(Empty::Barren(barren));
         }
+        // Before "drop one", because when the shape fails on its own there is
+        // no other condition whose dropping would help, and the conditions a
+        // pattern was taken apart into are not ones the reader can drop.
+        if !query.shape.is_empty() && self.shape_fails_alone(query)? {
+            return self.no_such_shape(&query.shape);
+        }
         Ok(Empty::Combination { elsewhere: self.elsewhere(query)? })
+    }
+
+    /// Whether the pattern, with every flag dropped, still matches nothing.
+    fn shape_fails_alone(&self, query: &Query) -> Result<bool> {
+        let bare = Query { shape: query.shape.clone(), limit: 1, ..Query::new() };
+        // `Query` compares its conditions and nothing else, so this is "the
+        // pattern was the whole query" -- and then the search that already
+        // failed was the probe.
+        if bare == *query {
+            return Ok(true);
+        }
+        Ok(self.repo.find(&bare)?.is_empty())
+    }
+
+    /// The three near misses of a shape that matches nothing: the arguments in
+    /// the other order, the arguments under another relation, and the shape
+    /// with one argument left out.
+    fn no_such_shape(&self, shape: &Shape) -> Result<Empty> {
+        let hit = |args: Vec<ArgHead>| -> Result<bool> {
+            let shape = Shape { concl: shape.concl.clone(), args };
+            Ok(!self.repo.find(&Query { shape, limit: 1, ..Query::new() })?.is_empty())
+        };
+        let mut rev = shape.args.clone();
+        rev.reverse();
+        let swapped = rev != shape.args && hit(rev)?;
+        let named: Vec<usize> =
+            (0..shape.args.len()).filter(|i| matches!(shape.args[*i], ArgHead::Named(_))).collect();
+        let mut without = Vec::new();
+        // Only worth asking of a pattern that named two or more. With one, the
+        // answer is always "it matches without it", which says nothing beyond
+        // "that constant is never an argument here".
+        if named.len() > 1 {
+            for &i in &named {
+                let mut args = shape.args.clone();
+                args[i] = ArgHead::Any;
+                if hit(args)?
+                    && let ArgHead::Named(n) = &shape.args[i]
+                {
+                    without.push(n.clone());
+                }
+            }
+        }
+        Ok(Empty::NoSuchShape { under: self.under(shape)?, without, swapped })
+    }
+
+    /// Which conclusion heads do take these arguments, commonest first. One
+    /// search, and only for a pattern that named both a relation and at least
+    /// one argument -- without a relation there is nothing to be wrong about.
+    fn under(&self, shape: &Shape) -> Result<Vec<(DeclName, usize)>> {
+        if shape.concl.is_none() || !shape.args.iter().any(|a| matches!(a, ArgHead::Named(_))) {
+            return Ok(Vec::new());
+        }
+        const SPREAD: usize = 60;
+        let free = Shape { concl: None, args: shape.args.clone() };
+        let rows = self.repo.find(&Query { shape: free, limit: SPREAD, ..Query::new() })?;
+        let mut counts: BTreeMap<DeclName, usize> = BTreeMap::new();
+        for d in rows {
+            if let Some(c) = d.shape.concl {
+                *counts.entry(c).or_default() += 1;
+            }
+        }
+        let mut out: Vec<(DeclName, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+        Ok(out)
     }
 
     /// The modules the query matches once its `--in` is dropped, commonest

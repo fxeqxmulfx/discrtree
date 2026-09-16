@@ -71,7 +71,15 @@ impl App {
                 self.refresh(named(source, source_flag).as_deref())
             }
             Command::Status => self.status(),
-            Command::Show { names, import_only } => self.show(&names, import_only),
+            Command::Show { names, import_only, long } => {
+                if long {
+                    eprintln!(
+                        "dt: `--long` belongs to `dt find`; `show` prints the whole declaration \
+                         anyway, source and all"
+                    );
+                }
+                self.show(&names, import_only)
+            }
             Command::Deps { name, depth } => self.deps(&name, &depth),
             Command::Add { name, write, force } => self.add(&name, write, force),
             Command::Find(args) => self.find(&args),
@@ -781,9 +789,10 @@ fn query_of(a: &FindArgs) -> Result<Query> {
     if let Some(k) = &a.kind {
         q.kind = Some(crate::domain::decl::DeclKind::parse(k));
     }
-    if a.text.is_some() {
-        q.text = a.text.clone();
-    }
+    // Appended, not assigned: a pattern that could not be read as a shape has
+    // already put its own words here, and `--text` adds a condition rather
+    // than replacing the query.
+    q.text.extend(a.text.iter().flat_map(|s| s.split_whitespace()).map(str::to_string));
     // Asking for a shape means asking a question a text row cannot answer, so
     // the flag is implied rather than silently ignored.
     q.elaborated_only = a.elaborated || q.needs_shape();

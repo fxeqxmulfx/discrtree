@@ -590,15 +590,20 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     if q.no_sorry {
         where_clauses.push("d.sorry = 0".into());
     }
-    if let Some(t) = &q.text {
+    if !q.text.is_empty() {
         if has_fts {
+            // One MATCH for every word: FTS5 already ANDs the terms of a query,
+            // so the words go into one expression rather than one subquery each.
             where_clauses
                 .push("d.id IN (SELECT rowid FROM decl_fts WHERE decl_fts MATCH ?)".into());
-            binds.push(fts_query(t));
+            binds.push(fts_query(&q.text));
         } else {
-            where_clauses.push("(lower(d.type) LIKE ? OR lower(coalesce(d.doc,'')) LIKE ?)".into());
-            binds.push(format!("%{}%", t.to_lowercase()));
-            binds.push(format!("%{}%", t.to_lowercase()));
+            for t in &q.text {
+                where_clauses
+                    .push("(lower(d.type) LIKE ? OR lower(coalesce(d.doc,'')) LIKE ?)".into());
+                binds.push(format!("%{}%", t.to_lowercase()));
+                binds.push(format!("%{}%", t.to_lowercase()));
+            }
         }
     }
 
@@ -635,12 +640,10 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
 }
 
 /// FTS5 treats bare punctuation as syntax. Quoting every term makes a search
-/// for `↔` or `Real.exp` do what the user meant instead of failing.
-fn fts_query(text: &str) -> String {
-    text.split_whitespace()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// for `↔` or `Real.exp` do what the user meant instead of failing. Terms
+/// separated by a space are ANDed, which is what several `--text` mean.
+fn fts_query(words: &[String]) -> String {
+    words.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" ")
 }
 
 impl DeclSink for SqliteIndex {

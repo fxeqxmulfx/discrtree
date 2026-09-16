@@ -477,6 +477,68 @@ fn with_instances(elaborated_too: bool) -> FakeRepo {
     repo
 }
 
+/// A pattern is several conditions inside -- one conclusion head and one
+/// argument head each -- and one thing to whoever wrote it. `Real.log _ ≤
+/// Real.sqrt _` was answered "every condition matches on its own; drop one",
+/// and there is no flag there to drop. What is worth saying about a shape
+/// nothing has is which nearby shape something does.
+#[test]
+fn a_pattern_that_matches_nothing_is_answered_about_the_pattern() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let shaped = |name: &str, concl: &str, args: &[&str]| {
+        let mut d = theorem(name, "mathlib", "Mathlib.Analysis.Exp", concl, &[]);
+        d.shape = Shape::new(
+            Some(DeclName::new(concl)),
+            args.iter().map(|a| ArgHead::parse(a)).collect(),
+        );
+        d
+    };
+    // `≤` carries two leading type and instance arguments, as it does in the
+    // index; the alignment search is what gets past them.
+    let mut repo = FakeRepo {
+        decls: vec![
+            shaped("Real.log_le_self", "LE.le", &["_", "_", "Real.log", "_"]),
+            shaped("Real.le_sqrt", "LE.le", &["_", "_", "_", "Real.sqrt"]),
+            shaped("Real.log_eq_sqrt", "Eq", &["_", "Real.log", "Real.sqrt"]),
+        ],
+    };
+    let mut q = Query::new();
+    q.shape = Shape::new(
+        Some(DeclName::new("LE.le")),
+        vec![ArgHead::parse("Real.log"), ArgHead::parse("Real.sqrt")],
+    );
+
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    let Some(Empty::NoSuchShape { under, without, swapped }) = found else {
+        panic!("expected the shape to be diagnosed, got {found:?}")
+    };
+    assert!(!swapped, "nothing has these two under `LE.le` either way round");
+    assert_eq!(under, vec![(DeclName::new("Eq"), 1)], "the wrong relation, the right sides");
+    assert_eq!(
+        without,
+        vec![DeclName::new("Real.log"), DeclName::new("Real.sqrt")],
+        "either side matches without the other"
+    );
+
+    // And when the index has the two sides the other way round, that is the
+    // whole of the answer: one character to fix rather than a search to redo.
+    repo.decls.push(shaped("Real.sqrt_le_log", "LE.le", &["_", "_", "Real.sqrt", "Real.log"]));
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    assert!(matches!(found, Some(Empty::NoSuchShape { swapped: true, .. })), "got {found:?}");
+}
+
+/// A pattern that fails *with* a flag is still a combination: the flag is
+/// there to be dropped, and the shape is not what is wrong.
+#[test]
+fn a_pattern_that_matches_on_its_own_is_still_blamed_on_the_combination() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.shape = discrtree::domain::decl::Shape::new(Some(DeclName::new("LE.le")), Vec::new());
+    q.module = Some("Other".into());
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    assert!(matches!(found, Some(Empty::Combination { .. })), "got {found:?}");
+}
+
 /// Lean has no `instance` constant: an instance is a `def` with an attribute,
 /// and a dump that read only the constructor recorded every one of them as
 /// `def`. `--kind instance` then selected the text-scanned rows and nothing

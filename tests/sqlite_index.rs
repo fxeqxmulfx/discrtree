@@ -491,7 +491,7 @@ fn filled(db: &mut SqliteIndex) {
 
 fn text_matches(db: &SqliteIndex, word: &str) -> Vec<String> {
     let mut q = Query::new();
-    q.text = Some(word.to_string());
+    q.text = vec![word.to_string()];
     db.find(&q).unwrap().iter().map(|d| d.name.to_string()).collect()
 }
 
