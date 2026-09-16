@@ -632,6 +632,38 @@ fn a_word_in_lower_case_that_names_nothing_is_a_variable() {
     }
 }
 
+/// `--text Finset.sum` reads printed types, which say `∑`, and docstrings,
+/// which a lemma about a sum rarely has; with `--name HasDerivAt` that was
+/// no match, where `--uses Finset.sum` finds `HasDerivAt.sum`.
+#[test]
+fn a_constant_given_as_text_is_searched_for_as_a_use_when_the_text_finds_nothing() {
+    let mut repo = repo();
+    let mut sum = theorem("HasDerivAt.sum", "mathlib", "Mathlib.Deriv", "HasDerivAt", &[]);
+    sum.ty = "HasDerivAt (fun y => ∑ i ∈ u, A i y) (∑ i ∈ u, A' i) x".into();
+    sum.consts = vec![DeclName::new("HasDerivAt"), DeclName::new("Finset.sum")];
+    let mut defn = theorem("Finset.sum", "mathlib", "Mathlib.BigOperators", "Finset.sum", &[]);
+    defn.doc = Some("`Finset.sum s f` is the sum of `f x` over `x ∈ s`.".into());
+    repo.decls.extend([sum, defn]);
+    let find = Find { repo: &repo, build: &NoBuild };
+    let query = |name: Option<&str>, text: &str| Query {
+        name: name.map(str::to_owned),
+        text: vec![text.to_owned()],
+        ..Query::new()
+    };
+
+    let hits = find.run(&query(Some("HasDerivAt"), "Finset.sum")).unwrap();
+    assert_eq!(hits.rows.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["HasDerivAt.sum"]);
+    assert_eq!(hits.text_as_uses, ["Finset.sum"]);
+
+    // The text that answers as written is left alone.
+    let hits = find.run(&query(None, "Finset.sum")).unwrap();
+    assert!(hits.text_as_uses.is_empty());
+    assert_eq!(hits.rows.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Finset.sum"]);
+    // And a word that is no constant is not read as one.
+    let hits = find.run(&query(Some("HasDerivAt"), "Finset.nothing")).unwrap();
+    assert!(hits.text_as_uses.is_empty() && hits.rows.is_empty());
+}
+
 /// An index whose text rows are the only ones marked `instance`.
 fn with_instances(elaborated_too: bool) -> FakeRepo {
     let mut repo = repo();

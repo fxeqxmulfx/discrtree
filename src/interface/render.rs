@@ -795,7 +795,14 @@ mod tests {
     use crate::domain::name::DeclName;
 
     fn hits(rows: Vec<Decl>) -> Hits {
-        Hits { rows, truncated: false, empty: None, read_as: Vec::new(), variables: Vec::new() }
+        Hits {
+            rows,
+            truncated: false,
+            empty: None,
+            read_as: Vec::new(),
+            variables: Vec::new(),
+            text_as_uses: Vec::new(),
+        }
     }
 
     fn decl(elaborated: bool) -> Decl {
@@ -840,6 +847,7 @@ mod tests {
                 empty: None,
                 read_as: Vec::new(),
                 variables: Vec::new(),
+                text_as_uses: Vec::new(),
             },
             false,
         );
@@ -933,6 +941,7 @@ mod tests {
                 }),
                 read_as: Vec::new(),
                 variables: Vec::new(),
+                text_as_uses: Vec::new(),
             },
             false,
         );
@@ -967,6 +976,7 @@ mod tests {
                 empty: Some(Empty::InstancesAreDefs),
                 read_as: Vec::new(),
                 variables: Vec::new(),
+                text_as_uses: Vec::new(),
             },
             false,
         );
@@ -986,6 +996,7 @@ mod tests {
             empty: Some(e),
             read_as: Vec::new(),
             variables: Vec::new(),
+            text_as_uses: Vec::new(),
         };
         let r = find(
             &empty(Empty::Combination {
@@ -1021,6 +1032,7 @@ mod tests {
             empty: Some(e),
             read_as: Vec::new(),
             variables: Vec::new(),
+            text_as_uses: Vec::new(),
         };
         let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
             find(
@@ -1064,6 +1076,7 @@ mod tests {
                     empty: Some(e),
                     read_as: Vec::new(),
                     variables: Vec::new(),
+                    text_as_uses: Vec::new(),
                 },
                 false,
             )
@@ -1138,6 +1151,7 @@ mod tests {
             empty: Some(e),
             read_as: Vec::new(),
             variables: Vec::new(),
+            text_as_uses: Vec::new(),
         };
         let r = find(
             &empty(Empty::NotIndexed {
@@ -1189,6 +1203,7 @@ mod tests {
                 }),
                 read_as: Vec::new(),
                 variables: Vec::new(),
+                text_as_uses: Vec::new(),
             },
             false,
         );
@@ -1211,6 +1226,7 @@ mod tests {
                 }),
                 read_as: Vec::new(),
                 variables: Vec::new(),
+                text_as_uses: Vec::new(),
             },
             false,
         );

@@ -163,6 +163,11 @@ pub struct Hits {
     /// Words of the pattern read as variables on that second look, for the
     /// same reason. See [`Reading::variables`].
     pub variables: Vec<String>,
+    /// `--text` words searched for as `--uses` instead, for the same reason:
+    /// a constant's name, which a type prints as its notation. `Finset.sum`
+    /// is `∑ i ∈ s, f i` in every statement about it, and only a docstring
+    /// spells it out.
+    pub text_as_uses: Vec<String>,
 }
 
 /// What the words of a pattern that found nothing were read as, the second
@@ -265,6 +270,27 @@ impl Find<'_> {
                 }
             }
         }
+        let mut text_as_uses = Vec::new();
+        if rows.is_empty() && !asked.text.is_empty() {
+            let mut retry = asked.clone();
+            for t in &asked.text {
+                let name = DeclName::new(t.as_str());
+                // Dotted, so that a word like `exp` or `id` -- a constant, and
+                // also a word a docstring means as a word -- stays text.
+                if t.contains('.') && self.repo.is_constant(&name)? {
+                    text_as_uses.push(t.clone());
+                    retry.uses.push(name);
+                }
+            }
+            retry.text.retain(|t| !text_as_uses.contains(t));
+            if !text_as_uses.is_empty() {
+                let found = self.repo.find(&retry)?;
+                match found.is_empty() {
+                    true => text_as_uses.clear(),
+                    false => (rows, asked) = (found, retry),
+                }
+            }
+        }
         rows.sort_by_key(|d| query::rank(&asked, d));
         let truncated = rows.len() > asked.limit;
         rows.truncate(asked.limit);
@@ -272,7 +298,7 @@ impl Find<'_> {
             true => Some(self.diagnose(&asked, &reading.called)?),
             false => None,
         };
-        Ok(Hits { rows, truncated, empty, read_as, variables })
+        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses })
     }
 
     /// The constants each bare word in the pattern could be naming, commonest

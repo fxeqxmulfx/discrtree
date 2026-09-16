@@ -327,6 +327,12 @@ impl App {
                 hits.variables.join("`, `")
             );
         }
+        for t in &hits.text_as_uses {
+            eprintln!(
+                "dt: --text {t} read as --uses {t} — a type prints a constant as its notation, \
+                 and only a docstring spells the name"
+            );
+        }
         print!("{}", render::find(&hits, args.long));
         let from = match hits.rows.is_empty() {
             false => hits.rows.iter().map(|d| d.source.clone()).collect(),

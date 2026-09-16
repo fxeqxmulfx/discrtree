@@ -2417,3 +2417,17 @@ docstrings that spell the name out, and a type never does: it prints
 constants is `--uses`.
 
 Seen with dt 0.46.0, 2026-09-16.
+
+Fixed in 0.47.0.  When a query finds nothing, each dotted `--text` word that
+names a constant is searched for as `--uses` instead, and stderr says so:
+
+    $ dt find --name HasDerivAt --text Finset.sum
+    dt: --text Finset.sum read as --uses Finset.sum — a type prints a constant as its notation, and only a docstring spells the name
+    HasDerivAt.pow'  theorem  Mathlib.Analysis.Calculus.Deriv.Pow
+    HasDerivAt.sum  theorem  Mathlib.Analysis.Calculus.Deriv.Add
+    …
+
+A text that finds rows as written is left alone, and so is an undotted word
+(`exp`, `id`), which a docstring may mean as a word.  This also answers the
+older entry: its query was this one, and the ranked union it proposed is not
+needed once the text is read as the constant it names.
