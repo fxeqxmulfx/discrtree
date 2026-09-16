@@ -7,7 +7,7 @@ use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::{SourceId, SourceMeta, Sources};
 use crate::error::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Reading the index.
@@ -228,6 +228,12 @@ pub trait Revisions {
     /// as the source spells them at those lines now. `None` when any of them
     /// cannot be read, and for the same sources as [`Revisions::rebuilt_since`].
     fn declared_since(&self, _source: &SourceId, _since: u64) -> Option<Declared> {
+        None
+    }
+
+    /// The modules of this build that `source`'s root imports, itself
+    /// included: what a dump of it can see. `None` when that cannot be read.
+    fn imported(&self, _source: &SourceId) -> Option<BTreeSet<ModuleName>> {
         None
     }
 }

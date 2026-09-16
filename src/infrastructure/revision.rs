@@ -24,7 +24,7 @@ use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::source::SourceId;
 use crate::error::Result;
 use crate::infrastructure::config::{Config, Kind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub struct OnDisk {
@@ -40,6 +40,8 @@ pub struct OnDisk {
     /// Source → the directory its modules' `.lean` files are under, for the
     /// sources compiled here.
     pub texts: BTreeMap<SourceId, PathBuf>,
+    /// Source → the module its dump imports, for the sources compiled here.
+    pub roots: BTreeMap<SourceId, ModuleName>,
 }
 
 impl OnDisk {
@@ -74,12 +76,21 @@ impl OnDisk {
             .filter(|s| s.kind == Kind::Local)
             .map(|s| (SourceId::new(s.name.clone()), cfg.source_dir(s)))
             .collect();
+        let roots = cfg
+            .sources
+            .iter()
+            .filter(|s| s.kind == Kind::Local)
+            .filter_map(|s| {
+                Some((SourceId::new(s.name.clone()), ModuleName::new(s.root_module()?)))
+            })
+            .collect();
         OnDisk {
             checkouts,
             builds,
             manifest: manifest(&cfg.root().join("lake-manifest.json")),
             toolchains,
             texts,
+            roots,
         }
     }
 }
@@ -166,7 +177,9 @@ impl Revisions for OnDisk {
             );
             let ilean = std::fs::read_to_string(olean.with_extension("ilean")).ok()?;
             let json: serde_json::Value = serde_json::from_str(&ilean).ok()?;
-            let mut source_text = None;
+            // A module whose file is gone cannot say what it states; whether that
+            // matters is for the caller, which knows what the root imports.
+            let mut source_text: Option<Option<String>> = None;
             let decls = out.entry(module.clone()).or_default();
             for (name, range) in json.get("decls")?.as_object()? {
                 if name.starts_with("_private.") {
@@ -174,15 +187,38 @@ impl Revisions for OnDisk {
                 }
                 let line = |i: usize| Some(u32::try_from(range.get(i)?.as_u64()?).ok()? + 1);
                 let span = Span::new(line(0)?, line(2)?);
-                if source_text.is_none() {
-                    let path = texts.join(module.relative_path());
-                    source_text = Some(std::fs::read_to_string(path).ok()?);
-                }
-                let statement = lean_text::spelled_statement(source_text.as_deref()?, span);
+                let text = source_text.get_or_insert_with(|| {
+                    std::fs::read_to_string(texts.join(module.relative_path())).ok()
+                });
+                let statement = text.as_deref().and_then(|t| lean_text::spelled_statement(t, span));
                 decls.insert(DeclName::new(name.clone()), Located { span: Some(span), statement });
             }
         }
         Some(out)
+    }
+
+    /// By the `directImports` of each `.ilean`, from the root's down. A module
+    /// with no `.ilean` in this build is another package's, and its imports
+    /// are not this source's modules.
+    fn imported(&self, source: &SourceId) -> Option<BTreeSet<ModuleName>> {
+        let lib = self.builds.get(source)?;
+        let root = [lib.join("lean"), lib.clone()].into_iter().find(|d| d.is_dir())?;
+        let mut seen = BTreeSet::new();
+        let mut todo = vec![self.roots.get(source)?.clone()];
+        while let Some(module) = todo.pop() {
+            let rel = module.relative_path().with_extension("ilean");
+            let Ok(ilean) = std::fs::read_to_string(root.join(rel)) else { continue };
+            if !seen.insert(module) {
+                continue;
+            }
+            let json: serde_json::Value = serde_json::from_str(&ilean).ok()?;
+            for import in json.get("directImports")?.as_array()? {
+                let name = import.get(0)?.as_str()?;
+                todo.push(ModuleName::new(name));
+            }
+        }
+        // Without the root's own `.ilean` nothing is known to be imported.
+        seen.contains(self.roots.get(source)?).then_some(seen)
     }
 }
 

@@ -191,12 +191,22 @@ fn indexed_as_built(repo: &dyn DeclRepo, revisions: &dyn Revisions, s: &Stale) -
     if declared.is_empty() {
         return Ok(false);
     }
+    // Read only when a module differs: a module the root does not import
+    // differs from an index that never held it, and no refresh would change
+    // that.
+    let mut imported = None;
     for (module, decls) in &declared {
         let Some(rows) = repo.located_in(&s.id, module)? else { return Ok(false) };
         let indexed = |(name, built): (&DeclName, &Located)| {
             built.span.is_some() && built.statement.is_some() && rows.get(name) == Some(built)
         };
-        if !decls.iter().all(indexed) {
+        if decls.iter().all(indexed) {
+            continue;
+        }
+        let Some(imported) = imported.get_or_insert_with(|| revisions.imported(&s.id)) else {
+            return Ok(false);
+        };
+        if imported.contains(module) {
             return Ok(false);
         }
     }

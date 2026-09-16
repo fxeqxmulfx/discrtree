@@ -507,6 +507,7 @@ fn a_shown_row_is_stale_only_when_its_own_module_was_rebuilt() {
         manifest: Default::default(),
         toolchains: Default::default(),
         texts: Default::default(),
+        roots: Default::default(),
     };
     let shown = |module: &str| {
         let mut rows = std::collections::BTreeMap::new();
@@ -569,6 +570,7 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
         manifest: Default::default(),
         toolchains: Default::default(),
         texts: [(id.clone(), src.clone())].into(),
+        roots: [(id.clone(), ModuleName::new("Transformer"))].into(),
     };
     let statements = disk.spelled_statements(&db, &id, std::slice::from_ref(&module)).unwrap();
     assert_eq!(statements[0].2, "theorem depth_le (f : Form) : f.depth ≤ 1");
@@ -603,6 +605,61 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
     // read, so no statement is kept for it.
     save(proved, now + std::time::Duration::from_secs(100));
     assert!(disk.spelled_statements(&db, &id, &[module]).unwrap().is_empty());
+}
+
+/// A module the root does not import is never dumped, so rebuilding it cannot
+/// leave the index behind: its declarations were never rows to begin with.
+#[test]
+fn a_rebuilt_module_the_root_does_not_import_is_not_stale_for_a_search() {
+    let dir = TempDir::new("dt-imports");
+    let lib = dir.path().join(".lake/build/lib");
+    let pkg = lib.join("lean/Transformer");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::create_dir_all(src.join("Transformer")).unwrap();
+    std::fs::write(src.join("Transformer/Other.lean"), "theorem side : True := trivial\n").unwrap();
+    let imports = |modules: &[&str]| {
+        let listed: Vec<String> =
+            modules.iter().map(|m| format!(r#"["{m}",false,false,false]"#)).collect();
+        let json =
+            format!(r#"{{"version":5,"directImports":[{}],"decls":{{}}}}"#, listed.join(","));
+        std::fs::write(lib.join("lean/Transformer.ilean"), json).unwrap();
+    };
+    imports(&["Init"]);
+    std::fs::write(pkg.join("Other.olean"), "compiled").unwrap();
+    let dumped = revision::build_stamp(&lib).unwrap();
+    let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(100);
+    let indexed_at = ago.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    let id = SourceId::new("project");
+    let mut db = SqliteIndex::in_memory().unwrap();
+    db.put(&[theorem("T.root", "project", "Transformer", "True", &[])]).unwrap();
+    db.finish().unwrap();
+    let was =
+        Provenance { revision: Some(dumped), indexed_at, decls: 1, ..Provenance::by_this_build() };
+    db.record(&id, &was).unwrap();
+    let disk = revision::OnDisk {
+        checkouts: Default::default(),
+        builds: [(id.clone(), lib.clone())].into(),
+        manifest: Default::default(),
+        toolchains: Default::default(),
+        texts: [(id.clone(), src.clone())].into(),
+        roots: [(id.clone(), ModuleName::new("Transformer"))].into(),
+    };
+
+    std::fs::write(pkg.join("Other.olean"), "compiled again").unwrap();
+    std::fs::write(
+        pkg.join("Other.ilean"),
+        r#"{"version":5,"directImports":[],"decls":{"side":[0,0,0,30,0,8,0,12]}}"#,
+    )
+    .unwrap();
+    let stale = || status::stale_for_search(&db, &disk, [id.clone()]).unwrap().len();
+    assert_eq!(stale(), 0, "no dump reaches it");
+    std::fs::remove_file(src.join("Transformer/Other.lean")).unwrap();
+    assert_eq!(stale(), 0, "nor its build left behind when its file went");
+    std::fs::write(src.join("Transformer/Other.lean"), "theorem side : True := trivial\n").unwrap();
+    imports(&["Init", "Transformer.Other"]);
+    assert_eq!(stale(), 1, "once imported, its declarations belong in the index");
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,

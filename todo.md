@@ -2493,3 +2493,15 @@ root and leaves the module out again.  The line then goes away only because
 the refresh moved the index's timestamp past the module's `.olean`.
 
 Seen with dt 0.49.0, 2026-09-16.
+
+Fixed in 0.50.0.  When a rebuilt module declares what the index lacks, the
+search now follows `directImports` in the `.ilean` files from the source's
+`root` down, and a module that is not reached is left out of the question: no
+dump of the root can hold its rows.  A root without an `.ilean` still prints
+the line.  An `.olean` whose `.lean` file is gone is read the same way; in
+the transformer project that is `Section1_Antipodal`, renamed to
+`Section1_IPS`, whose build was left behind.  On a copy of the transformer
+project:
+
+    Section1_Antipodal.olean touched     no line (printed with 0.49.0)
+    CRASP/Frame.olean touched            line printed
