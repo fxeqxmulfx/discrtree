@@ -65,7 +65,7 @@ fn files() -> FakeFiles {
 #[test]
 fn show_gives_the_import_that_actually_provides_the_declaration() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("Real.exp_le_exp"))
         .unwrap();
     assert_eq!(shown.import.as_deref(), Some("import Mathlib.Analysis.Exp"));
@@ -110,7 +110,7 @@ fn generated() -> (FakeRepo, FakeFiles) {
 fn show_names_the_declaration_a_generated_one_came_out_of() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("Finset.sum_image"))
         .unwrap();
     let Source::Generated { inside, .. } = &shown.source else {
@@ -127,7 +127,7 @@ fn show_names_the_declaration_a_generated_one_came_out_of() {
 fn show_walks_past_a_container_that_was_itself_generated() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("Hom.mk"))
         .unwrap();
     let Source::Generated { inside, .. } = &shown.source else {
@@ -144,7 +144,7 @@ fn show_walks_past_a_container_that_was_itself_generated() {
 fn show_still_answers_when_nothing_encloses_the_generated_lines() {
     let (repo, files) = generated();
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("Eq.ge"))
         .unwrap();
     let Source::Generated { inside, head } = &shown.source else {
@@ -171,7 +171,7 @@ fn show_prints_the_source_of_a_declaration_whose_command_it_does_not_know() {
         "/-- The Bochner integral -/\nirreducible_def integral (\u{3bc} : Measure \u{3b1}) : G :=\n  if hG : CompleteSpace G then \u{2026} else 0\n",
     );
     let ws = workspace();
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("MeasureTheory.integral"))
         .unwrap();
     let Source::Text(t) = &shown.source else {
@@ -183,16 +183,43 @@ fn show_prints_the_source_of_a_declaration_whose_command_it_does_not_know() {
 #[test]
 fn show_offers_no_import_for_a_source_that_cannot_be_imported() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let shown = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("FLT.guessed"))
         .unwrap();
     assert!(shown.import.is_none(), "a text corpus is not on the import path");
 }
 
+/// `AddSubgroup.inertia_mono` is in Mathlib and, read as text, in FLT, as
+/// `Real.exp_le_exp` is here. The compiled row answers unless a source is asked
+/// for, and a source without the name says which sources have it.
+#[test]
+fn show_from_a_source_takes_the_row_that_source_has() {
+    let mut repo = repo();
+    let mut copy = theorem("Real.exp_le_exp", "flt", "FLT.Basic", "Eq", &[]);
+    copy.elaborated = false;
+    repo.decls.insert(0, copy);
+    let (files, ws) = (files(), workspace());
+    let show = |name: &str, only_in: Option<&SourceId>| {
+        Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in }
+            .run(&DeclName::new(name))
+    };
+
+    assert_eq!(show("Real.exp_le_exp", None).unwrap().decl.source, SourceId::new("mathlib"));
+    let flt = SourceId::new("flt");
+    let shown = show("Real.exp_le_exp", Some(&flt)).unwrap();
+    assert_eq!(shown.decl.source, flt);
+    assert!(shown.import.is_none(), "the import is that row's too");
+
+    let err = show("Real.exp_le_exp", Some(&SourceId::new("other"))).unwrap_err().to_string();
+    assert_eq!(err, "Real.exp_le_exp is in `flt`, `mathlib`, not in `other`");
+    let err = show("No.such", Some(&flt)).unwrap_err().to_string();
+    assert!(err.contains("not in the index"), "a name no source has is not a wrong source: {err}");
+}
+
 #[test]
 fn show_says_which_name_it_could_not_find() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("No.such"))
         .unwrap_err()
         .to_string();
@@ -681,7 +708,7 @@ fn a_prefix_inside_an_indexed_source_still_says_to_correct_it() {
 fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
     let (repo, files, ws) = (repo(), files(), workspace());
     let build = FakeBuild::with(&[("batteries", "Batteries")]);
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Batteries.RBNode.Balanced"))
         .unwrap_err()
         .to_string();
@@ -689,7 +716,7 @@ fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
     assert!(!err.contains("try `dt find"), "the retry is the dead end: {err}");
 
     // A name that is simply not there keeps the advice that does work.
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Real.exp_nowhere"))
         .unwrap_err()
         .to_string();
@@ -720,7 +747,7 @@ fn status_names_the_packages_no_source_covers() {
 fn a_name_from_lean_core_says_so_rather_than_sending_the_reader_to_name_search() {
     let (repo, files, ws) = (repo(), files(), workspace());
     let build = FakeBuild::with(&[]).without_core();
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Int.add_one_le_iff"))
         .unwrap_err()
         .to_string();
@@ -731,7 +758,7 @@ fn a_name_from_lean_core_says_so_rather_than_sending_the_reader_to_name_search()
     // And a namespace core does not own keeps the advice that works. The list
     // is narrow on purpose: an explanation that fits every missing name
     // explains nothing.
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build }
+    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Real.exp_nowhere"))
         .unwrap_err()
         .to_string();

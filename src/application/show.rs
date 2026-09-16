@@ -11,7 +11,9 @@ use crate::application::ports::{Build, DeclRepo, SourceFiles, Workspace};
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::DeclName;
+use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct Shown {
@@ -56,11 +58,25 @@ pub struct Show<'a> {
     /// Consulted only when the name is missing, to tell a name the index does
     /// not have from a corpus the index never had.
     pub build: &'a dyn Build,
+    /// The source to take the row from. A name is nearly always in one, and
+    /// without this a name a text corpus shares with a compiled source is
+    /// shown from the compiled one.
+    pub only_in: Option<&'a SourceId>,
 }
 
 impl Show<'_> {
     pub fn run(&self, name: &DeclName) -> Result<Shown> {
-        let Some(decl) = self.repo.get(name)? else {
+        let rows = self.repo.named(name)?;
+        let Some(decl) = rows.iter().find(|d| self.only_in.is_none_or(|s| &d.source == s)) else {
+            // In another source the name is right and the source is not, and
+            // the sources that have it are the correction.
+            if let Some(s) = self.only_in
+                && !rows.is_empty()
+            {
+                let has: BTreeSet<String> =
+                    rows.iter().map(|d| format!("`{}`", d.source)).collect();
+                bail!("{name} is in {}, not in `{s}`", Vec::from_iter(has).join(", "))
+            }
             // `try --name` is good advice only when the name might be in the
             // index under a different spelling. When the namespace belongs to a
             // package nothing indexed, that search returns the same nothing, or
@@ -74,8 +90,8 @@ impl Show<'_> {
         let import =
             self.workspace.sources.importable(&decl.source).then(|| decl.module.import_line());
 
-        let source = self.source_of(&decl)?;
-        Ok(Shown { decl, import, source })
+        let source = self.source_of(decl)?;
+        Ok(Shown { decl: decl.clone(), import, source })
     }
 
     fn source_of(&self, decl: &Decl) -> Result<Source> {

@@ -192,6 +192,9 @@ fn an_elaborated_row_wins_over_a_text_row_with_the_same_name() {
     assert!(got.elaborated, "the guessed answer must not shadow the elaborated one");
     assert_eq!(got.source, SourceId::new("mathlib"));
     assert_eq!(db.count().unwrap(), 2, "both rows are kept; they answer different questions");
+    let sources: Vec<SourceId> =
+        db.named(&DeclName::new("Foo.bar")).unwrap().into_iter().map(|d| d.source).collect();
+    assert_eq!(sources, [SourceId::new("mathlib"), SourceId::new("flt")], "elaborated first");
 }
 
 #[test]

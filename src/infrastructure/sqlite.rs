@@ -396,18 +396,14 @@ impl SqliteIndex {
 }
 
 impl DeclRepo for SqliteIndex {
-    fn get(&self, name: &DeclName) -> Result<Option<Decl>> {
-        // Compiled rows win over text rows for the same name: an elaborated
-        // answer is strictly better than a guessed one.
-        let mut decl = self
+    fn named(&self, name: &DeclName) -> Result<Vec<Decl>> {
+        let mut decls = self
             .conn
-            .prepare_cached("SELECT * FROM decl WHERE name = ?1 ORDER BY elaborated DESC LIMIT 1")?
-            .query_row(params![name.as_str()], decl_from_row)
-            .optional()?;
-        if let Some(d) = decl.as_mut() {
-            self.attach_lists(std::slice::from_mut(d))?;
-        }
-        Ok(decl)
+            .prepare_cached("SELECT * FROM decl WHERE name = ?1 ORDER BY elaborated DESC")?
+            .query_map(params![name.as_str()], decl_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.attach_lists(&mut decls)?;
+        Ok(decls)
     }
 
     /// One scan of `decl`, counted in Rust.

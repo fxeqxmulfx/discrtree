@@ -11,7 +11,16 @@ use std::path::{Path, PathBuf};
 
 /// Reading the index.
 pub trait DeclRepo {
-    fn get(&self, name: &DeclName) -> Result<Option<Decl>>;
+    /// Every row called `name`, the elaborated ones first. There is one for
+    /// each source and module that declares it: a text corpus can hold a name
+    /// a compiled source has too, and Lean makes a `congr_simp` again in every
+    /// module that needs one.
+    fn named(&self, name: &DeclName) -> Result<Vec<Decl>>;
+    /// The row a name means when no source is asked for: an elaborated one,
+    /// because an elaborated answer is strictly better than a guessed one.
+    fn get(&self, name: &DeclName) -> Result<Option<Decl>> {
+        Ok(self.named(name)?.into_iter().next())
+    }
     fn find(&self, query: &Query) -> Result<Vec<Decl>>;
     /// Resolve many names at once. Separate from `get` because the closure walk
     /// asks for thousands and a per-name round trip dominates the run.

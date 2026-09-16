@@ -1979,6 +1979,33 @@ name up in every source.
 
 Seen with dt 0.36.0, 2026-09-16.
 
+Fixed in 0.38.0.  `show` takes `--source` and shows the row that source has.
+That is a filter and not only a check: 426 names are in more than one row of
+the index, nine of them in more than one source, and `AddSubgroup.inertia_mono`
+is in Mathlib and, read as text, in FLT.  Without the flag the compiled row
+answers, as it always has; with it the text one does:
+
+    $ dt show --source flt AddSubgroup.inertia_mono
+    -- source `flt` is not importable; `dt add AddSubgroup.inertia_mono` copies it instead
+
+    AddSubgroup.inertia_mono  [text]
+      theorem  Definitions.Def_Mathlib_RingTheory_Valuation_LowerRamificationGroup:11-12
+    …
+
+A source without the name says which sources have it, and a batch goes on past
+that miss as it goes on past any other:
+
+    $ dt show --source project AddSubgroup.inertia_mono
+    dt: AddSubgroup.inertia_mono is in `flt`, `mathlib`, not in `project`
+
+    $ dt show --import-only --source mathlib Real.exp_le_exp List.length
+    import Mathlib.Analysis.Complex.Exponential
+    dt: List.length is in `core`, not in `mathlib`
+
+The stale-index warning after a miss checks that source alone, the one the
+name was looked for in, and a source that is not configured is refused as
+`find` refuses it.
+
 ---
 
 ## Field notation is read as a name, and names nothing

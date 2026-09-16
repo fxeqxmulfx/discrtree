@@ -207,6 +207,10 @@ pub enum Command {
         /// Print only the import lines, deduplicated.
         #[arg(long)]
         import_only: bool,
+        /// Take each declaration from this source, as named in discrtree.toml.
+        /// A name in two sources is shown from the compiled one otherwise.
+        #[arg(long, value_name = "SOURCE")]
+        source: Option<String>,
         /// Accepted and ignored. `--long` is a `find` flag, and `show` is
         /// already long: it prints the declaration's own source, docstring and
         /// proof included. Taken rather than refused because refusing it costs
@@ -394,5 +398,15 @@ mod tests {
         assert!(err.contains("'--elaborted'"), "{err}");
         assert!(read(&["dt", "find", "-vx"]).is_err(), "letters after a `-` are flags");
         assert!(read(&["dt", "find", "--limit", "-1"]).is_err(), "and a value is not a pattern");
+    }
+
+    /// `find --source` is followed by a `show` of what it found, and the flag
+    /// carries over.
+    #[test]
+    fn show_takes_the_source_find_does() {
+        let argv = ["dt", "show", "--source", "project", "Transformer.CRASP.altPlus", "A.b"];
+        let Command::Show { names, source, .. } = read(&argv).unwrap().command else { panic!() };
+        assert_eq!(source.as_deref(), Some("project"));
+        assert_eq!(names, ["Transformer.CRASP.altPlus", "A.b"]);
     }
 }

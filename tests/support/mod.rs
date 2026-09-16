@@ -106,8 +106,10 @@ pub struct FakeRepo {
 }
 
 impl DeclRepo for FakeRepo {
-    fn get(&self, name: &DeclName) -> Result<Option<Decl>> {
-        Ok(self.decls.iter().find(|d| &d.name == name).cloned())
+    fn named(&self, name: &DeclName) -> Result<Vec<Decl>> {
+        let mut rows: Vec<Decl> = self.decls.iter().filter(|d| &d.name == name).cloned().collect();
+        rows.sort_by_key(|d| !d.elaborated);
+        Ok(rows)
     }
 
     fn find(&self, query: &Query) -> Result<Vec<Decl>> {

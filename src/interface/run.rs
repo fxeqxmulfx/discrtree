@@ -73,14 +73,14 @@ impl App {
                 self.refresh(named(source, source_flag).as_deref())
             }
             Command::Status => self.status(),
-            Command::Show { names, import_only, long } => {
+            Command::Show { names, import_only, source, long } => {
                 if long {
                     eprintln!(
                         "dt: `--long` belongs to `dt find`; `show` prints the whole declaration \
                          anyway, source and all"
                     );
                 }
-                self.show(&names, import_only)
+                self.show(&names, import_only, source.map(SourceId::new).as_ref())
             }
             Command::Deps { name, depth } => self.deps(&name, &depth),
             Command::Rdeps { name, module, source, generated, limit } => {
@@ -134,10 +134,7 @@ impl App {
     /// from outside.
     fn check_source(&self, query: &Query) -> Result<()> {
         let Some(s) = &query.source else { return Ok(()) };
-        if self.workspace.sources.get(s).is_none() {
-            let known: Vec<&str> = self.workspace.sources.iter().map(|m| m.id.as_str()).collect();
-            bail!("no source `{s}`; configured sources are {}", known.join(", "))
-        }
+        self.known_source(s)?;
         if query.needs_shape() && !self.workspace.sources.elaborated(s) {
             bail!(
                 "source `{s}` is text, and a shape can only be matched against elaborated rows; \
@@ -147,12 +144,23 @@ impl App {
         Ok(())
     }
 
+    fn known_source(&self, s: &SourceId) -> Result<()> {
+        if self.workspace.sources.get(s).is_none() {
+            let known: Vec<&str> = self.workspace.sources.iter().map(|m| m.id.as_str()).collect();
+            bail!("no source `{s}`; configured sources are {}", known.join(", "))
+        }
+        Ok(())
+    }
+
     /// A batch is not all-or-nothing. `dt show A B C` exists so an agent can pay
     /// for one round trip instead of three; failing the whole batch because one
     /// name was misremembered would hand back three round trips again. Misses go
     /// to stderr, so `--import-only` still redirects into a file cleanly, and an
     /// empty batch is still an error.
-    fn show(&self, names: &[String], import_only: bool) -> Result<()> {
+    fn show(&self, names: &[String], import_only: bool, only_in: Option<&SourceId>) -> Result<()> {
+        if let Some(s) = only_in {
+            self.known_source(s)?;
+        }
         let repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
         let show = Show {
@@ -160,6 +168,7 @@ impl App {
             files: &self.files,
             workspace: &self.workspace,
             build: &build,
+            only_in,
         };
         let mut shown = Vec::new();
         let mut missed = Vec::new();
@@ -171,8 +180,9 @@ impl App {
         }
         if shown.is_empty() {
             // Every name missed, which is the case the warning is for: check
-            // every source before handing back "not in the index".
-            self.warn_stale(repo.as_ref(), BTreeSet::new());
+            // every source it was looked for in before handing back "not in
+            // the index".
+            self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
             return Err(missed.into_iter().next().expect("a batch has at least one name"));
         }
         print!("{}", render::show_all(&shown, import_only));
@@ -180,7 +190,7 @@ impl App {
             eprintln!("dt: {e}");
         }
         if !missed.is_empty() {
-            self.warn_stale(repo.as_ref(), BTreeSet::new());
+            self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
             return Ok(());
         }
         let mut rows: BTreeMap<SourceId, BTreeSet<ModuleName>> = BTreeMap::new();
