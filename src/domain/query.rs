@@ -156,7 +156,7 @@ impl Query {
         if !self.shape.matches(&d.shape) {
             return false;
         }
-        if !self.uses.iter().all(|c| d.consts.contains(c)) {
+        if !self.uses.iter().all(|c| mentions(d, c)) {
             return false;
         }
         if let Some(m) = &self.module
@@ -212,15 +212,23 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     if let Some(n) = &q.name {
         score += name_score(n, d);
     }
-    if q.shape.concl.is_some() && q.shape.concl == d.shape.concl {
+    if let (Some(asked), Some(concl)) = (&q.shape.concl, &d.shape.concl)
+        && asked.names(concl)
+    {
         score += 4;
     }
-    score += q.uses.iter().filter(|c| d.consts.contains(c)).count() as u32;
+    score += q.uses.iter().filter(|c| mentions(d, c)).count() as u32;
     if d.has_sorry {
         score = score.saturating_sub(2);
     }
     // Descending score, then ascending type length.
     (u32::MAX - score, d.ty.len())
+}
+
+/// Whether the type mentions a constant the query names. See
+/// [`DeclName::names`].
+fn mentions(d: &Decl, asked: &DeclName) -> bool {
+    d.consts.iter().any(|c| asked.names(c))
 }
 
 /// How much of the row's name `--name` accounts for.
@@ -340,6 +348,29 @@ mod tests {
         assert!(q.matches(&d));
         q.uses.push(DeclName::new("Finset.sum"));
         assert!(!q.matches(&d));
+    }
+
+    /// `--uses .length`, which `l.length` in a pattern comes to, is whichever
+    /// `length` the type mentions, and ranks as the constant itself would.
+    #[test]
+    fn a_field_is_mentioned_in_any_namespace() {
+        let mut d = decl();
+        d.consts.push(DeclName::new("List.length"));
+        let mut q = Query::new();
+        q.uses = vec![DeclName::new(".length")];
+        assert!(q.matches(&d));
+        let mut exact = q.clone();
+        exact.uses = vec![DeclName::new("List.length")];
+        assert_eq!(rank(&q, &d), rank(&exact, &d));
+        q.uses = vec![DeclName::new(".lengthTR")];
+        assert!(!q.matches(&d));
+        // And a conclusion named by its field outranks one that is not it.
+        d.shape.concl = Some(DeclName::new("List.Nodup"));
+        let mut other = d.clone();
+        other.shape.concl = Some(DeclName::new("List.Sorted"));
+        q.uses = Vec::new();
+        q.shape = Shape::new(Some(DeclName::new(".Nodup")), Vec::new());
+        assert!(rank(&q, &d) < rank(&q, &other));
     }
 
     #[test]

@@ -51,10 +51,12 @@ pub fn unreadable(symbols: &[String]) -> String {
 /// `--uses X` matching nothing reads as "nothing uses X", and it sent a reader
 /// back to grep for a lemma twenty proofs rest on: the flag reads statements.
 /// `--text` reads declarations, and a word from a module's header is not in
-/// any of them.
+/// any of them. A field, `.length`, is not a name `dt rdeps` can look up.
 fn scope_notes(labels: &[String]) -> String {
     let mut out = String::new();
-    if let Some(c) = labels.iter().find_map(|l| l.strip_prefix("--uses ")) {
+    if let Some(c) =
+        labels.iter().find_map(|l| l.strip_prefix("--uses ").filter(|c| !c.starts_with('.')))
+    {
         out.push_str(&format!(
             "; --uses reads statements only — `dt rdeps {c}` lists the proofs that use it"
         ));
@@ -1081,6 +1083,7 @@ mod tests {
 
         let r = empty(Empty::Barren(vec!["--uses Real.exp_le_exp".into()]));
         assert!(r.contains("`dt rdeps Real.exp_le_exp`"), "{r}");
+        assert!(!empty(Empty::Barren(vec!["--uses .length".into()])).contains("rdeps"));
         let r = empty(Empty::Barren(vec!["--text crasp".into(), "--in M".into()]));
         assert!(r.contains("not module docstrings"), "{r}");
         assert!(!empty(Empty::Barren(vec!["--in M".into()])).contains(';'));

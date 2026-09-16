@@ -54,6 +54,22 @@ impl DeclName {
         spaced.then(|| arg.split_whitespace().collect())
     }
 
+    /// Whether this name, as a query spells it, names `constant`: the same
+    /// name, or for a field -- `.length`, written the way `l.length` writes it,
+    /// with the namespace left to the receiver's type -- a constant in any
+    /// namespace that ends with it.
+    pub fn names(&self, constant: &DeclName) -> bool {
+        match self.is_field() {
+            true => constant.0.ends_with(&self.0),
+            false => self == constant,
+        }
+    }
+
+    /// `.length`: a name with its namespace left out. See [`Self::names`].
+    pub fn is_field(&self) -> bool {
+        self.0.starts_with('.')
+    }
+
     /// `Real.exp_le_exp` → `exp_le_exp`.
     pub fn base(&self) -> &str {
         self.0.rsplit_once('.').map_or(&self.0, |(_, b)| b)
@@ -216,6 +232,21 @@ mod tests {
         let bare = DeclName::new("Nat");
         assert_eq!(bare.namespace(), None);
         assert_eq!(bare.base(), "Nat");
+    }
+
+    /// Field notation names a constant whose namespace is the receiver's
+    /// type, and a query that cannot know the type finds it in any namespace
+    /// -- at a component boundary, so `.length` is not `List.lengthTR`.
+    #[test]
+    fn a_field_names_a_constant_in_any_namespace() {
+        let n = DeclName::new;
+        assert!(n(".length").names(&n("List.length")));
+        assert!(n(".getD").names(&n("Option.getD")));
+        assert!(!n(".length").names(&n("List.lengthTR")));
+        assert!(!n(".length").names(&n("length")), "a field always has a namespace");
+        assert!(n("List.length").names(&n("List.length")));
+        assert!(!n("length").names(&n("List.length")), "only a field leaves it out");
+        assert!(!n("Array.length").names(&n("List.length")));
     }
 
     #[test]

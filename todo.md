@@ -1956,3 +1956,89 @@ inverse and `Real.log x⁻¹` a logarithm.
 condition.  `HasDerivAt (fun x => x ^ 2) (2 * x) x` has 62, with
 `hasDerivAt_pow` 26th; the `^` is inside a lambda, which is read as `_`
 (0.27.0), and given as `--uses HPow.hPow` it makes the lemma 8th of 21.
+
+---
+
+## `dt show` rejects the `--source` that `find` takes
+
+`find` narrows to a source with `--source`, so the same flag on the `show` that
+follows it reads as the natural continuation.  It is an error there, and the
+tip clap prints — pass it as a value after `--` — is wrong for this command:
+
+    $ dt find --source project --name altPlus --kind def
+    Transformer.CRASP.altPlus  def  Transformer.CRASP.Alternating
+    $ dt show --source project Transformer.CRASP.altPlus
+    error: unexpected argument '--source' found
+
+      tip: to pass '--source' as a value, use '-- --source'
+
+A full name already fixes the source, so `show` needs no filter.  Either accept
+`--source` and check the name against it (an error when the name is not in
+that source says something useful), or say in the error that `show` looks the
+name up in every source.
+
+Seen with dt 0.36.0, 2026-09-16.
+
+---
+
+## Field notation is read as a name, and names nothing
+
+Left over from 0.34.0.  Lean states most of its library with field notation
+-- `l.length` is `List.length l`, the namespace taken from the type of `l` --
+and a pattern copied out of a statement has it wherever the statement did.
+`l₁.length` was read as a constant called that:
+
+    $ dt find -v '(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?'
+    dt: `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?` read as conclusion Eq, 2 argument(s), operator `=`, `i`, `l₁`, `l₂` as `_`, --uses HAppend.hAppend HSub.hSub l₁.length
+    no match: `l₁.length` in the pattern matches nothing on its own
+
+A field after a bracket was not even that, and a field that heads the
+pattern was its conclusion:
+
+    $ dt find 'l[i]?.getD d = _'
+    no match: `.getD` in the pattern reads as nothing here; …
+
+    $ dt find -v 'l.Sublist (l ++ m)'
+    dt: `l.Sublist (l ++ m)` read as conclusion l.Sublist, 1 argument(s), `l`, `m` as `_`
+    no match: --concl l.Sublist matches nothing on its own
+
+Seen with dt 0.36.0, 2026-09-16.
+
+Fixed in 0.37.0.  A field is its name in whichever namespace has one, applied
+to the term it is written on: `l₁.length` is `.length` applied to `_`, and
+`.length` names `List.length`, `Array.length` and every other constant whose
+last component is `length`, in the case it is written in.
+
+    $ dt find -v '(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?'
+    dt: `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?` read as conclusion Eq, 2 argument(s), operator `=`, `i`, `l₁`, `l₂` as `_`, --uses .length HAppend.hAppend HSub.hSub
+    List.getElem?_append_right  theorem  Init.Data.List.Lemmas
+      ∀ {α : Type u_1} {l₁ l₂ : List α} {i : Nat}, l₁.length ≤ i → (l₁ ++ l₂)[i]? = l₂[i - l₁.length]?
+    1 result(s)
+
+    $ dt find 'l.Sublist (l ++ m)' --limit 2
+    List.sublist_append_right  theorem  Init.Data.List.Sublist
+      ∀ {α : Type u_1} (l₁ l₂ : List α), l₂.Sublist (l₁ ++ l₂)
+    List.sublist_append_left  theorem  Init.Data.List.Sublist
+      ∀ {α : Type u_1} (l₁ l₂ : List α), l₁.Sublist (l₁ ++ l₂)
+    2 shown, more match; refine or --limit
+
+The flags take the same name: `--concl .Nodup`, `--uses .length`.
+
+**What a field is written on.**  The word before a `.` is a term when it is a
+bound variable or in lower case -- `l`, `xs`, `hab` -- and a namespace when it
+is capitalised or in camel case, as namespaces are: `List.length`,
+`intervalIntegral.integral_const`.  The few namespaces in lower case, `lp` and
+`spectrum` among them, read as fields now, and still find their constants
+among others.  A numbered field, the `1` of `p.1`, has no name and is `_`.  A
+word in lower case with no field on it, the `xs` of `xs ++ ys`, is still read
+as a constant.
+
+**`(f a) b` is `f a b`**, which is how a field takes the rest of its
+arguments: `l.Sublist (l ++ m)` has two, and the second is headed by `++`.
+
+**Case.**  A field is a `GLOB` suffix in the index and not a `LIKE` one, which
+ignores case, and a `--uses` is not checked again after the SQL: `.nodup` does
+not find `List.Nodup`.
+
+A lambda is reported as it was written again, which it had not been since
+0.34.0: `fun i => l[i]` was printed as the application its index expands to.

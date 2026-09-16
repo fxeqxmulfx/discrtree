@@ -130,11 +130,11 @@ impl ArgHead {
     }
 
     /// A pattern argument matches a declaration argument if the pattern is `_`
-    /// or the two head symbols agree.
+    /// or the pattern's head names the declaration's. See [`DeclName::names`].
     pub fn matches(&self, other: &ArgHead) -> bool {
         match self {
             ArgHead::Any => true,
-            ArgHead::Named(a) => matches!(other, ArgHead::Named(b) if a == b),
+            ArgHead::Named(a) => matches!(other, ArgHead::Named(b) if a.names(b)),
         }
     }
 }
@@ -177,7 +177,7 @@ impl Shape {
     /// writes. A pattern with *more* arguments cannot match.
     pub fn matches(&self, other: &Shape) -> bool {
         if let Some(c) = &self.concl
-            && other.concl.as_ref() != Some(c)
+            && !other.concl.as_ref().is_some_and(|o| c.names(o))
         {
             return false;
         }
@@ -329,6 +329,17 @@ mod tests {
         assert!(shape("LE.le", &[]).matches(&stmt));
         assert!(!shape("LT.lt", &["Real.exp"]).matches(&stmt));
         assert!(!shape("LE.le", &["Finset.sum", "_"]).matches(&stmt));
+    }
+
+    /// `l.Nodup` and `xs.length = _` leave the namespace to the receiver's
+    /// type, and match whichever one it is.
+    #[test]
+    fn a_field_in_a_pattern_matches_the_constant_in_any_namespace() {
+        let stmt = shape("List.Nodup", &["_", "List.map"]);
+        assert!(shape(".Nodup", &[".map"]).matches(&stmt));
+        assert!(shape(".Nodup", &["_"]).matches(&stmt));
+        assert!(!shape(".Nodu", &[]).matches(&stmt), "a whole component, not a suffix of one");
+        assert!(!shape(".Nodup", &[".filter"]).matches(&stmt));
     }
 
     #[test]

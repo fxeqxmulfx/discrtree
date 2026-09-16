@@ -149,7 +149,9 @@ pub struct Parsed {
     pub query: Query,
     /// The notation that became the conclusion head, if any.
     pub operator: Option<String>,
-    /// Tokens read as wildcards rather than as constants. See [`is_variable`].
+    /// Words read as wildcards rather than as constants: bound variables, and
+    /// the terms a field is written on. See [`is_variable`] and
+    /// [`is_receiver`].
     pub variables: Vec<String>,
     /// Lambdas read as `_`, as they were written. See [`strip_lambdas`].
     ///
@@ -171,11 +173,13 @@ pub struct Parsed {
 ///
 /// The rule is small enough to state in full: the pattern is split on `→`,
 /// everything before the last arrow becomes a `--uses` condition, and what is
-/// left is split on the top-level notation symbol, that symbol becomes the conclusion head, and the
-/// head identifier of each side becomes an argument. Identifiers and notation
-/// elsewhere become `uses` conditions. With no notation symbol, the leading identifier
-/// becomes the conclusion head and each term it is applied to an argument,
-/// read by its head the way a side is.
+/// left is split on the top-level notation symbol, that symbol becomes the
+/// conclusion head, and the head identifier of each side becomes an argument.
+/// Identifiers and notation elsewhere become `uses` conditions. With no
+/// notation symbol, the leading identifier becomes the conclusion head and
+/// each term it is applied to an argument, read by its head the way a side is.
+/// A field -- `l.length` -- is `.length`, in whichever namespace has one,
+/// applied to `_`.
 pub fn parse(pattern: &str) -> Parsed {
     let mut p = read(pattern);
     p.query.pattern_uses = p.query.uses.clone();
@@ -183,8 +187,10 @@ pub fn parse(pattern: &str) -> Parsed {
 }
 
 fn read(pattern: &str) -> Parsed {
-    let (all, lambdas) = strip_lambdas(&expand_indexing(lex(pattern)));
-    let variables = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
+    let (lexemes, lambdas) = strip_lambdas(&lex(pattern));
+    let (all, receivers) = expand_postfix(lexemes);
+    let variables =
+        dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().chain(receivers).collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
     let tokens = without_foralls(&tokens);
@@ -281,6 +287,9 @@ fn read(pattern: &str) -> Parsed {
 /// `Filter.Tendsto (fun _ => -_) Filter.atTop Filter.atBot` asks about the
 /// three arguments of `Tendsto`, and the one it cannot key on is the one the
 /// index writes `_` for anyway.
+///
+/// Before the postfix notation is expanded, so that a lambda is reported as it
+/// was written: `fun i => l[i]` and not the application it expands to.
 fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
     let depth = depths(tokens);
     // Where each lambda begins. `fun` and `λ` say so outright; an arrow says
@@ -305,7 +314,7 @@ fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
         let end = (i..tokens.len()).find(|j| depth[*j] < depth[i]).unwrap_or(tokens.len());
-        found.push(tokens[i..end].join(" "));
+        found.push(tokens[i..end].concat().trim().to_string());
         out.push("_".to_string());
         i = end;
     }
@@ -398,12 +407,12 @@ fn lex(s: &str) -> Vec<String> {
     out
 }
 
-/// What whitespace lexes to. It is dropped once the index notation, the one
+/// What whitespace lexes to. It is dropped once the postfix notation, the one
 /// reading that depends on it, is expanded.
 const SPACE: &str = " ";
 
 /// How the bracket of an index closes, and the constant the index is then an
-/// application of. See [`expand_indexing`].
+/// application of. See [`expand_postfix`].
 const INDEXES: &[(&str, &str)] = &[
     ("]", "GetElem.getElem"),
     ("]'", "GetElem.getElem"),
@@ -411,21 +420,32 @@ const INDEXES: &[(&str, &str)] = &[
     ("]!", "GetElem?.getElem!"),
 ];
 
-/// Index notation expanded the way Lean's macros expand it: `xs[i]` is
-/// `GetElem.getElem xs i`, `xs[i]?` is `GetElem?.getElem? xs i`, `xs[i]!` is
-/// `GetElem?.getElem! xs i`, and `xs[i]'h` is the first with its proof written
-/// out. Each becomes an application in parentheses, so that it is one term to
-/// what is around it and its head is found the way any other head is.
+/// Postfix notation expanded into the applications it stands for, and the
+/// words a field was written on. Each becomes an application in parentheses,
+/// so that it is one term to what is around it and its head is found the way
+/// any other head is.
 ///
-/// Read as punctuation, the brackets said nothing: `(_ ++ _)[_]? = _` was an
-/// equation with nothing on its left, and the rows were whatever equations
-/// ranked first.
+/// An index, the way Lean's macros expand it: `xs[i]` is `GetElem.getElem xs
+/// i`, `xs[i]?` is `GetElem?.getElem? xs i`, `xs[i]!` is `GetElem?.getElem! xs
+/// i`, and `xs[i]'h` is the first with its proof written out. Read as
+/// punctuation, the brackets said nothing: `(_ ++ _)[_]? = _` was an equation
+/// with nothing on its left, and the rows were whatever equations ranked
+/// first.
 ///
-/// A `[` indexes only a term it is written against, as in Lean: `l[i]` is an
-/// index and `f [i]` applies `f` to a list. That is why the lexemes keep their
-/// spaces until here.
-fn expand_indexing(lexemes: Vec<String>) -> Vec<String> {
+/// A field, the way dot notation elaborates: `l.length` is `List.length l`,
+/// the namespace taken from the type of `l`. A pattern has no types, so the
+/// head is `.length`, which names a `length` in any namespace, and `l` is
+/// `_`. Read as a name, `l₁.length` named nothing, and `(l₁ ++ l₂)[i]? =
+/// l₂[i - l₁.length]?`, which is `List.getElem?_append_right` as it is
+/// written, was `no match`. A numbered field, the `1` of `p.1`, has no name to
+/// key on and is `_`.
+///
+/// Both are written against a term, as in Lean: `l[i]` is an index and `f [i]`
+/// applies `f` to a list. That is why the lexemes keep their spaces until
+/// here.
+fn expand_postfix(lexemes: Vec<String>) -> (Vec<String>, Vec<String>) {
     let mut out: Vec<String> = Vec::new();
+    let mut receivers = Vec::new();
     // Each `[` not closed yet: where the term it indexes starts and where the
     // `[` is, or `None` for a list.
     let mut open: Vec<Option<(usize, usize)>> = Vec::new();
@@ -454,17 +474,57 @@ fn expand_indexing(lexemes: Vec<String>) -> Vec<String> {
                     }
                 }
             }
+        } else if let Some(fields) = t.strip_prefix('.')
+            && !spaced
+            && let Some(start) = term_start(&out)
+        {
+            // Written against a term that lexed apart from it: the `.length`
+            // of `(l ++ m).length`, the `.getD` of `l[i]?.getD`.
+            apply_fields(&mut out, start, fields);
+        } else if let Some((word, fields)) = t.split_once('.')
+            && (word == "_" || is_receiver(word))
+        {
+            if word != "_" {
+                receivers.push(word.to_string());
+            }
+            let start = out.len();
+            out.push("_".to_string());
+            apply_fields(&mut out, start, fields);
         } else {
             out.push(t);
         }
         spaced = false;
     }
-    out
+    (out, receivers)
 }
 
-/// Where the term the tokens end with starts, if it is one an index can be
-/// written against: a name, a `_`, or a group in parentheses -- which an
-/// expanded index is too, so `l[i][j]` indexes `l[i]`.
+/// Each field applied in turn to the term from `start` to the end:
+/// `l.reverse.length` is `(.length (.reverse l))`.
+fn apply_fields(out: &mut Vec<String>, start: usize, fields: &str) {
+    for f in fields.split('.').filter(|f| !f.is_empty()) {
+        let head = if is_numeral(f) { "_".to_string() } else { format!(".{f}") };
+        out.splice(start..start, ["(".to_string(), head]);
+        out.push(")".to_string());
+    }
+}
+
+/// Whether the word before a `.` is a term a field is written on rather than
+/// a namespace: the `l` of `l.length`, the `xs` of `xs.reverse`, the `hab` of
+/// `hab.le`.
+///
+/// A bound variable, or a word in lower case. A namespace is named after a type
+/// or a function, and is capitalised or in camel case -- `List.length`,
+/// `intervalIntegral.integral_const` -- where a variable is neither. The few
+/// namespaces all in lower case, `lp` and `spectrum` among them, are read as
+/// fields, and still name their constants among others.
+fn is_receiver(word: &str) -> bool {
+    is_variable(word)
+        || (word.starts_with(char::is_lowercase) && !word.contains(char::is_uppercase))
+}
+
+/// Where the term the tokens end with starts, if it is one an index or a field
+/// can be written against: a name, a `_`, or a group in parentheses -- which
+/// an expanded index or field is too, so `l[i][j]` indexes `l[i]`.
 fn term_start(tokens: &[String]) -> Option<usize> {
     let last = tokens.len().checked_sub(1)?;
     match tokens[last].as_str() {
@@ -484,8 +544,11 @@ fn term_start(tokens: &[String]) -> Option<usize> {
     }
 }
 
+/// A name, or a field: `.length`, a name with its namespace left to the term
+/// it is written on. See [`expand_postfix`].
 fn is_ident(t: &str) -> bool {
-    t != "_" && t.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+    let name = t.strip_prefix('.').unwrap_or(t);
+    name != "_" && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
 }
 
 /// A numeric literal, which every elaborated statement spells the same way.
@@ -668,11 +731,12 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     if let Some(head) = head_of(tokens) {
         return (ArgHead::Named(head), rest);
     }
-    match tokens.iter().find(|t| is_ident(t) || is_numeral(t)) {
+    match tokens.iter().find(|t| *t == "_" || is_ident(t) || is_numeral(t)) {
         Some(t) if is_numeral(t) => (ArgHead::Named(of_nat()), rest),
-        // The head of this side is a bound variable, so the side constrains
-        // nothing — which is what `_` already means.
-        Some(t) if is_variable(t) => (ArgHead::Any, rest),
+        // The head of this side is a bound variable or a `_` -- the `p.1` of
+        // `p.1 x` is one -- so the side constrains nothing, which is what `_`
+        // already means.
+        Some(t) if t == "_" || is_variable(t) => (ArgHead::Any, rest),
         Some(t) => {
             if let Some(i) = rest.iter().position(|c| c.as_str() == t.as_str()) {
                 rest.remove(i);
@@ -727,13 +791,29 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
 /// arguments as it had names in it, its notation dropped: `HasDerivAt _ (_ *
 /// _) _` was four wildcards, and `Filter.Tendsto _ Filter.atTop (nhds 0)`
 /// asked for a fourth argument no `Tendsto` has.
+///
+/// `(f a) b` is `f a b`, and a field is written that way: `l.Sublist l'` is
+/// `(.Sublist l) l'`, and `.Sublist` takes both.
 fn arguments<'a>(tokens: &'a [String], head: &DeclName) -> Vec<&'a [String]> {
     let Some(at) = tokens.iter().position(|t| t.as_str() == head.as_str()) else {
         return Vec::new();
     };
     let depth = depths(tokens);
-    let end = (at + 1..tokens.len()).find(|k| depth[*k] < depth[at]).unwrap_or(tokens.len());
-    terms(&tokens[at + 1..end])
+    // Where the group the token at `i` is in ends: the first token outside it.
+    let end =
+        |i: usize| (i + 1..tokens.len()).find(|k| depth[*k] < depth[i]).unwrap_or(tokens.len());
+    let mut args = terms(&tokens[at + 1..end(at)]);
+    let mut first = at;
+    while first > 0
+        && tokens[first - 1] == "("
+        && (first == 1 || depth[first - 2] < depth[first - 1])
+        && end(first) < tokens.len()
+    {
+        let open = first - 1;
+        args.extend(terms(&tokens[end(first) + 1..end(open)]));
+        first = open;
+    }
+    args
 }
 
 /// The terms at the top level of these tokens that an application would take
@@ -1375,6 +1455,63 @@ mod tests {
         assert_eq!(parse("-a * b = _").query.uses, vec![DeclName::new("Neg.neg")]);
         assert_eq!(parse("Real.exp (-x) = _").query.uses, vec![DeclName::new("Neg.neg")]);
         assert_eq!(parse("|a - b| = _").query.uses, vec![DeclName::new("HSub.hSub")]);
+    }
+
+    /// The report: `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?` is
+    /// `List.getElem?_append_right` as it is written, and `l₁.length`, read as
+    /// a name, named nothing. A field is its name in any namespace, applied to
+    /// the term it is written on.
+    #[test]
+    fn a_field_is_its_name_applied_to_the_term_it_is_written_on() {
+        let p = parse("(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?");
+        assert_eq!(p.query.shape.args, vec![arg("GetElem?.getElem?"), arg("GetElem?.getElem?")]);
+        let uses = [".length", "HAppend.hAppend", "HSub.hSub"].map(DeclName::new);
+        assert_eq!(p.query.uses, uses);
+        assert_eq!(p.variables, ["i", "l₁", "l₂"]);
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        for (pattern, head) in [
+            ("l.length = _", ".length"),
+            ("xs.length = _", ".length"),
+            ("xs.reverse.length = _", ".length"),
+            ("(l ++ m).length = _", ".length"),
+            ("l[i]?.getD d = _", ".getD"),
+            ("l.tail[i] = _", "GetElem.getElem"),
+            ("_.length = _", ".length"),
+            ("p.1.le = _", ".le"),
+            // A numbered field is a projection, and names nothing.
+            ("p.1 = _", "_"),
+            ("p.2 Real.pi = _", "_"),
+            // A capital says namespace.
+            ("Real.exp x = _", "Real.exp"),
+            ("List.sum l.tail = _", "List.sum"),
+        ] {
+            assert_eq!(parse(pattern).query.shape.args[0], arg(head), "{pattern}");
+        }
+        assert_eq!(parse("xs.length = _").variables, ["xs"]);
+        assert!(parse("_.length = _").variables.is_empty());
+        assert_eq!(parse("List.sum l.tail = _").query.uses, [DeclName::new(".tail")]);
+        // `(f a) b` is `f a b`: a field takes what follows it too.
+        let p = parse("l.Sublist (l ++ m)");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new(".Sublist")));
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("HAppend.hAppend")]);
+        assert_eq!(parse("(Nat.Coprime a) b").query.shape.args.len(), 2);
+        assert_eq!(parse("Nat.Coprime (a) b").query.shape.args.len(), 2);
+        // A lambda is reported as written, and what is in it is not read.
+        let p = parse("List.map (fun i => l[i].length) _ = _");
+        assert_eq!(p.lambdas, ["fun i => l[i].length"]);
+        assert!(p.variables.is_empty(), "{:?}", p.variables);
+    }
+
+    /// A namespace is named after a type or a function, and is capitalised or
+    /// in camel case; a variable is neither.
+    #[test]
+    fn a_word_with_no_capital_in_it_is_a_term_and_not_a_namespace() {
+        for word in ["l", "l₁", "xs", "hab", "h'", "this"] {
+            assert!(is_receiver(word), "{word}");
+        }
+        for word in ["List", "Real", "intervalIntegral", "algebraMap", "_", "2", ""] {
+            assert!(!is_receiver(word), "{word}");
+        }
     }
 
     #[test]

@@ -600,8 +600,16 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         binds.push(format!("%{}%", n.to_lowercase()));
     }
     if let Some(c) = &q.shape.concl {
-        where_clauses.push("d.concl = ?".into());
-        binds.push(c.to_string());
+        match c.is_field() {
+            true => {
+                where_clauses.push("d.concl GLOB ?".into());
+                binds.push(format!("*{}", glob_escaped(c.as_str())));
+            }
+            false => {
+                where_clauses.push("d.concl = ?".into());
+                binds.push(c.to_string());
+            }
+        }
     }
     // Every named argument head has to appear among the conclusion's argument
     // heads. This is a necessary condition, not the positional match itself —
@@ -611,14 +619,23 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // thousands of declarations.
     for a in &q.shape.args {
         if let ArgHead::Named(n) = a {
-            where_clauses.push("(' ' || d.concl_args || ' ') LIKE ?".into());
-            binds.push(format!("% {} %", n.as_str()));
+            where_clauses.push("(' ' || d.concl_args || ' ') GLOB ?".into());
+            // A field ends a name, and a name ends at a space.
+            let starts = if n.is_field() { "*" } else { "* " };
+            binds.push(format!("{starts}{} *", glob_escaped(n.as_str())));
         }
     }
+    // A field is a suffix, and still a seek: the key is `(decl_id, const)`,
+    // so the `GLOB` runs over one row's constants and never over the table.
     for c in &q.uses {
-        where_clauses
-            .push("EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const = ?)".into());
-        binds.push(c.to_string());
+        let (test, bind) = match c.is_field() {
+            true => ("GLOB ?", format!("*{}", glob_escaped(c.as_str()))),
+            false => ("= ?", c.to_string()),
+        };
+        where_clauses.push(format!(
+            "EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const {test})"
+        ));
+        binds.push(bind);
     }
     if let Some(m) = &q.module {
         where_clauses.push("(d.module = ? OR d.module LIKE ?)".into());
@@ -694,6 +711,18 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         None => "",
     };
     (format!("SELECT d.* FROM decl d{filter}{order} LIMIT {cap}"), binds)
+}
+
+/// A name as a `GLOB` pattern that matches only it: `?` is a wildcard there,
+/// and `List.head?` has one. `GLOB` and not `LIKE`, which ignores case, and
+/// nothing after it would notice `.Length` answering for `.length`.
+fn glob_escaped(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '*' | '?' | '[' => format!("[{c}]"),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// FTS5 treats bare punctuation as syntax. Quoting every term makes a search

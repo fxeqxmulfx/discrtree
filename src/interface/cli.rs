@@ -280,8 +280,9 @@ pub enum Command {
     /// `_` is anything. The top-level notation symbol becomes the conclusion
     /// head — ≤ < ≥ > = ≠ ↔ ∈ ⊆ ∣ + - * / ^ % ∧ ∨ → ∑ ∏ ⊓ ⊔ ‖ — and the head
     /// identifier of each side becomes an argument. Identifiers anywhere else
-    /// become --uses conditions rather than being dropped. `-v` prints what the
-    /// pattern was read as.
+    /// become --uses conditions rather than being dropped. A field is its name
+    /// in any namespace: `l.length` is `.length` applied to `_`. `-v` prints
+    /// what the pattern was read as.
     ///
     /// Conditions combine with AND, and a pattern may be mixed with any flag.
     /// Asking for a shape implies --elaborated: a text row has no conclusion
@@ -312,11 +313,13 @@ pub struct FindArgs {
     #[arg(long, value_name = "SUBSTRING")]
     pub name: Option<String>,
 
-    /// Head symbol of the conclusion, e.g. LE.le. Implies --elaborated.
+    /// Head symbol of the conclusion, e.g. LE.le, or .Nodup in any namespace.
+    /// Implies --elaborated.
     #[arg(long, value_name = "HEAD")]
     pub concl: Option<String>,
 
-    /// Constants the type must mention, e.g. Real.exp,Finset.sum. All of them.
+    /// Constants the type must mention, e.g. Real.exp,Finset.sum, or .length in
+    /// any namespace. All of them.
     /// The statement only: `dt rdeps` finds what mentions a constant in a proof.
     #[arg(long, value_delimiter = ',', value_name = "CONST,...")]
     pub uses: Vec<String>,

@@ -145,6 +145,39 @@ fn argument_shape_is_matched_even_though_sql_cannot_express_it() {
     assert!(db.find(&q).unwrap().is_empty());
 }
 
+/// A field -- `.length`, which `l.length` in a pattern comes to -- names its
+/// constant in any namespace wherever a name is asked for: as the conclusion,
+/// as an argument, and as a condition, which nothing after the SQL checks
+/// again. A whole component, in the case it is written in, and the `?` of
+/// `head?` a letter.
+#[test]
+fn a_field_names_its_constant_in_any_namespace() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let mut nodup =
+        theorem("A.nodup", "mathlib", "M", "List.Nodup", &["List.length", "List.head?"]);
+    nodup.shape.args = vec![ArgHead::Any, ArgHead::Named(DeclName::new("List.reverse"))];
+    let mut other =
+        theorem("B.eq", "mathlib", "M", "Eq", &["B.Length", "List.lengthTR", "List.headX"]);
+    other.shape.args = vec![ArgHead::Any, ArgHead::Named(DeclName::new("B.Reverse"))];
+    index::load(&mut db, &[nodup, other]).unwrap();
+    db.finish().unwrap();
+    let names = |concl: Option<&str>, args: &[&str], uses: &[&str]| -> Vec<String> {
+        let mut q = Query::new();
+        let args = args.iter().map(|a| ArgHead::Named(DeclName::new(*a))).collect();
+        q.shape = Shape::new(concl.map(DeclName::new), args);
+        q.uses = uses.iter().map(|u| DeclName::new(*u)).collect();
+        db.find(&q).unwrap().into_iter().map(|d| d.name.to_string()).collect()
+    };
+    assert_eq!(names(Some(".Nodup"), &[], &[]), ["A.nodup"]);
+    assert!(names(Some(".nodup"), &[], &[]).is_empty());
+    assert!(names(Some(".odup"), &[], &[]).is_empty());
+    assert_eq!(names(None, &[".reverse"], &[]), ["A.nodup"]);
+    assert_eq!(names(None, &[".Reverse"], &[]), ["B.eq"]);
+    assert_eq!(names(None, &[], &[".length"]), ["A.nodup"]);
+    assert_eq!(names(None, &[], &[".Length"]), ["B.eq"]);
+    assert_eq!(names(None, &[], &[".head?"]), ["A.nodup"]);
+}
+
 #[test]
 fn an_elaborated_row_wins_over_a_text_row_with_the_same_name() {
     let mut db = SqliteIndex::in_memory().unwrap();

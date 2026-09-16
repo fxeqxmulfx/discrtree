@@ -382,7 +382,7 @@ impl Find<'_> {
         });
         Ok(found.map(|d| {
             let on_a_side = query.shape.concl.as_ref().is_some_and(|c| {
-                d.shape.args.iter().any(|a| matches!(a, ArgHead::Named(x) if x == c))
+                d.shape.args.iter().any(|a| matches!(a, ArgHead::Named(x) if c.names(x)))
             });
             Empty::NamedElsewise { name: d.name, shape: d.shape, on_a_side }
         }))
