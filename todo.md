@@ -2230,3 +2230,21 @@ at.  `succ n ≤ m ↔ n < m` used to be about `Order.succ`, the commonest `succ
 now `succ` is a variable, and the line on stderr says to spell the one meant.
 A pattern copied from a goal never has that word in it, because the goal said
 `Order.succ` or `n.succ`.
+
+## A pair `(a, b)` is read as parentheses, and `Prod.mk` is not searched for
+
+Parentheses name nothing, and the comma inside them is punctuation, so a pair
+is whatever its first element is.  `(a, b)` is `_`, and a pattern about pairs
+is a pattern about anything:
+
+    $ dt find '(a, b) = (c, d) ↔ a = c ∧ b = d'
+    Nat.dvd_antisymm_iff  theorem  Mathlib.Data.Nat.Basic
+      ∀ {m n : ℕ}, m = n ↔ m ∣ n ∧ n ∣ m
+    $ dt find 'Prod.fst (a, b) = a'
+    LucasLehmer.X.zero_fst  theorem  Mathlib.NumberTheory.LucasLehmer
+      ∀ {q : ℕ}, 0.1 = 0
+
+The index has it: `(p.1 ⊔ q.1, p.2 ⊔ q.2)` is stored with `Prod.mk` as its
+head, 910 rows have it as one, and `Prod.mk a b = _` finds `Prod.mk.eta`.
+
+Seen with dt 0.41.0, 2026-09-16.
