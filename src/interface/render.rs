@@ -62,8 +62,31 @@ pub fn find(hits: &Hits, long: bool) -> String {
             Some(Empty::Barren(c)) => {
                 format!("no match: {} match nothing on their own\n", c.join(", "))
             }
-            Some(Empty::Combination) => {
+            Some(Empty::Combination { elsewhere }) if elsewhere.is_empty() => {
                 "no match: every condition matches on its own; drop one\n".into()
+            }
+            // The module prefix is the condition to drop, and saying so is only
+            // half of it: what the reader wanted was the prefix that would have
+            // worked. Four, because a name that spreads wider than that is a
+            // name to narrow rather than a place to look.
+            Some(Empty::Combination { elsewhere }) => {
+                let shown: Vec<String> = elsewhere
+                    .iter()
+                    .take(4)
+                    .map(|(m, n)| match n {
+                        1 => m.to_string(),
+                        n => format!("{m} ({n})"),
+                    })
+                    .collect();
+                let more = match elsewhere.len().saturating_sub(4) {
+                    0 => String::new(),
+                    n => format!(", and {n} more"),
+                };
+                format!(
+                    "no match: drop --in — without it the rest matches in {}{}\n",
+                    shown.join(", "),
+                    more
+                )
             }
             // Not "matches nothing on its own", which would be true and would
             // send the reader to correct a prefix that is already correct.
@@ -785,6 +808,41 @@ mod tests {
         assert!(r.contains("`instance`"), "{r}");
         assert!(r.contains("dt refresh <source>"), "the repair, not just the complaint: {r}");
         assert!(!r.contains("drop"), "there is no condition to drop: {r}");
+    }
+
+    /// "Drop one" is right and unhelpful when the one to drop is `--in`: the
+    /// reader already knows the lemma exists and guessed wrong about where it
+    /// is kept, and the modules it really lives in are one search away.
+    #[test]
+    fn an_empty_result_says_where_the_rest_of_the_query_does_match() {
+        let empty = |e: Empty| Hits {
+            rows: Vec::new(),
+            truncated: false,
+            empty: Some(e),
+            read_as: Vec::new(),
+        };
+        let r = find(
+            &empty(Empty::Combination {
+                elsewhere: vec![
+                    (crate::domain::name::ModuleName::new("Mathlib.Data.Int.Init"), 4),
+                    (
+                        crate::domain::name::ModuleName::new(
+                            "Mathlib.Algebra.Order.GroupWithZero.Basic",
+                        ),
+                        3,
+                    ),
+                ],
+            }),
+            false,
+        );
+        assert!(r.contains("drop --in"), "{r}");
+        assert!(r.contains("Mathlib.Algebra.Order.GroupWithZero.Basic (3)"), "{r}");
+
+        // With no module in the query there is nothing to name, and the line
+        // goes back to saying the only thing it can.
+        let plain = find(&empty(Empty::Combination { elsewhere: Vec::new() }), false);
+        assert!(plain.contains("every condition matches on its own; drop one"), "{plain}");
+        assert!(!plain.contains("--in"), "{plain}");
     }
 
     /// `--in Batteries` is not a prefix to correct, and telling the reader it

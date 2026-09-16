@@ -6,7 +6,7 @@
 
 use crate::application::add::Add;
 use crate::application::deps::{Deps, DepsResult};
-use crate::application::find::{Dup, Find};
+use crate::application::find::{self, Dup, Find};
 use crate::application::index;
 use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
 use crate::application::ship::Fetch;
@@ -207,6 +207,14 @@ impl App {
             print!("{}", render::unreadable(&p.unknown));
             return Ok(());
         }
+        // On stderr and not only under --verbose: the search below is looser
+        // than the pattern, by exactly the part of it that cannot be a key.
+        for l in parsed.iter().flat_map(|p| &p.lambdas) {
+            eprintln!(
+                "dt: `{l}` read as `_` — the index is keyed on shapes with every binder \
+                 stripped, so a lambda matches any argument"
+            );
+        }
         if self.verbose {
             if let Some((p, parsed)) = args.pattern.as_deref().zip(parsed) {
                 eprintln!(
@@ -235,7 +243,11 @@ impl App {
             eprintln!("dt: `{written}` read as `{read}`");
         }
         print!("{}", render::find(&hits, args.long));
-        self.warn_stale(repo.as_ref(), hits.rows.iter().map(|d| d.source.clone()).collect());
+        let from = match hits.rows.is_empty() {
+            false => hits.rows.iter().map(|d| d.source.clone()).collect(),
+            true => find::sources_of(repo.as_ref(), &query),
+        };
+        self.warn_stale(repo.as_ref(), from);
         Ok(())
     }
 

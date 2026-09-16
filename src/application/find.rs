@@ -7,6 +7,7 @@ use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::{self, Query};
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub struct Find<'a> {
@@ -28,7 +29,19 @@ pub enum Empty {
     Barren(Vec<String>),
     /// Every condition matches something; no row satisfies all of them. Drop
     /// one rather than correcting any.
-    Combination,
+    Combination {
+        /// Where the rows that satisfy every condition *but* `--in` live,
+        /// commonest module first. Empty when the query named no module, or
+        /// when dropping it still matches nothing.
+        ///
+        /// "Drop one" is right and useless when the one to drop is the module
+        /// prefix: the reader knows the lemma exists and guessed wrong about
+        /// where it is kept. `div_le_div_iff` is not in
+        /// `Mathlib.Algebra.Order.Field`; it is in
+        /// `Mathlib.Algebra.Order.GroupWithZero.Basic`, and that is the whole
+        /// of what the reader needed.
+        elsewhere: Vec<(ModuleName, usize)>,
+    },
     /// The search was asked about a corpus the build can import and no source
     /// indexes. Neither repair above applies: nothing is misspelled and no
     /// condition needs dropping, the corpus was never dumped. Told apart from
@@ -251,8 +264,51 @@ impl Find<'_> {
                 barren.push(label);
             }
         }
-        Ok(if barren.is_empty() { Empty::Combination } else { Empty::Barren(barren) })
+        if !barren.is_empty() {
+            return Ok(Empty::Barren(barren));
+        }
+        Ok(Empty::Combination { elsewhere: self.elsewhere(query)? })
     }
+
+    /// The modules the query matches once its `--in` is dropped, commonest
+    /// first. One search, and only for a query that named a module at all.
+    fn elsewhere(&self, query: &Query) -> Result<Vec<(ModuleName, usize)>> {
+        if query.module.is_none() {
+            return Ok(Vec::new());
+        }
+        // Wider than `limit`, because what is wanted here is the spread over
+        // modules rather than the ten best rows, and narrow enough that a
+        // condition matching half the corpus does not pay for a full scan.
+        const SPREAD: usize = 60;
+        let rows = self.repo.find(&Query { module: None, limit: SPREAD, ..query.clone() })?;
+        let mut counts: BTreeMap<ModuleName, usize> = BTreeMap::new();
+        for d in rows {
+            *counts.entry(d.module).or_default() += 1;
+        }
+        let mut out: Vec<(ModuleName, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+        Ok(out)
+    }
+}
+
+/// The sources a query could possibly be answered from, when it says.
+///
+/// A search that found nothing names no sources, so a staleness warning has to
+/// fall back to every one of them -- and after a `lake build` that is a line
+/// about the project on the end of every failed Mathlib search, which the
+/// project could not have answered either way. `--source` says which source
+/// outright; `--in Mathlib.Order` says it by prefix, and the index resolves the
+/// prefix for the price of one query. An empty set is "anywhere", which is
+/// what the caller already reads it as.
+pub fn sources_of(repo: &dyn DeclRepo, query: &Query) -> BTreeSet<SourceId> {
+    if let Some(s) = &query.source {
+        return BTreeSet::from([s.clone()]);
+    }
+    let Some(m) = &query.module else { return BTreeSet::new() };
+    // Eight, because the roots are disjoint and one row would do; a handful
+    // costs the same query and survives a prefix that straddles two of them.
+    let probe = Query { module: Some(m.clone()), limit: 8, ..Query::new() };
+    repo.find(&probe).map(|r| r.into_iter().map(|d| d.source).collect()).unwrap_or_default()
 }
 
 /// One local declaration and what upstream already has that looks like it.

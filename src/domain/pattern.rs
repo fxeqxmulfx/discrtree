@@ -73,6 +73,17 @@ const IGNORED: &[&str] = &[
     ",", ":", ";", "∀", "∃", "⟨", "⟩", "{", "}", "[", "]", "⦃", "⦄", "↑", "⇑", "@", "✝", "!", "?",
 ];
 
+/// Lambda syntax. A lambda is a binder, and [`crate::domain::decl::Shape`] is
+/// read off a statement with every binder stripped, so there is nothing in the
+/// index for the inside of one to be matched against: `fun x => -x` and
+/// `fun x => x⁻¹` fill the same argument slot as far as the key is concerned.
+///
+const BINDERS: &[&str] = &["fun", "λ"];
+
+/// The arrow a lambda's binders end at. Lean writes one after `fun`, and a
+/// reader copying a goal back out sometimes writes one without it.
+const ARROWS: &[&str] = &["=>", "↦"];
+
 /// What a pattern resolved to, so the caller can tell the user what was
 /// understood. An empty search is much easier to debug when the tool says which
 /// operator it keyed on.
@@ -85,6 +96,12 @@ pub struct Parsed {
     pub extra_constants: Vec<DeclName>,
     /// Tokens read as wildcards rather than as constants. See [`is_variable`].
     pub variables: Vec<String>,
+    /// Lambdas read as `_`, as they were written. See [`strip_lambdas`].
+    ///
+    /// Reported rather than applied in silence: the rows that come back answer
+    /// a looser question than the one that was asked, and a reader who wrote
+    /// `fun _ => -_` is entitled to know that the `-` was not searched for.
+    pub lambdas: Vec<String>,
     /// How many `→`-separated hypotheses came before the conclusion.
     pub hypotheses: usize,
     /// Symbols that are neither notation nor punctuation, and so were read as
@@ -104,7 +121,7 @@ pub struct Parsed {
 /// become `uses` conditions. With no notation symbol, the leading identifier
 /// becomes the conclusion head and the rest become arguments.
 pub fn parse(pattern: &str) -> Parsed {
-    let all = tokenize(pattern);
+    let (all, lambdas) = strip_lambdas(&tokenize(pattern));
     let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
@@ -127,6 +144,7 @@ pub fn parse(pattern: &str) -> Parsed {
                 operator: Some(op),
                 extra_constants: Vec::new(),
                 variables: vars,
+                lambdas,
                 hypotheses: count,
                 unknown,
             }
@@ -149,6 +167,7 @@ pub fn parse(pattern: &str) -> Parsed {
                         operator: None,
                         extra_constants: Vec::new(),
                         variables: vars,
+                        lambdas,
                         hypotheses: count,
                         unknown,
                     }
@@ -166,6 +185,7 @@ pub fn parse(pattern: &str) -> Parsed {
                         operator: None,
                         extra_constants: Vec::new(),
                         variables: vars,
+                        lambdas,
                         hypotheses: count,
                         unknown,
                     }
@@ -180,13 +200,58 @@ pub fn parse(pattern: &str) -> Parsed {
                         extra_constants: Vec::new(),
                         variables: vars,
                         hypotheses: count,
-                        // Nothing was dropped: the pattern is searched whole.
+                        // Nothing was dropped: the pattern is searched whole,
+                        // lambda and all.
+                        lambdas: Vec::new(),
                         unknown: Vec::new(),
                     }
                 }
             }
         }
     }
+}
+
+/// Each lambda replaced by the `_` it can honestly be read as, and the lambdas
+/// as they were written.
+///
+/// A lambda runs to the end of the group that encloses it -- that is Lean's
+/// own rule, and the reason `(fun x => f x) y` needs its parentheses -- so what
+/// is dropped is everything from the binder to the closing bracket, and one
+/// argument slot is left where it stood.
+///
+/// `_` and not nothing: an argument that is a function is still an argument.
+/// `Filter.Tendsto (fun _ => -_) Filter.atTop Filter.atBot` asks about the
+/// three arguments of `Tendsto`, and the one it cannot key on is the one the
+/// index writes `_` for anyway.
+fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
+    let depth = depths(tokens);
+    // Where each lambda begins. `fun` and `λ` say so outright; an arrow says
+    // so too, one group back, because the binders a lambda ends with are the
+    // rest of that group. Without this, `(x => f x)` reads its `=>` as `Eq`
+    // applied to `GT.gt` and the pattern comes back a search for equalities.
+    let starts: Vec<usize> = (0..tokens.len())
+        .filter_map(|k| match tokens[k].as_str() {
+            t if BINDERS.contains(&t) => Some(k),
+            t if ARROWS.contains(&t) => {
+                Some((0..k).rfind(|j| depth[*j] < depth[k]).map_or(0, |j| j + 1))
+            }
+            _ => None,
+        })
+        .collect();
+    let (mut out, mut found) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < tokens.len() {
+        if !starts.contains(&i) {
+            out.push(tokens[i].clone());
+            i += 1;
+            continue;
+        }
+        let end = (i..tokens.len()).find(|j| depth[*j] < depth[i]).unwrap_or(tokens.len());
+        found.push(tokens[i..end].join(" "));
+        out.push("_".to_string());
+        i = end;
+    }
+    (out, found)
 }
 
 fn tokenize(s: &str) -> Vec<String> {
@@ -236,6 +301,12 @@ fn tokenize(s: &str) -> Vec<String> {
             '-' if cs.peek() == Some(&'>') => {
                 cs.next();
                 out.push("→".to_string());
+            }
+            // A lambda's arrow, which is one token and not `Eq` applied to
+            // `GT.gt`. `↦` needs nothing: it is a character of its own.
+            '=' if cs.peek() == Some(&'>') => {
+                cs.next();
+                out.push("=>".to_string());
             }
             _ => out.push(c.to_string()),
         }
@@ -521,6 +592,54 @@ mod tests {
         assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
         assert_eq!(p.query.shape.args, vec![arg("_"), arg("_")]);
         assert!(p.query.uses.is_empty());
+    }
+
+    /// The pattern from the report. `fun` is a word, so it was read as a
+    /// constant, resolved to `Lean.Compiler.LCNF.Code.fun` -- the only thing
+    /// in the index whose name ends that way -- and the search died there.
+    #[test]
+    fn a_lambda_is_the_argument_slot_it_fills_and_nothing_more() {
+        let p = parse("Filter.Tendsto (fun _ => -_) Filter.atTop Filter.atBot");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Filter.Tendsto")));
+        assert_eq!(
+            p.query.shape.args,
+            vec![arg("_"), arg("Filter.atTop"), arg("Filter.atBot")],
+            "one slot, and it is a wildcard"
+        );
+        assert!(!p.query.uses.iter().any(|u| u.as_str() == "fun"), "{:?}", p.query.uses);
+        assert_eq!(p.lambdas.len(), 1, "and the reader is told what was dropped");
+    }
+
+    #[test]
+    fn a_lambda_ends_where_its_brackets_do() {
+        // The binder swallows the rest of its group and no more: `Finset.sum`
+        // keeps both arguments, and the `= _` outside is still the relation.
+        let p = parse("Finset.sum _ (fun i => Real.exp i) = _");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Eq")));
+        assert_eq!(p.query.shape.args, vec![arg("Finset.sum"), arg("_")]);
+        // What is inside the lambda is inside the lambda. `Real.exp` is not in
+        // the conclusion's shape, and claiming it as a `--uses` would be
+        // claiming the statement mentions it at this depth.
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+    }
+
+    /// An arrow is a binder even with the keyword left off, and reading it as
+    /// two notations is the misreading that costs most: `=` binds loosest, so
+    /// `x => f x` became an equation and the pattern came back a search for
+    /// equalities.
+    #[test]
+    fn an_arrow_with_no_keyword_before_it_is_still_a_lambda() {
+        let p = parse("Filter.Tendsto (x => -x) Filter.atTop Filter.atBot");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Filter.Tendsto")));
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("Filter.atTop"), arg("Filter.atBot")]);
+        assert_eq!(p.operator, None, "no relation was written");
+    }
+
+    #[test]
+    fn a_pattern_with_no_lambda_in_it_reports_none() {
+        assert!(parse("Real.exp _ ≤ _").lambdas.is_empty());
+        // `->` is an implication and not an arrow of this kind.
+        assert!(parse("a ≤ b -> b⁻¹ ≤ a⁻¹").lambdas.is_empty());
     }
 
     /// A binder is one letter and its decorations. Anything with a word in it

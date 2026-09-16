@@ -1325,3 +1325,96 @@ Measured over 4000 consecutive Mathlib rows: ranges reported as declaring
 nothing fell from 108 to 21, with no row losing an answer it had. The 21 that
 remain are notation, `deriving instance` and the `foo_def` companion of an
 `irreducible_def` — declarations Lean names itself, whose names are in no file.
+
+## `--name` AND `--text` reports "no match" where each half matches
+
+`dt find --name "HasDerivAt" --text "Finset.sum" --limit 10` answers
+
+    no match: every condition matches on its own; drop one
+
+The conjunction is the documented behaviour and the diagnostic is accurate, so
+this is not a bug. It is still the wrong answer to the question that was being
+asked, which was "which `HasDerivAt` lemma is about a `Finset.sum`". What the
+user wants at that point is not "drop one" but the rows that matched the
+*names* condition ranked by how well they match the text — the AND is a filter
+where a ranking would do. A `--rank` or `--soft` mode, or simply falling back
+to a ranked union when the intersection is empty and saying so, would turn a
+dead end into an answer. (The lemma actually wanted, `HasDerivAt.sum`, is
+indexed and was found on the second try by `--name sum` alone.)
+
+## Staleness line reappears after every `lake build`
+
+Working in a Lean project means rebuilding constantly, and every `dt` call
+after a rebuild prints
+
+    dt: project was rebuilt since it was indexed; rows may be missing — dt refresh project
+
+on stderr. It is correct, but during an editing session it fires on nearly
+every invocation, and `dt refresh project` (2185 declarations, 494871 rows) is
+too slow to run after each build. Either the warning should be rate-limited
+per project per session, or the check should compare what actually changed
+(the set of `.olean` mtimes against the indexed modules) rather than the fact
+that a build happened at all.
+
+## From the transformer session (2026-09-16)
+
+- `dt find` with a lambda in the shape fails: `dt find 'Filter.Tendsto (fun _ => -_)
+  Filter.atTop Filter.atBot'` answers "no match: `fun` is
+  `Lean.Compiler.LCNF.Code.fun` in the index … and that matches nothing either".
+  A `fun` in a pattern should either be matched structurally or be rejected with
+  a message that says patterns cannot contain binders — not silently resolved to
+  an unrelated LCNF constant.
+- The AND-semantics message is still misleading: `dt find --name "div_le_div_iff"
+  --in Mathlib.Algebra.Order.Field` answers "no match: every condition matches on
+  its own; drop one". Dropping `--in` found the lemma in
+  `Mathlib.Algebra.Order.GroupWithZero.Basic`. It would help to name *which*
+  module prefixes the `--name` hits actually live in.
+- `dt: project was rebuilt since it was indexed` appears on stderr after every
+  `lake build`, on every subsequent `dt` call, even for Mathlib-only queries that
+  cannot be affected by the project index.
+
+Fixed in 0.27.0.
+
+**The lambda.** `fun` is a word, so it was read as a constant, and the only
+thing in the index whose name ends that way is `Lean.Compiler.LCNF.Code.fun`.
+Nothing about the report is about the compiler; that resolution was the last
+step of a search that had already lost the pattern.
+
+A lambda is a binder, and `Shape` is read off a statement with every binder
+stripped — there is nothing in the index for the inside of one to be matched
+against. So a lambda is now read as the `_` it honestly is, and the slot it
+filled is left where it stood: the pattern becomes
+`Filter.Tendsto _ Filter.atTop Filter.atBot`, and the third row is
+`Filter.tendsto_neg_atTop_atBot`, which is the lemma. The lambda runs to the
+end of the group that encloses it, which is Lean's own rule, so
+`Finset.sum _ (fun i => f i) = _` keeps its `= _`. An arrow counts as a binder
+even with the keyword left off: `(x => -x)` used to read `=` as `Eq`, and since
+`=` binds loosest the whole pattern became a search for equations.
+
+It is not silent. The read is announced on stderr, before the rows and
+whatever `--verbose` says, because the answer below is to a looser question
+than the one that was asked:
+
+    dt: `fun _ => - _` read as `_` — the index is keyed on shapes with every
+    binder stripped, so a lambda matches any argument
+
+**The AND message.** "Drop one" is right and useless when the one to drop is
+`--in`: the reader knows the lemma exists and guessed wrong about where it is
+kept, and the guess is what needs correcting. Dropping the module prefix and
+counting the modules that answer costs one query and says the whole of it:
+
+    no match: drop --in — without it the rest matches in Mathlib.Data.Int.Init (4),
+    Mathlib.Algebra.Order.Group.Unbundled.Basic (3),
+    Mathlib.Algebra.Order.GroupWithZero.Basic (3)
+
+Four modules at most, and the line falls back to the old one when the query
+named no module or when dropping it still matches nothing.
+
+**The warning after `lake build`.** The warning was already narrowed to the
+sources an answer drew on — but an empty answer draws on none, and "none"
+meant "every source", so every failed Mathlib search ended in a line about the
+project. A query that says where it is looking can be taken at its word:
+`--source` says it outright, `--in Mathlib.Order` says it by prefix and the
+index resolves the prefix for the price of one row. A query that restricts
+nothing still warns about everything, and so does an `--in` that matches
+nothing — a prefix with no rows is exactly what a stale source looks like.

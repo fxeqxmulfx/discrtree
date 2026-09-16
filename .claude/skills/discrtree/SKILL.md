@@ -18,9 +18,9 @@ what is not imported.
 
 Rules that are not guessable:
 
-- Write a pattern as Lean prints it: `_` is anything, so is a bare one-letter
-  name (`a`, `x`), and `A → B` searches for `B` with the hypotheses as
-  `--uses`. A pattern implies `--elaborated`: an unelaborated row has no
+- Write a pattern as Lean prints it: `_` is anything, and so are a one-letter
+  name (`a`, `x`) and a lambda; `A → B` searches for `B` with the hypotheses
+  as `--uses`. A pattern implies `--elaborated`: an unelaborated row has no
   conclusion head.
 - A row marked `[text]` was read by a scanner, not Lean: no shape, guessed
   deps.

@@ -387,9 +387,16 @@ fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
     // `Other.top` exists and `Mathlib.Analysis.Exp` exists; nothing is both.
     q.name = Some("top".into());
     q.module = Some("Mathlib.Analysis.Exp".into());
+    let Some(Empty::Combination { elsewhere }) =
+        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty
+    else {
+        panic!("both conditions match on their own")
+    };
+    // "Drop one" on its own leaves the reader to guess which; the module the
+    // name does live in is the answer they were after.
     assert_eq!(
-        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
-        Some(Empty::Combination)
+        elsewhere.iter().map(|(m, n)| (m.to_string(), *n)).collect::<Vec<_>>(),
+        vec![("Other.Main".to_string(), 1)]
     );
 }
 
@@ -495,10 +502,42 @@ fn an_index_that_has_instances_diagnoses_them_like_any_other_kind() {
     let mut q = Query::new();
     q.kind = Some(discrtree::domain::decl::DeclKind::Instance);
     q.module = Some("Other.Main".into());
-    assert_eq!(
+    assert!(matches!(
         Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
-        Some(Empty::Combination)
+        Some(Empty::Combination { .. })
+    ));
+}
+
+/// An empty search names no sources, so the staleness warning it carries falls
+/// back to every source in the workspace -- a line about the project on the end
+/// of every failed Mathlib search, after every `lake build`. A query that says
+/// where it is looking can be taken at its word.
+#[test]
+fn a_query_that_names_where_it_looks_is_answerable_only_from_there() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.module = Some("Mathlib.Analysis".into());
+    assert_eq!(
+        discrtree::application::find::sources_of(&repo, &q),
+        std::collections::BTreeSet::from([SourceId::new("mathlib")]),
+        "the index resolves a module prefix to the source that holds it"
     );
+
+    let mut named = Query::new();
+    named.source = Some(SourceId::new("flt"));
+    assert_eq!(
+        discrtree::application::find::sources_of(&repo, &named),
+        std::collections::BTreeSet::from([SourceId::new("flt")]),
+        "--source says it outright, with no query at all"
+    );
+
+    // A prefix nothing is indexed under says nothing about where the answer
+    // would have been: an empty set is "anywhere", which is what the caller
+    // reads it as.
+    let mut nowhere = Query::new();
+    nowhere.module = Some("Nowhere".into());
+    assert!(discrtree::application::find::sources_of(&repo, &nowhere).is_empty());
+    assert!(discrtree::application::find::sources_of(&repo, &Query::new()).is_empty());
 }
 
 /// With one condition there is nothing to diagnose, and probing it would only
