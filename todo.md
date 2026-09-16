@@ -2398,3 +2398,22 @@ Seen with dt 0.45.0, 2026-09-16.
 Fixed in 0.46.0.  The script imports `Lean` before the root module, so the
 two-module project dumps its three rows.  A core source, whose root is `Lean`,
 now imports it twice, which Lean accepts: the dump has the same 98 376 rows.
+
+## `--text` with a constant's name misses the statements that use it
+
+The entry "`--name` AND `--text` reports "no match" where each half matches"
+above, again with dt 0.46.0:
+
+    $ dt find --name HasDerivAt --text Finset.sum
+    no match: every condition matches on its own; drop one
+    $ dt find --name HasDerivAt --uses Finset.sum
+    HasDerivAt.pow'  theorem  Mathlib.Analysis.Calculus.Deriv.Pow
+    HasDerivAt.sum  theorem  Mathlib.Analysis.Calculus.Deriv.Add
+    …
+
+The two halves match different rows.  `--text Finset.sum` alone finds the
+docstrings that spell the name out, and a type never does: it prints
+`∑ i ∈ u, A i x`.  The name was a constant, and the condition that reads
+constants is `--uses`.
+
+Seen with dt 0.46.0, 2026-09-16.
