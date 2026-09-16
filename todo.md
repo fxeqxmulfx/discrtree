@@ -2338,3 +2338,28 @@ command that copies the row it showed:
       mathlib: AddSubgroup
     $ dt add --source core AddSubgroup.inertia_mono
     dt: AddSubgroup.inertia_mono is in `flt`, `mathlib`, not in `core`
+
+## Two modules that declare one name get one line range
+
+Lean imports a theorem declared in two modules when the two agree, and Mathlib
+has two: `CategoryTheory.Abelian.instIsStableUnderBaseChangeEpimorphisms` and
+its `Cobase` twin are in `Abelian.CommSq`, at lines 43–47, and in
+`Abelian.Monomorphisms`, at 30–38.  Both rows of each have the `CommSq` range:
+
+    $ sqlite3 .discrtree/index.db "select module, line_start, line_end from decl
+        where name = 'CategoryTheory.Abelian.instIsStableUnderCobaseChangeMonomorphisms'"
+    Mathlib.CategoryTheory.Abelian.CommSq|43|44
+    Mathlib.CategoryTheory.Abelian.Monomorphisms|43|44
+
+The dump takes each constant from the module that declares it, then asks
+`findDeclarationRanges?` by name, and that answers from the first module the
+name was imported from.  A project of two modules shows it:
+
+    -- Dup/A.lean: `theorem same` at line 3; Dup/B.lean: at line 8
+    Dup.same Dup.A 3 4
+    Dup.same Dup.B 3 4
+
+`dt show` then prints the wrong lines of `Monomorphisms`, and `dt add` would
+copy them.
+
+Seen with dt 0.44.0, 2026-09-16.
