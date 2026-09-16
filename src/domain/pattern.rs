@@ -108,7 +108,8 @@ const BINDER_PREFIXES: &[&str] = &["∀", "∃", "∃!", "∑", "∏", "⋃", "�
 /// A bracket is the outermost application of whatever it encloses, whichever
 /// operators are inside it -- `|a + b|` is an absolute value, not an addition
 /// -- so these need no binding strength. Parentheses name nothing: they group,
-/// and the head is whatever they group.
+/// and the head is whatever they group, unless a comma makes them a pair. See
+/// [`is_tuple`].
 ///
 /// `⟫` is matched by prefix, because the field a notation is ascribed with
 /// belongs to it: see [`lex`].
@@ -707,6 +708,14 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
     let opener = |i: usize| (0..i).rfind(|j| depth[*j] < depth[i]);
     (0..tokens.len())
         .filter_map(|i| {
+            // A pair is notation too, spelled with the parentheses that
+            // otherwise only group.
+            if tokens[i] == "("
+                && let Some(end) = (i + 1..tokens.len()).find(|k| depth[*k] <= depth[i])
+                && is_tuple(&tokens[i + 1..end])
+            {
+                return Some(DeclName::new(PAIR));
+            }
             if let Some((_, close, Some(head))) = BRACKETS.iter().find(|(o, ..)| *o == tokens[i]) {
                 // A closing `|` is spelled the way an opening one is, and
                 // opens nothing.
@@ -751,6 +760,27 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     }
 }
 
+/// What `(a, b)` is: parentheses with a comma in them are not a group but a
+/// pair, and Lean prints `Prod.mk a b` that way.
+const PAIR: &str = "Prod.mk";
+
+/// Whether what a pair of parentheses encloses is a tuple: a comma at its top
+/// level that does not end a binder, as the `,` of `(∀ x, p x)` does.
+fn is_tuple(inside: &[String]) -> bool {
+    let depth = depths(inside);
+    let mut binder = 0;
+    for (t, d) in inside.iter().zip(depth) {
+        match t.as_str() {
+            _ if d > 0 => {}
+            "," if binder > 0 => binder -= 1,
+            "," => return true,
+            t if BINDER_PREFIXES.contains(&t) => binder += 1,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The constant the outermost notation among these tokens stands for.
 ///
 /// A bracket around the whole of them is that outermost application whatever
@@ -765,6 +795,7 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
         // group: `(Real.exp x) ≤ y` asks what `Real.exp x ≤ y` asks.
         return match head {
             Some(h) => Some(DeclName::new(h)),
+            None if is_tuple(inside) => Some(DeclName::new(PAIR)),
             None => head_of(inside),
         };
     }
@@ -1519,6 +1550,29 @@ mod tests {
         }
         for word in ["List", "Real", "intervalIntegral", "algebraMap", "_", "2", ""] {
             assert!(!is_receiver(word), "{word}");
+        }
+    }
+
+    /// The report: `(a, b) = (c, d) ↔ a = c ∧ b = d` came back with
+    /// `Nat.dvd_antisymm_iff`, because a pair was read as the parentheses
+    /// around its first element.
+    #[test]
+    fn a_pair_is_the_constant_that_makes_one() {
+        let p = parse("(a, b) = (c, d) ↔ a = c ∧ b = d");
+        assert_eq!(p.query.shape.args, vec![arg("Eq"), arg("And")]);
+        assert_eq!(p.query.uses, [DeclName::new(PAIR)]);
+        assert_eq!(parse("(a, b) = _").query.shape.args, vec![arg(PAIR), arg("_")]);
+        let p = parse("Prod.fst (a, b) = a");
+        assert_eq!(p.query.shape.args, vec![arg("Prod.fst"), arg("_")]);
+        assert_eq!(p.query.uses, [DeclName::new(PAIR)]);
+        assert_eq!(parse("(a, b).fst = a").query.uses, [DeclName::new(PAIR)]);
+        assert_eq!(parse("f (a, b) = _").query.shape.args, vec![arg("_"), arg("_")]);
+        // A comma a binder ends at is not a pair, nor is one inside a bracket.
+        for pattern in ["(∀ x, p x) ↔ q", "(∑ i ∈ s, f i) = _", "(f ‖a, b‖) = _", "(a) = _"]
+        {
+            let p = parse(pattern);
+            assert!(!p.query.uses.contains(&DeclName::new(PAIR)), "{pattern}");
+            assert!(!p.query.shape.heads().any(|h| h.as_str() == PAIR), "{pattern}");
         }
     }
 

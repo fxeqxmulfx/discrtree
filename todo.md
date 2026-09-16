@@ -2248,3 +2248,20 @@ The index has it: `(p.1 ⊔ q.1, p.2 ⊔ q.2)` is stored with `Prod.mk` as its
 head, 910 rows have it as one, and `Prod.mk a b = _` finds `Prod.mk.eta`.
 
 Seen with dt 0.41.0, 2026-09-16.
+
+Fixed in 0.42.0.  Parentheses with a comma at their top level are a pair,
+headed by `Prod.mk` wherever they stand: as a side, as an argument, and as a
+condition when they are further in.
+
+    $ dt find 'Prod.fst (a, b) = a'
+    Lean.Omega.Prod.fst_mk  theorem  Init.Omega.Int
+      ∀ {α : Type u_1} {x : α} {β : Type u_2} {y : β}, (x, y).fst = x
+    $ dt find '(a, b) = _'
+    Prod.mk.eta  theorem  Mathlib.Data.Prod.Basic
+      ∀ {α : Type u_1} {β : Type u_2} {p : α × β}, (p.1, p.2) = p
+
+The pattern from the report now finds only statements about pairs, with
+`Prod.mk_inj` fifth, after four of the same shape about `1` and `0`.  A comma
+that ends a binder is not a pair: `(∀ x, p x)` and `(∑ i ∈ s, f i)` group as
+before.  `⟨a, b⟩` still names nothing, because which structure it builds is
+the one thing it does not say.
