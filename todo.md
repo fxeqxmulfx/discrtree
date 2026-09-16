@@ -2478,3 +2478,18 @@ A statement edited but not yet rebuilt also prints the line once its module
 has been rebuilt since the index was written: the index is behind the source
 then too.  An index from before 0.49.0 has no statements, so the line prints
 after a rebuild until the project is refreshed once.
+
+## A rebuilt module the root does not import is reported as stale
+
+`Transformer/Perspective/Section1_Antipodal.lean` is compiled by `lake build`
+but imported by nothing under `Transformer.lean`, so `dt dump` never sees it
+and the index has no rows for it.  Since 0.48.0 a search after a rebuild that
+recompiled it finds its declarations missing from the index and prints
+
+    dt: `project` was rebuilt since it was indexed; rows may be missing — `dt refresh project`
+
+and `dt refresh project` cannot make that true: the refresh reads the same
+root and leaves the module out again.  The line then goes away only because
+the refresh moved the index's timestamp past the module's `.olean`.
+
+Seen with dt 0.49.0, 2026-09-16.
