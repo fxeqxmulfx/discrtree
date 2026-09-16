@@ -2443,3 +2443,20 @@ A text that finds rows as written is left alone, and so is an undotted word
 (`exp`, `id`), which a docstring may mean as a word.  This also answers the
 older entry: its query was this one, and the ranked union it proposed is not
 needed once the text is read as the constant it names.
+
+## A statement edited in place is not reported as stale
+
+Since 0.48.0 a search stays quiet after a rebuild when every declaration of
+every recompiled module has a row at the lines the build gives it.  An edit
+that keeps the lines passes that check:
+
+    theorem depth_le (f g : Form σ) : (f.le g).depth ≤ max f.depth g.depth := by
+    -- edited to
+    theorem depth_le (f g : Form σ) : (f.le g).depth = max f.depth g.depth := by
+
+After `lake build` the index still holds `≤`, `dt find` answers from it, and
+nothing on stderr says the rows are behind.  The `.ilean` gives the lines of a
+declaration and nothing about what it says, so the check needs something that
+does: the statement as the source spells it, kept beside the row.
+
+Seen with dt 0.48.0, 2026-09-16.
