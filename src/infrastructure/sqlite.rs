@@ -352,58 +352,57 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
     })
 }
 
-impl SqliteIndex {
-    /// Fill in the two side tables for rows already read. Done in one statement
-    /// per batch: `dt deps` on a 5154-node closure would otherwise be 5154
-    /// round trips.
-    fn attach_lists(&self, decls: &mut [Decl]) -> Result<()> {
-        if decls.is_empty() {
-            return Ok(());
-        }
-        let mut by_name: std::collections::HashMap<String, Vec<usize>> = Default::default();
-        for (i, d) in decls.iter().enumerate() {
-            by_name.entry(d.name.to_string()).or_default().push(i);
-        }
-        let placeholders = vec!["?"; decls.len()].join(",");
-        let names: Vec<String> = decls.iter().map(|d| d.name.to_string()).collect();
-        let bind: Vec<&dyn rusqlite::ToSql> =
-            names.iter().map(|n| n as &dyn rusqlite::ToSql).collect();
+/// A row and its id, which is what its lists are kept under.
+fn row_and_id(r: &SqlRow<'_>) -> rusqlite::Result<(i64, Decl)> {
+    Ok((r.get("id")?, decl_from_row(r)?))
+}
 
+impl SqliteIndex {
+    /// Fill in the two side tables for rows read with [`row_and_id`], and drop
+    /// the ids. Done in one statement per batch: `dt deps` on a 5154-node
+    /// closure would otherwise be 5154 round trips.
+    ///
+    /// By id and not by name, because a name can be in several rows:
+    /// `RestrictedProduct.singleAddMonoidHom` is in Mathlib with the
+    /// dependencies of its proof and in FLT with the ones a scanner guessed,
+    /// and read by name each row had both.
+    fn with_lists(&self, rows: Vec<(i64, Decl)>) -> Result<Vec<Decl>> {
+        let (ids, mut decls): (Vec<i64>, Vec<Decl>) = rows.into_iter().unzip();
+        if decls.is_empty() {
+            return Ok(decls);
+        }
+        let mut at: std::collections::HashMap<i64, Vec<usize>> = Default::default();
+        for (i, id) in ids.iter().enumerate() {
+            at.entry(*id).or_default().push(i);
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
         for (table, column) in [("uses", "const"), ("dep", "name")] {
-            let sql = format!(
-                "SELECT d.name, t.{column} FROM decl d JOIN {table} t ON t.decl_id = d.id \
-                 WHERE d.name IN ({placeholders})"
-            );
+            let sql =
+                format!("SELECT decl_id, {column} FROM {table} WHERE decl_id IN ({placeholders})");
             let mut stmt = self.conn.prepare(&sql)?;
-            let mut rows = stmt.query(bind.as_slice())?;
-            while let Some(row) = rows.next()? {
-                let owner: String = row.get(0)?;
-                let value: String = row.get(1)?;
-                if let Some(idx) = by_name.get(&owner) {
-                    for i in idx {
-                        let list = if table == "uses" {
-                            &mut decls[*i].consts
-                        } else {
-                            &mut decls[*i].deps
-                        };
-                        list.push(DeclName::new(value.clone()));
-                    }
+            let mut found = stmt.query(rusqlite::params_from_iter(&ids))?;
+            while let Some(row) = found.next()? {
+                let Some(idx) = at.get(&row.get::<_, i64>(0)?) else { continue };
+                let value = DeclName::new(row.get::<_, String>(1)?);
+                for i in idx {
+                    let d = &mut decls[*i];
+                    let list = if table == "uses" { &mut d.consts } else { &mut d.deps };
+                    list.push(value.clone());
                 }
             }
         }
-        Ok(())
+        Ok(decls)
     }
 }
 
 impl DeclRepo for SqliteIndex {
     fn named(&self, name: &DeclName) -> Result<Vec<Decl>> {
-        let mut decls = self
+        let rows = self
             .conn
             .prepare_cached("SELECT * FROM decl WHERE name = ?1 ORDER BY elaborated DESC")?
-            .query_map(params![name.as_str()], decl_from_row)?
+            .query_map(params![name.as_str()], row_and_id)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        self.attach_lists(&mut decls)?;
-        Ok(decls)
+        self.with_lists(rows)
     }
 
     /// One scan of `decl`, counted in Rust.
@@ -471,7 +470,7 @@ impl DeclRepo for SqliteIndex {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(names.len());
+        let mut rows = Vec::with_capacity(names.len());
         // Chunked to stay under SQLITE_MAX_VARIABLE_NUMBER on a closure of
         // thousands of names.
         for chunk in names.chunks(500) {
@@ -483,12 +482,11 @@ impl DeclRepo for SqliteIndex {
             let bind: Vec<&dyn rusqlite::ToSql> =
                 strings.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(bind.as_slice(), decl_from_row)?;
-            for r in rows {
-                out.push(r?);
+            for r in stmt.query_map(bind.as_slice(), row_and_id)? {
+                rows.push(r?);
             }
         }
-        self.attach_lists(&mut out)?;
+        let mut out = self.with_lists(rows)?;
         // Keep the order asked for: `dt add` depends on it being topological.
         let position: std::collections::HashMap<&DeclName, usize> =
             names.iter().enumerate().map(|(i, n)| (n, i)).collect();
@@ -502,16 +500,13 @@ impl DeclRepo for SqliteIndex {
         let mut stmt = self.conn.prepare(&sql)?;
         let bind: Vec<&dyn rusqlite::ToSql> =
             binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(bind.as_slice(), decl_from_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        self.attach_lists(&mut out)?;
+        let mut rows =
+            stmt.query_map(bind.as_slice(), row_and_id)?.collect::<rusqlite::Result<Vec<_>>>()?;
         // Argument shape is checked in the domain: it is positional matching
         // with an alignment search, which SQL would express badly and slowly.
-        out.retain(|d| query.shape.matches(&d.shape));
-        Ok(out)
+        // Before the lists are read, which a row that fails it has no use for.
+        rows.retain(|(_, d)| query.shape.matches(&d.shape));
+        self.with_lists(rows)
     }
 
     fn provenance(&self, source: &SourceId) -> Result<Option<Provenance>> {

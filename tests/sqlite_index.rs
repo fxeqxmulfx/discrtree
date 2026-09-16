@@ -7,7 +7,7 @@ mod support;
 use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, Provenance};
 use discrtree::application::status;
-use discrtree::domain::decl::{ArgHead, DeclKind, Shape, Span};
+use discrtree::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
@@ -195,6 +195,33 @@ fn an_elaborated_row_wins_over_a_text_row_with_the_same_name() {
     let sources: Vec<SourceId> =
         db.named(&DeclName::new("Foo.bar")).unwrap().into_iter().map(|d| d.source).collect();
     assert_eq!(sources, [SourceId::new("mathlib"), SourceId::new("flt")], "elaborated first");
+}
+
+/// `RestrictedProduct.singleAddMonoidHom` has fourteen dependencies read off
+/// its proof in Mathlib, and three more a scanner guessed from FLT's text. The
+/// lists were read by name, and both rows had all seventeen.
+#[test]
+fn rows_that_share_a_name_keep_their_own_lists() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let compiled = theorem("Foo.bar", "mathlib", "Mathlib.Foo", "Eq", &["Nat.add"]);
+    let mut text = theorem("Foo.bar", "flt", "FLT.Foo", "Eq", &["Pi.single"]);
+    text.elaborated = false;
+    index::load(&mut db, &[text, compiled]).unwrap();
+    db.finish().unwrap();
+
+    let lists = |d: &Decl| (d.source.to_string(), d.deps.clone(), d.consts.clone());
+    let own = |source: &str, dep: &str| {
+        (source.to_string(), vec![DeclName::new(dep)], vec![DeclName::new(dep)])
+    };
+    let name = DeclName::new("Foo.bar");
+    let rows: Vec<_> = db.named(&name).unwrap().iter().map(lists).collect();
+    assert_eq!(rows, [own("mathlib", "Nat.add"), own("flt", "Pi.single")]);
+    assert_eq!(lists(&db.get(&name).unwrap().unwrap()), own("mathlib", "Nat.add"));
+    let many: Vec<_> = db.get_many(&[name]).unwrap().iter().map(lists).collect();
+    assert_eq!(many, [own("mathlib", "Nat.add")]);
+    let flt = Query { source: Some(SourceId::new("flt")), ..Query::new() };
+    let found: Vec<_> = db.find(&flt).unwrap().iter().map(lists).collect();
+    assert_eq!(found, [own("flt", "Pi.single")]);
 }
 
 #[test]

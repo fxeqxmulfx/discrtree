@@ -2069,3 +2069,48 @@ not find `List.Nodup`.
 
 A lambda is reported as it was written again, which it had not been since
 0.34.0: `fun i => l[i]` was printed as the application its index expands to.
+
+---
+
+## Rows that share a name are given each other's dependencies
+
+Found while making `show --source` take the row a source has.  The index read
+a row's constants and dependencies by the row's name, so a name in several
+rows gave every one of them the lists of all.  `RestrictedProduct.singleAddMonoidHom`
+is in Mathlib, with fourteen dependencies read off its proof term, and in FLT,
+with three more a scanner guessed from the text, and `deps` gave all seventeen
+as exact:
+
+    $ dt deps RestrictedProduct.singleAddMonoidHom
+    RestrictedProduct.singleAddMonoidHom
+    depth 1 (17)
+      core: DecidableEq
+      mathlib: AddMonoid AddMonoid.toAddZeroClass AddMonoidHom.mk AddSubmonoidClass AddZero.toZero
+        AddZeroClass.toAddZero Filter.cofinite Pi.single Pi.single_add RestrictedProduct
+        RestrictedProduct.instAddMonoidCoeOfAddSubmonoidClass RestrictedProduct.single
+        Set.finite_singleton SetLike SetLike.coe ZeroHom.mk
+
+`Pi.single`, `Pi.single_add` and `Set.finite_singleton` are the guesses.  426
+names are in more than one row, and the same lists make the closure `dt add`
+copies and rank the rows of `find`.
+
+Seen with dt 0.38.0, 2026-09-16.
+
+Fixed in 0.39.0.  A row's lists are read by its id, and each row keeps its own:
+
+    $ dt deps RestrictedProduct.singleAddMonoidHom
+    RestrictedProduct.singleAddMonoidHom
+    depth 1 (14)
+      core: DecidableEq
+      mathlib: AddMonoid AddMonoid.toAddZeroClass AddMonoidHom.mk AddSubmonoidClass AddZero.toZero
+        AddZeroClass.toAddZero Filter.cofinite RestrictedProduct
+        RestrictedProduct.instAddMonoidCoeOfAddSubmonoidClass RestrictedProduct.single SetLike
+        SetLike.coe ZeroHom.mk
+
+`find` reads them only for the rows that match the shape.  Neither change
+moved the time of a search or of a 4844-declaration closure, and the 104
+patterns of the regression sweep find what they found before.
+
+Not fixed: two instances in Mathlib's `CategoryTheory.Abelian` are declared in
+two modules each, and both rows of each have one line range, because the dump
+takes the constant from its module and looks the range up by name.
