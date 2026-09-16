@@ -291,9 +291,11 @@ pub struct FindArgs {
     #[arg(long, value_name = "NAME")]
     pub source: Option<String>,
 
-    /// theorem, def, structure, inductive, axiom, instance, ctor.
-    #[arg(long, value_name = "KIND")]
-    pub kind: Option<String>,
+    /// Any of: theorem, def, structure, inductive, axiom, instance, ctor,
+    /// opaque, rec, quot. A comma list or repeated means any of them. `lemma`
+    /// is indexed as theorem, `abbrev` as def, `class` as structure.
+    #[arg(long, value_delimiter = ',', value_name = "KIND,...")]
+    pub kind: Vec<String>,
 
     /// Free text over the name, type and docstring of each declaration; module
     /// docstrings are not read. Whole words, not substrings.

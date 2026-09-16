@@ -42,6 +42,26 @@ pub enum DeclKind {
     Other(String),
 }
 
+/// Every kind a dump writes: the seven Lean's own declaration commands come
+/// to, and the three kernel ones a search can still land on.
+pub const KINDS: &[&str] = &[
+    "theorem",
+    "def",
+    "structure",
+    "inductive",
+    "axiom",
+    "instance",
+    "ctor",
+    "opaque",
+    "rec",
+    "quot",
+];
+
+/// Commands that are not kinds of their own: Lean elaborates each into one of
+/// [`KINDS`], and the index records what it became.
+pub const ALIASES: &[(&str, &str)] =
+    &[("lemma", "theorem"), ("abbrev", "def"), ("class", "structure")];
+
 impl DeclKind {
     pub fn parse(s: &str) -> DeclKind {
         match s {
@@ -54,6 +74,14 @@ impl DeclKind {
             "ctor" => DeclKind::Ctor,
             other => DeclKind::Other(other.to_string()),
         }
+    }
+
+    /// The kind a reader asked for by name, or `None` for a word that is not
+    /// one. [`DeclKind::parse`] keeps any word, because a dump may carry a kind
+    /// this build has not heard of; a flag has no such excuse, and a kind no
+    /// row can have is a typo that would otherwise come back as `no match`.
+    pub fn named(s: &str) -> Option<DeclKind> {
+        (KINDS.contains(&s) || ALIASES.iter().any(|(a, _)| *a == s)).then(|| DeclKind::parse(s))
     }
 
     pub fn as_str(&self) -> &str {

@@ -548,7 +548,7 @@ fn a_pattern_that_matches_on_its_own_is_still_blamed_on_the_combination() {
 fn asking_for_an_instance_where_the_dump_recorded_none_says_the_dump_is_old() {
     let repo = with_instances(false);
     let mut q = Query::new();
-    q.kind = Some(discrtree::domain::decl::DeclKind::Instance);
+    q.kind = vec![discrtree::domain::decl::DeclKind::Instance];
     q.module = Some("Mathlib.Analysis.Exp".into());
     assert_eq!(
         Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
@@ -562,7 +562,7 @@ fn asking_for_an_instance_where_the_dump_recorded_none_says_the_dump_is_old() {
 fn an_index_that_has_instances_diagnoses_them_like_any_other_kind() {
     let repo = with_instances(true);
     let mut q = Query::new();
-    q.kind = Some(discrtree::domain::decl::DeclKind::Instance);
+    q.kind = vec![discrtree::domain::decl::DeclKind::Instance];
     q.module = Some("Other.Main".into());
     assert!(matches!(
         Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,

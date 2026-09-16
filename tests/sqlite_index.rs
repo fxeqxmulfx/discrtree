@@ -816,3 +816,21 @@ fn a_source_that_moved_during_its_read_is_named() {
         "an unknown revision is not a move"
     );
 }
+
+#[test]
+fn a_list_of_kinds_selects_any_of_them() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let mut def = theorem("A.def", "mathlib", "M", "Eq", &[]);
+    def.kind = DeclKind::Def;
+    let mut opaque = theorem("A.opaque", "mathlib", "M", "Eq", &[]);
+    opaque.kind = DeclKind::parse("opaque");
+    index::load(&mut db, &[def, opaque, theorem("A.thm", "mathlib", "M", "Eq", &[])]).unwrap();
+    db.finish().unwrap();
+    let mut q = Query::new();
+    q.name = Some("A.".into());
+    q.kind = vec![DeclKind::Def, DeclKind::parse("opaque")];
+    let mut got: Vec<String> =
+        db.find(&q).unwrap().into_iter().map(|d| d.name.to_string()).collect();
+    got.sort();
+    assert_eq!(got, vec!["A.def", "A.opaque"]);
+}

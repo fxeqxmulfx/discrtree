@@ -1627,19 +1627,6 @@ build moved is let off when the `.olean` of every module `show` printed is
 older than the index. A search still warns: what it did not find may be in a
 module that was rebuilt.
 
-**`--kind` takes one kind, and a list is blamed as matching nothing.**
-Looking for the definitions `Transformer.CRASP.Depth` rests on:
-
-    $ dt find --source project --name CRASP.Affix --kind def,structure,abbrev
-    no match: --kind def,structure,abbrev matches nothing on its own
-
-`--uses` takes a comma list, so `--kind` reads as if it does too; here the
-whole string is taken as one kind, which no row has, and the answer is the
-same line an empty search gives. An unknown kind should be an error naming the
-kinds there are (as an unknown `--source` already is), or `--kind` should take
-a list like `--uses`. `abbrev` is not among the kinds either: an `abbrev` is
-indexed as `def`, which `--help` could say.
-
 Fixed in 0.30.0.
 
 **`dt refresh` records the build it read, and says when a build landed while
@@ -1661,3 +1648,31 @@ source that moved in between is named then rather than by the next search:
     behind it — `dt refresh project` once the build has finished
 
 `dt index` on its own still records the revision it finds when it starts.
+
+**`--kind` takes one kind, and a list is blamed as matching nothing.**
+Looking for the definitions `Transformer.CRASP.Depth` rests on:
+
+    $ dt find --source project --name CRASP.Affix --kind def,structure,abbrev
+    no match: --kind def,structure,abbrev matches nothing on its own
+
+`--uses` takes a comma list, so `--kind` reads as if it does too; here the
+whole string is taken as one kind, which no row has, and the answer is the
+same line an empty search gives. An unknown kind should be an error naming the
+kinds there are (as an unknown `--source` already is), or `--kind` should take
+a list like `--uses`. `abbrev` is not among the kinds either: an `abbrev` is
+indexed as `def`, which `--help` could say.
+
+Fixed in 0.31.0.
+
+**`--kind` takes a list, and a word that is not a kind is an error.** A comma
+list, or the flag repeated, means any of those kinds, and the list is one
+condition in a no-match line (`--kind def,structure`). A word that is not a kind
+fails before the search, naming the kinds:
+
+    $ dt find --name Affix --kind defs
+    dt: no kind `defs`; the kinds are theorem, def, structure, inductive, axiom,
+    instance, ctor, opaque, rec, quot (`lemma` is theorem, `abbrev` def, `class`
+    structure), and a comma list means any of them
+
+`--help` names the same kinds and the three aliases. `opaque`, `rec` and
+`quot` were in the index all along and are now listed.

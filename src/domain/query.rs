@@ -26,7 +26,8 @@ pub struct Query {
     /// Module prefix, e.g. `Mathlib.Analysis`.
     pub module: Option<String>,
     pub source: Option<SourceId>,
-    pub kind: Option<DeclKind>,
+    /// Any of these kinds; empty is every kind.
+    pub kind: Vec<DeclKind>,
     /// Free-text words over type and docstring. ANDed, like `uses`: the flag
     /// repeats, and a `--text` given several words is those words, because
     /// that is what the text index does with them anyway.
@@ -60,7 +61,7 @@ impl Query {
             && self.uses.is_empty()
             && self.module.is_none()
             && self.source.is_none()
-            && self.kind.is_none()
+            && self.kind.is_empty()
             && self.text.is_empty()
     }
 
@@ -111,8 +112,15 @@ impl Query {
                 one(Query { source: Some(s.clone()), ..Query::new() }),
             ));
         }
-        if let Some(k) = &self.kind {
-            out.push((format!("--kind {k}"), one(Query { kind: Some(k.clone()), ..Query::new() })));
+        // One condition however many kinds it names: the list is an `or`, and
+        // blaming one kind of it would be blaming something that cannot fail
+        // alone.
+        if !self.kind.is_empty() {
+            let named: Vec<&str> = self.kind.iter().map(DeclKind::as_str).collect();
+            out.push((
+                format!("--kind {}", named.join(",")),
+                one(Query { kind: self.kind.clone(), ..Query::new() }),
+            ));
         }
         for x in &self.text {
             out.push((format!("--text {x}"), one(Query { text: vec![x.clone()], ..Query::new() })));
@@ -161,9 +169,7 @@ impl Query {
         {
             return false;
         }
-        if let Some(k) = &self.kind
-            && &d.kind != k
-        {
+        if !self.kind.is_empty() && !self.kind.contains(&d.kind) {
             return false;
         }
         // Each word on its own, and either field: the text index treats the
@@ -265,6 +271,25 @@ mod tests {
     /// of its own suffixes, because within the substring matches nothing
     /// preferred the row whose name *is* the query. Past the default limit
     /// that reads as "not indexed" rather than "look further down".
+    #[test]
+    fn a_list_of_kinds_is_any_of_them_and_one_condition() {
+        let mut q = Query::new();
+        q.kind = vec![DeclKind::Def, DeclKind::Structure];
+        let mut d = decl();
+        assert!(!q.matches(&d), "a theorem is neither");
+        d.kind = DeclKind::Structure;
+        assert!(q.matches(&d));
+        let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, vec!["--kind def,structure"]);
+    }
+
+    #[test]
+    fn a_kind_is_named_or_refused() {
+        assert_eq!(DeclKind::named("abbrev"), Some(DeclKind::Def));
+        assert_eq!(DeclKind::named("opaque"), Some(DeclKind::Other("opaque".into())));
+        assert_eq!(DeclKind::named("def,structure"), None);
+    }
+
     #[test]
     fn a_constant_written_in_the_pattern_is_not_called_a_flag() {
         let mut q = Query::new();

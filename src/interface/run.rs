@@ -13,6 +13,7 @@ use crate::application::rdeps::Rdeps;
 use crate::application::ship::Fetch;
 use crate::application::show::Show;
 use crate::application::status::{self, Status};
+use crate::domain::decl::{self, DeclKind};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::pattern;
 use crate::domain::query::Query;
@@ -858,8 +859,17 @@ fn query_of(a: &FindArgs) -> Result<Query> {
         q.module = a.module.clone();
     }
     q.source = a.source.as_ref().map(SourceId::new);
-    if let Some(k) = &a.kind {
-        q.kind = Some(crate::domain::decl::DeclKind::parse(k));
+    for k in &a.kind {
+        let Some(kind) = DeclKind::named(k) else {
+            bail!(
+                "no kind `{k}`; the kinds are {} (`lemma` is theorem, `abbrev` def, `class` \
+                 structure), and a comma list means any of them",
+                decl::KINDS.join(", ")
+            )
+        };
+        if !q.kind.contains(&kind) {
+            q.kind.push(kind);
+        }
     }
     // Appended, not assigned: a pattern that could not be read as a shape has
     // already put its own words here, and `--text` adds a condition rather
@@ -1048,6 +1058,20 @@ mod tests {
         assert_eq!(q.module.as_deref(), Some("Mathlib.Analysis"));
         assert_eq!(q.uses.len(), 2);
         assert_eq!(q.limit, 5);
+    }
+
+    /// `--uses` takes a list, so `--kind` was given one, and the whole string
+    /// was taken as a kind no row has.
+    #[test]
+    fn kind_takes_a_list_and_refuses_a_word_that_is_not_a_kind() {
+        let q = query_of(&args(&["dt", "find", "--kind", "def,structure,abbrev", "--kind", "rec"]))
+            .unwrap();
+        let kinds: Vec<&str> = q.kind.iter().map(DeclKind::as_str).collect();
+        assert_eq!(kinds, vec!["def", "structure", "rec"], "`abbrev` is a def, said once");
+
+        let err = query_of(&args(&["dt", "find", "--kind", "def,lemmas"])).unwrap_err().to_string();
+        assert!(err.contains("no kind `lemmas`"), "{err}");
+        assert!(err.contains("theorem, def, structure"), "{err}");
     }
 
     #[test]

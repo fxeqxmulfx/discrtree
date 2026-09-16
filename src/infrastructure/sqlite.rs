@@ -629,9 +629,10 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         where_clauses.push("d.source = ?".into());
         binds.push(s.to_string());
     }
-    if let Some(k) = &q.kind {
-        where_clauses.push("d.kind = ?".into());
-        binds.push(k.to_string());
+    if !q.kind.is_empty() {
+        let marks = vec!["?"; q.kind.len()].join(", ");
+        where_clauses.push(format!("d.kind IN ({marks})"));
+        binds.extend(q.kind.iter().map(|k| k.to_string()));
     }
     if q.elaborated_only || q.needs_shape() {
         where_clauses.push("d.elaborated = 1".into());

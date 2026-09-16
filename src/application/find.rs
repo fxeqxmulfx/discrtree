@@ -302,11 +302,11 @@ impl Find<'_> {
         // does match on its own -- text rows have carried the kind since the
         // scanner was written -- and the answer would otherwise be "drop a
         // condition", which is the one repair that cannot help here.
-        if query.kind == Some(DeclKind::Instance)
+        if query.kind == [DeclKind::Instance]
             && self
                 .repo
                 .find(&Query {
-                    kind: Some(DeclKind::Instance),
+                    kind: vec![DeclKind::Instance],
                     elaborated_only: true,
                     limit: 1,
                     ..Query::new()
