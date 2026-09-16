@@ -2394,3 +2394,7 @@ Twenty-seven errors, none of which says what is missing.  Found while testing
 the line-range fix on a two-module project.
 
 Seen with dt 0.45.0, 2026-09-16.
+
+Fixed in 0.46.0.  The script imports `Lean` before the root module, so the
+two-module project dumps its three rows.  A core source, whose root is `Lean`,
+now imports it twice, which Lean accepts: the dump has the same 98 376 rows.

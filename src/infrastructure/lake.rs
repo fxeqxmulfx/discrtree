@@ -21,6 +21,10 @@ const BEGIN: &str = "-- BEGIN IMPORTS";
 const END: &str = "-- END IMPORTS";
 
 /// Put the source's root module into the script's import block.
+///
+/// `Lean` goes in too: the script is written against `Lean.Expr` and `MetaM`,
+/// and a project of plain Lean does not import them. A second import of a
+/// module Mathlib already brought in costs nothing.
 pub fn splice_imports(script: &str, root: &str) -> Result<String> {
     let (Some(start), Some(end)) = (script.find(BEGIN), script.find(END)) else {
         bail!("lean/dump.lean has lost its `{BEGIN}` / `{END}` markers")
@@ -28,7 +32,7 @@ pub fn splice_imports(script: &str, root: &str) -> Result<String> {
     let mut out = String::with_capacity(script.len() + 64);
     out.push_str(&script[..start]);
     out.push_str(BEGIN);
-    out.push_str(" (rewritten by `dt dump`)\nimport ");
+    out.push_str(" (rewritten by `dt dump`)\nimport Lean\nimport ");
     out.push_str(root);
     out.push('\n');
     out.push_str(&script[end..]);
@@ -354,6 +358,7 @@ mod tests {
     fn splicing_replaces_the_import_block_and_keeps_the_rest() {
         let out = splice_imports(DUMP_LEAN, "Transformer").unwrap();
         assert!(out.contains("import Transformer"));
+        assert!(out.contains("\nimport Lean\n"), "the script's own dependency, whatever the root");
         assert!(!out.contains("\nimport Mathlib\n"), "the placeholder import is gone");
         assert!(out.contains("Discrtree.dumpAll"), "the body survived");
         assert!(out.contains(END));
