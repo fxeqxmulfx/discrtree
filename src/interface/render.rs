@@ -795,7 +795,7 @@ mod tests {
     use crate::domain::name::DeclName;
 
     fn hits(rows: Vec<Decl>) -> Hits {
-        Hits { rows, truncated: false, empty: None, read_as: Vec::new() }
+        Hits { rows, truncated: false, empty: None, read_as: Vec::new(), variables: Vec::new() }
     }
 
     fn decl(elaborated: bool) -> Decl {
@@ -834,7 +834,13 @@ mod tests {
     fn a_truncated_search_says_so_instead_of_looking_complete() {
         let full = find(&hits(vec![decl(true)]), false);
         let cut = find(
-            &Hits { rows: vec![decl(true)], truncated: true, empty: None, read_as: Vec::new() },
+            &Hits {
+                rows: vec![decl(true)],
+                truncated: true,
+                empty: None,
+                read_as: Vec::new(),
+                variables: Vec::new(),
+            },
             false,
         );
         assert!(full.contains("1 result"));
@@ -926,6 +932,7 @@ mod tests {
                     ],
                 }),
                 read_as: Vec::new(),
+                variables: Vec::new(),
             },
             false,
         );
@@ -959,6 +966,7 @@ mod tests {
                 truncated: false,
                 empty: Some(Empty::InstancesAreDefs),
                 read_as: Vec::new(),
+                variables: Vec::new(),
             },
             false,
         );
@@ -977,6 +985,7 @@ mod tests {
             truncated: false,
             empty: Some(e),
             read_as: Vec::new(),
+            variables: Vec::new(),
         };
         let r = find(
             &empty(Empty::Combination {
@@ -1011,6 +1020,7 @@ mod tests {
             truncated: false,
             empty: Some(e),
             read_as: Vec::new(),
+            variables: Vec::new(),
         };
         let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
             find(
@@ -1048,7 +1058,13 @@ mod tests {
     fn a_pattern_answered_by_its_parts_says_which_part() {
         let empty = |e: Empty| {
             find(
-                &Hits { rows: Vec::new(), truncated: false, empty: Some(e), read_as: Vec::new() },
+                &Hits {
+                    rows: Vec::new(),
+                    truncated: false,
+                    empty: Some(e),
+                    read_as: Vec::new(),
+                    variables: Vec::new(),
+                },
                 false,
             )
         };
@@ -1121,6 +1137,7 @@ mod tests {
             truncated: false,
             empty: Some(e),
             read_as: Vec::new(),
+            variables: Vec::new(),
         };
         let r = find(
             &empty(Empty::NotIndexed {
@@ -1171,6 +1188,7 @@ mod tests {
                     missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
                 }),
                 read_as: Vec::new(),
+                variables: Vec::new(),
             },
             false,
         );
@@ -1192,6 +1210,7 @@ mod tests {
                     missing: Missing::Core("leanprover/lean4:v4.33.1".into()),
                 }),
                 read_as: Vec::new(),
+                variables: Vec::new(),
             },
             false,
         );

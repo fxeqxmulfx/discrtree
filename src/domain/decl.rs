@@ -267,26 +267,85 @@ impl Decl {
     }
 }
 
-/// The head symbols whose last component is `word`, commonest first.
+/// The head symbols whose last component is `word`, commonest first, counted
+/// over the rows whose type prints `word` as a name of its own. See
+/// [`prints_bare`].
 ///
 /// The rule for reading an unqualified pattern token, in one place: the
 /// in-memory stores count over this, SQLite counts the same thing in SQL, and
-/// the two agreeing is what makes either trustworthy. Ties go to the shorter
-/// name and then alphabetically, so the answer does not depend on what order
-/// the rows arrived in.
+/// the two agreeing is what makes either trustworthy. A row counts once however
+/// often it has the head. Ties go to the shorter name and then alphabetically,
+/// so the answer does not depend on what order the rows arrived in.
 pub fn commonest_called<'a>(
-    heads: impl Iterator<Item = &'a DeclName>,
+    rows: impl Iterator<Item = (&'a str, Vec<&'a DeclName>)>,
     word: &str,
 ) -> Vec<DeclName> {
     let mut count: std::collections::HashMap<&DeclName, usize> = std::collections::HashMap::new();
-    for h in heads.filter(|h| h.base() == word) {
-        *count.entry(h).or_default() += 1;
+    for (ty, heads) in rows {
+        let mut called: Vec<&DeclName> = heads.into_iter().filter(|h| h.base() == word).collect();
+        called.sort();
+        called.dedup();
+        if called.is_empty() || !prints_bare(ty, word) {
+            continue;
+        }
+        for h in called {
+            *count.entry(h).or_default() += 1;
+        }
     }
     let mut ranked: Vec<(&DeclName, usize)> = count.into_iter().collect();
     ranked.sort_by(|(an, ac), (bn, bc)| {
         bc.cmp(ac).then(an.as_str().len().cmp(&bn.as_str().len())).then(an.cmp(bn))
     });
     ranked.into_iter().map(|(n, _)| n.clone()).collect()
+}
+
+/// Whether a printed type spells `word` without a namespace: somewhere as a
+/// name of its own, nowhere after a `.`, and nowhere as a binder.
+///
+/// This is what tells a name Lean prints bare from a variable that happens to
+/// share it. `export Bool (false)` makes every row with `Bool.false` in it say
+/// `false`. `CategoryTheory.Discrete.as` heads 62 rows and not one of them says
+/// `as` -- it is printed `X.as` -- so a pattern's `as ++ bs` is not about it.
+/// A row that binds the word, `(val : α)` or `[inst : Monoid α]` or
+/// `{ neg := y }`, says nothing about what the word names elsewhere, and is
+/// where the rest of the false readings came from: `val` was `Units.val`
+/// by three rows that name a hypothesis so.
+pub fn prints_bare(ty: &str, word: &str) -> bool {
+    let glued = |c: char| c.is_alphanumeric() || "_'".contains(c);
+    let mut bare = false;
+    for (at, _) in ty.match_indices(word) {
+        let before = ty[..at].chars().next_back();
+        let rest = &ty[at + word.len()..];
+        if before.is_some_and(glued)
+            || rest.chars().next().is_some_and(|c| glued(c) || "!?".contains(c))
+        {
+            continue;
+        }
+        if before == Some('.') || binds(rest) {
+            return false;
+        }
+        bare = true;
+    }
+    bare
+}
+
+/// Whether what follows a word makes it a binder: more words, then ` :`.
+/// `(as bs : List α)` binds both.
+fn binds(mut rest: &str) -> bool {
+    loop {
+        let spaced = rest.trim_start();
+        if spaced.len() == rest.len() {
+            return false;
+        }
+        if spaced.starts_with(':') {
+            return true;
+        }
+        let word = spaced.find(|c: char| c.is_whitespace() || "():,[]{}⦃⦄".contains(c));
+        match word {
+            Some(0) | None => return false,
+            Some(end) => rest = &spaced[end..],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -372,16 +431,46 @@ mod tests {
     /// Seventy-eight constants in Mathlib end in `.inner` and one of them is
     /// what nearly every row means: `Inner.inner` heads 376 of them, the next
     /// heads 8. Frequency is what tells an `export`ed name from a field on
-    /// somebody's structure, and nothing else in the index does.
+    /// somebody's structure, among the rows that print the word bare.
     #[test]
     fn the_commonest_constant_with_a_name_comes_first() {
         let n = DeclName::new;
-        let heads = [n("Inner.inner"), n("Std.HashMap.inner"), n("Inner.inner"), n("Eq")];
+        let (inner, map, eq) = (n("Inner.inner"), n("Std.HashMap.inner"), n("Eq"));
+        let rows = vec![
+            ("inner x y = 0", vec![&inner, &eq]),
+            ("inner x x = ‖x‖ ^ 2", vec![&inner, &inner, &eq]),
+            ("m.inner = inner m", vec![&map, &eq]),
+            ("inner m = m.inner", vec![&map, &inner]),
+            ("inner (f x) = 1", vec![&map, &eq]),
+        ];
         assert_eq!(
-            commonest_called(heads.iter(), "inner"),
+            commonest_called(rows.into_iter(), "inner"),
             vec![n("Inner.inner"), n("Std.HashMap.inner")]
         );
         // The last component, not a substring: `inner_apply` is not `inner`.
-        assert!(commonest_called([n("Real.inner_apply")].iter(), "inner").is_empty());
+        let apply = n("Real.inner_apply");
+        assert!(commonest_called([("inner_apply", vec![&apply])].into_iter(), "inner").is_empty());
+    }
+
+    #[test]
+    fn a_word_is_printed_bare_when_no_namespace_and_no_binder_claims_it() {
+        for ty in
+            ["List.count false l = 0", "¬false = true", "(false, x)", "max a b ≤ c", "f\n  false"]
+        {
+            let word = if ty.contains("max") { "max" } else { "false" };
+            assert!(prints_bare(ty, word), "{ty}");
+        }
+        for (ty, word) in [
+            ("X.as = Y.as", "as"),
+            ("∀ (as bs : List α), (as ++ bs).length = 0", "as"),
+            ("∀ (val : α), u.copy val = val", "val"),
+            ("∀ [inst : Monoid α], 1 = 1", "inst"),
+            ("-{ val := x, neg := y } = 0", "neg"),
+            ("falsehood = x", "false"),
+            ("get? l = none", "get"),
+            ("h' = h₁", "h"),
+        ] {
+            assert!(!prints_bare(ty, word), "{ty}");
+        }
     }
 }

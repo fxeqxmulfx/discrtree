@@ -160,28 +160,59 @@ pub struct Hits {
     /// silently: the rows below answer a question spelled differently from
     /// the one that was asked.
     pub read_as: Vec<(String, DeclName)>,
+    /// Words of the pattern read as variables on that second look, for the
+    /// same reason. See [`Reading::variables`].
+    pub variables: Vec<String>,
+}
+
+/// What the words of a pattern that found nothing were read as, the second
+/// time.
+#[derive(Debug, Default)]
+struct Reading {
+    /// Each bare word Lean prints for a constant, and the constants it could
+    /// be, commonest first.
+    called: Vec<(String, Vec<DeclName>)>,
+    /// Words in lower case that name nothing: no row is called that, mentions
+    /// it, or prints it for a constant of another name.
+    ///
+    /// Asked of the index, where a single letter is a variable by its
+    /// spelling alone (see `pattern::is_variable`). A letter is never a
+    /// constant worth searching for; a word may be -- `deriv`, `id`,
+    /// `closure` -- and so may one Lean exports, and the index is the one
+    /// thing that knows which words are neither. That is also why this is a
+    /// second look: a pattern that answered as written is read as written, in
+    /// every project alike.
+    variables: Vec<String>,
 }
 
 /// The query with each bare word replaced by the constant it most likely
-/// names. `None` when there was nothing to replace.
-fn qualified(query: &Query, called: &[(String, Vec<DeclName>)]) -> Option<Query> {
+/// names, and each word read as a variable made `_`. `None` when there was
+/// nothing to replace.
+fn qualified(query: &Query, reading: &Reading) -> Option<Query> {
     let top = |n: &DeclName| {
-        called.iter().find(|(w, _)| w == n.as_str()).and_then(|(_, c)| c.first()).cloned()
+        reading.called.iter().find(|(w, _)| w == n.as_str()).and_then(|(_, c)| c.first()).cloned()
     };
+    let variable = |n: &DeclName| reading.variables.iter().any(|v| v == n.as_str());
     let mut out = query.clone();
     let mut any = false;
-    if let Some(c) = &out.shape.concl
-        && let Some(resolved) = top(c)
-    {
-        out.shape.concl = Some(resolved);
-        any = true;
+    if let Some(c) = &out.shape.concl {
+        if let Some(resolved) = top(c) {
+            out.shape.concl = Some(resolved);
+            any = true;
+        } else if variable(c) {
+            out.shape.concl = None;
+            any = true;
+        }
     }
     for a in &mut out.shape.args {
-        if let ArgHead::Named(n) = a
-            && let Some(resolved) = top(n)
-        {
-            *a = ArgHead::Named(resolved);
-            any = true;
+        if let ArgHead::Named(n) = a {
+            if let Some(resolved) = top(n) {
+                *a = ArgHead::Named(resolved);
+                any = true;
+            } else if variable(n) {
+                *a = ArgHead::Any;
+                any = true;
+            }
         }
     }
     // A constant inside the pattern is in both lists, and is renamed in both so
@@ -192,6 +223,11 @@ fn qualified(query: &Query, called: &[(String, Vec<DeclName>)]) -> Option<Query>
             any = true;
         }
     }
+    let written = out.pattern_uses.clone();
+    let before = out.uses.len();
+    out.uses.retain(|u| !(variable(u) && written.contains(u)));
+    out.pattern_uses.retain(|u| !variable(u));
+    any |= out.uses.len() != before;
     any.then_some(out)
 }
 
@@ -207,17 +243,23 @@ impl Find<'_> {
         // rows, which is not the one that was typed when a bare word had to be
         // resolved first.
         let mut asked = query.clone();
+        let mut reading = Reading::default();
         let mut read_as = Vec::new();
-        let mut called = Vec::new();
+        let mut variables = Vec::new();
         if rows.is_empty() {
-            called = self.resolve(query)?;
-            if let Some(retry) = qualified(query, &called) {
+            reading = self.resolve(query)?;
+            if let Some(retry) = qualified(query, &reading) {
                 let found = self.repo.find(&retry)?;
-                if !found.is_empty() {
-                    read_as = called
+                // A variable is reported whatever the retry found: with no
+                // constant to blame, the question left to diagnose is the one
+                // without the variables in it.
+                if !found.is_empty() || reading.called.is_empty() {
+                    read_as = reading
+                        .called
                         .iter()
                         .filter_map(|(w, c)| c.first().map(|n| (w.clone(), n.clone())))
                         .collect();
+                    variables = reading.variables.clone();
                     rows = found;
                     asked = retry;
                 }
@@ -226,12 +268,16 @@ impl Find<'_> {
         rows.sort_by_key(|d| query::rank(&asked, d));
         let truncated = rows.len() > asked.limit;
         rows.truncate(asked.limit);
-        let empty = if rows.is_empty() { Some(self.diagnose(query, &called)?) } else { None };
-        Ok(Hits { rows, truncated, empty, read_as })
+        let empty = match rows.is_empty() {
+            true => Some(self.diagnose(&asked, &reading.called)?),
+            false => None,
+        };
+        Ok(Hits { rows, truncated, empty, read_as, variables })
     }
 
     /// The constants each bare word in the pattern could be naming, commonest
-    /// first, for the words that name any.
+    /// first, for the words that name any; and the words in lower case that
+    /// name nothing, as variables.
     ///
     /// Every word of the pattern, not only its heads: `export Bool (false
     /// true)` drops the namespace wherever the printer meets the constant, and
@@ -243,23 +289,28 @@ impl Find<'_> {
     /// Asked only of a search that found nothing: a word that answered as
     /// written is a word that meant what it said, and resolving it anyway
     /// would be two scans of the index to change nothing.
-    fn resolve(&self, query: &Query) -> Result<Vec<(String, Vec<DeclName>)>> {
-        let mut out = Vec::new();
+    fn resolve(&self, query: &Query) -> Result<Reading> {
+        let mut out = Reading::default();
+        let mut seen: Vec<&str> = Vec::new();
         for word in query.shape.heads().chain(&query.pattern_uses) {
             // A word written twice -- `exp _ ≤ exp _` -- is one word to
             // resolve and one line to report.
-            if word.as_str().contains('.') || out.iter().any(|(w, _)| w == word.as_str()) {
+            if word.as_str().contains('.') || seen.contains(&word.as_str()) {
+                continue;
+            }
+            seen.push(word.as_str());
+            // A word the index has by that spelling means what it says. `Eq`
+            // is spelled `Eq` there, and `deriv` is `deriv` however many
+            // namespaces have one of their own; a query that failed with it in
+            // the pattern failed for some other reason.
+            if self.repo.is_constant(word)? {
                 continue;
             }
             let called = self.repo.heads_called(word.as_str())?;
-            // A word that is itself a head symbol means what it says. `Eq` is
-            // spelled `Eq` in the index, and a query that failed with it in
-            // the pattern failed for some other reason.
-            if called.iter().any(|c| c.as_str() == word.as_str()) {
-                continue;
-            }
             if !called.is_empty() {
-                out.push((word.as_str().to_owned(), called));
+                out.called.push((word.as_str().to_owned(), called));
+            } else if word.as_str().starts_with(char::is_lowercase) {
+                out.variables.push(word.as_str().to_owned());
             }
         }
         Ok(out)

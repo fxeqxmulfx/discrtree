@@ -314,6 +314,12 @@ impl App {
         for (written, read) in &hits.read_as {
             eprintln!("dt: `{written}` read as `{read}`");
         }
+        if !hits.variables.is_empty() {
+            eprintln!(
+                "dt: `{}` read as `_` — no constant in the index is called that",
+                hits.variables.join("`, `")
+            );
+        }
         print!("{}", render::find(&hits, args.long));
         let from = match hits.rows.is_empty() {
             false => hits.rows.iter().map(|d| d.source.clone()).collect(),

@@ -235,7 +235,10 @@ impl DeclRepo for JsonlRepo {
     }
 
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
-        Ok(decl::commonest_called(self.decls.iter().flat_map(|d| d.shape.heads()), word))
+        Ok(decl::commonest_called(
+            self.decls.iter().map(|d| (d.ty.as_str(), d.shape.heads().collect())),
+            word,
+        ))
     }
 
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {

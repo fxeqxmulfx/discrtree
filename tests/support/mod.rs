@@ -125,7 +125,10 @@ impl DeclRepo for FakeRepo {
     }
 
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
-        Ok(decl::commonest_called(self.decls.iter().flat_map(|d| d.shape.heads()), word))
+        Ok(decl::commonest_called(
+            self.decls.iter().map(|d| (d.ty.as_str(), d.shape.heads().collect())),
+            word,
+        ))
     }
 
     /// The same rule SQLite applies: the smallest strictly-containing span in

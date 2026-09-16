@@ -417,17 +417,30 @@ impl DeclRepo for SqliteIndex {
         let ends = format!("%.{word}");
         let mentions = format!("%.{word}%");
         let mut stmt = self.conn.prepare_cached(
-            "SELECT concl, concl_args FROM decl WHERE concl LIKE ?1 OR concl_args LIKE ?2",
+            "SELECT concl, concl_args, type FROM decl WHERE concl LIKE ?1 OR concl_args LIKE ?2",
         )?;
-        let mut heads: Vec<DeclName> = Vec::new();
+        let mut found: Vec<(String, Vec<DeclName>)> = Vec::new();
         let mut rows = stmt.query(params![ends, mentions])?;
         while let Some(row) = rows.next()? {
             let concl: Option<String> = row.get(0)?;
             let args: String = row.get(1)?;
-            heads.extend(concl.into_iter().map(DeclName::new));
-            heads.extend(args.split_whitespace().map(DeclName::new));
+            let heads = concl.into_iter().map(DeclName::new);
+            found.push((
+                row.get(2)?,
+                heads.chain(args.split_whitespace().map(DeclName::new)).collect(),
+            ));
         }
-        Ok(decl::commonest_called(heads.iter(), word))
+        Ok(decl::commonest_called(
+            found.iter().map(|(ty, h)| (ty.as_str(), h.iter().collect())),
+            word,
+        ))
+    }
+
+    fn is_constant(&self, name: &DeclName) -> Result<bool> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM uses WHERE const = ?1) OR EXISTS (SELECT 1 FROM decl WHERE name = ?1)",
+        )?;
+        Ok(stmt.query_row(params![name.as_str()], |r| r.get(0))?)
     }
 
     fn enclosing(&self, of: &Decl) -> Result<Option<Decl>> {

@@ -189,6 +189,10 @@ pub fn parse(pattern: &str) -> Parsed {
 fn read(pattern: &str) -> Parsed {
     let (lexemes, lambdas) = strip_lambdas(&lex(pattern));
     let (all, receivers) = expand_postfix(lexemes);
+    // One word, one reading: the `xs` of `xs.length` is a variable, and so is
+    // the `xs` of `xs ++ ys` beside it.
+    let all: Vec<String> =
+        all.into_iter().map(|t| if receivers.contains(&t) { "_".to_string() } else { t }).collect();
     let variables =
         dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().chain(receivers).collect());
     let unknown = unreadable(&all);
@@ -1488,6 +1492,10 @@ mod tests {
             assert_eq!(parse(pattern).query.shape.args[0], arg(head), "{pattern}");
         }
         assert_eq!(parse("xs.length = _").variables, ["xs"]);
+        // A word a field is written on is a variable wherever it stands.
+        let p = parse("(xs ++ ys).length = xs.length + ys.length");
+        assert_eq!(p.query.uses, [".length", "HAppend.hAppend"].map(DeclName::new));
+        assert_eq!(p.variables, ["xs", "ys"]);
         assert!(parse("_.length = _").variables.is_empty());
         assert_eq!(parse("List.sum l.tail = _").query.uses, [DeclName::new(".tail")]);
         // `(f a) b` is `f a b`: a field takes what follows it too.

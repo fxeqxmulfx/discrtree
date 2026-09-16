@@ -54,8 +54,10 @@ fn a_row_survives_the_round_trip_through_sqlite() {
 #[test]
 fn an_unqualified_word_resolves_to_the_commonest_constant_called_that() {
     let mut db = SqliteIndex::in_memory().unwrap();
-    let head = |name: &str, arg: &str| {
+    let head = |name: &str, arg: &str, ty: &str| {
         let mut d = theorem(name, "mathlib", "Mathlib.Analysis.Inner", "Eq", &[]);
+        d.ty = ty.into();
+        d.consts = vec![DeclName::new(arg)];
         d.shape = Shape::new(
             Some(DeclName::new("Eq")),
             vec![ArgHead::Named(DeclName::new(arg)), ArgHead::Any],
@@ -63,9 +65,12 @@ fn an_unqualified_word_resolves_to_the_commonest_constant_called_that() {
         d
     };
     let rows = vec![
-        head("Real.inner_apply", "Inner.inner"),
-        head("Complex.inner_apply", "Inner.inner"),
-        head("Std.HashMap.inner_eq", "Std.HashMap.inner"),
+        head("Real.inner_apply", "Inner.inner", "inner ℝ x y = x * y"),
+        head("Complex.inner_apply", "Inner.inner", "inner ℂ x y = conj x * y"),
+        head("Std.HashMap.inner_eq", "Std.HashMap.inner", "inner m = m"),
+        // Printed with its namespace, so it says nothing about the bare word.
+        head("Std.HashMap.inner_size", "Std.HashMap.inner", "m.inner.size = m.size"),
+        head("Std.HashMap.inner_empty", "Std.HashMap.inner", "m.inner = ∅"),
     ];
     index::load(&mut db, &rows).unwrap();
     db.finish().unwrap();
@@ -77,6 +82,11 @@ fn an_unqualified_word_resolves_to_the_commonest_constant_called_that() {
     // A word nothing is called resolves to nothing, rather than to whatever
     // the `LIKE` happened to sweep up.
     assert!(db.heads_called("nonesuch").unwrap().is_empty());
+    // A word the index holds by exactly that spelling is a constant; one only
+    // namespaces end in is not.
+    assert!(db.is_constant(&DeclName::new("Inner.inner")).unwrap());
+    assert!(db.is_constant(&DeclName::new("Real.inner_apply")).unwrap());
+    assert!(!db.is_constant(&DeclName::new("inner")).unwrap());
 }
 
 #[test]

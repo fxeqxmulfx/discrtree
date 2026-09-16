@@ -2194,3 +2194,39 @@ with a field somewhere in Mathlib is read as that field:
     `FundamentalGroupoid.as`, `CategoryTheory.Quotient.as`
 
 Seen with dt 0.40.0, 2026-09-16.
+
+Fixed in 0.41.0, in two parts.  The first is syntax: a word a field is written
+on is a variable wherever it stands, so the pattern with `xs.length` in it
+reads its `xs ++ ys` as `_ ++ _` and answers as written.
+
+The second is a second look, after a search found nothing, like 0.40.0's.  A
+word the index has by that spelling -- a row called it or mentioning it --
+means itself, so `deriv`, `id` and `closure` are never read as anything else.
+A word Lean prints for a constant is that constant.  A word in lower case that
+is neither is a variable, and stderr says so:
+
+    $ dt find 'List.reverse (as ++ bs) = _'
+    dt: `as`, `bs` read as `_` — no constant in the index is called that
+    List.reverse_concat'  theorem  Mathlib.Data.List.Basic
+      ∀ {α : Type u} (l : List α) (a : α), (l ++ [a]).reverse = a :: l.reverse
+    $ dt find 'hf.comp hg = _'
+    dt: `hg` read as `_` — no constant in the index is called that
+    Real.log_comp_exp  theorem  Mathlib.Analysis.SpecialFunctions.Log.Basic
+      Real.log ∘ Real.exp = id
+
+"Lean prints for a constant" is now counted, not guessed from frequency.  A
+row counts for `N.w` only if its type says `w` as a name of its own, never says
+`.w`, and never binds `w`: `(val : α)`, `[inst : Monoid α]` and
+`{ neg := y }` are where the remaining false readings came from.  On the
+probe's index, about 130 names people give variables (`as`, `xs`, `hf`,
+`init`, `step`, `val`, `inst`, `acc`, `key`, ...) get no candidate at all, and
+what the Prelude and Mathlib export keeps its count: `Bool.false` 297 rows,
+`Inner.inner` 326, `Option.none` 773, `Max.max` 687, `SupSet.sSup` 417.  The
+"also" list after an unqualified failure shrinks to what is printed bare, which
+for `inner` is nothing: `Std.DTreeMap.Internal.Impl.inner` was never a reading.
+
+What this gives up: a word Lean prints with its namespace is no longer guessed
+at.  `succ n ≤ m ↔ n < m` used to be about `Order.succ`, the commonest `succ`;
+now `succ` is a variable, and the line on stderr says to spell the one meant.
+A pattern copied from a goal never has that word in it, because the goal said
+`Order.succ` or `n.succ`.

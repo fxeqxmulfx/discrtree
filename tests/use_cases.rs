@@ -514,8 +514,12 @@ fn a_constant_lean_prints_without_its_namespace_is_resolved_inside_the_pattern_t
         .map(n)
         .collect();
     repo.decls.push(count);
-    for (name, value) in [("Bool.not_true", "Bool.false"), ("Bool.not_false", "Bool.true")] {
+    for (name, value, ty) in [
+        ("Bool.not_true", "Bool.false", "(!true) = false"),
+        ("Bool.not_false", "Bool.true", "(!false) = true"),
+    ] {
         let mut d = theorem(name, "core", "Init.Prelude", "Eq", &[]);
+        d.ty = ty.into();
         d.shape = Shape::new(
             Some(n("Eq")),
             vec![ArgHead::Named(n("Bool.not")), ArgHead::Named(n(value))],
@@ -533,6 +537,55 @@ fn a_constant_lean_prints_without_its_namespace_is_resolved_inside_the_pattern_t
         hits.read_as,
         vec![("false".to_string(), n("Bool.false")), ("true".to_string(), n("Bool.true"))]
     );
+}
+
+/// The report: `List.reverse (as ++ bs) = _` was read as a question about
+/// `CategoryTheory.Discrete.as`, a field that heads rows as `X.as` and never
+/// as `as`, and `xs ++ ys = _` blamed `xs` and `ys` for matching nothing. A
+/// word in lower case that no row is called, mentions, or prints for a constant
+/// is a variable, and the search is asked again without it.
+#[test]
+fn a_word_in_lower_case_that_names_nothing_is_a_variable() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    use discrtree::domain::pattern;
+    let n = DeclName::new;
+    let mut repo = repo();
+    let mut reverse = theorem("List.reverse_append", "core", "Init.Data.List", "Eq", &[]);
+    reverse.ty =
+        "∀ {α : Type u} (as bs : List α), (as ++ bs).reverse = bs.reverse ++ as.reverse".into();
+    reverse.shape = Shape::new(
+        Some(n("Eq")),
+        vec![ArgHead::Named(n("List.reverse")), ArgHead::Named(n("HAppend.hAppend"))],
+    );
+    reverse.consts = vec![n("Eq"), n("List.reverse"), n("HAppend.hAppend")];
+    repo.decls.push(reverse);
+    let mut field =
+        theorem("CategoryTheory.Discrete.mk_as", "mathlib", "Mathlib.Discrete", "Eq", &[]);
+    field.ty = "∀ (X : Discrete α), { as := X.as } = X".into();
+    field.shape = Shape::new(
+        Some(n("Eq")),
+        vec![ArgHead::Any, ArgHead::Named(n("CategoryTheory.Discrete.as"))],
+    );
+    repo.decls.push(field);
+    let find = Find { repo: &repo, build: &NoBuild };
+
+    let hits = find.run(&pattern::parse("List.reverse (as ++ bs) = _").query).unwrap();
+    let names: Vec<&str> = hits.rows.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["List.reverse_append"]);
+    assert_eq!(hits.variables, ["as", "bs"]);
+    assert!(hits.read_as.is_empty(), "{:?}", hits.read_as);
+
+    // Nothing answers without the variables either, and what is diagnosed is
+    // the search that was run: not a word that was never a constant.
+    let hits = find.run(&pattern::parse("List.reverse (xs ++ ys) ≤ _").query).unwrap();
+    assert_eq!(hits.variables, ["xs", "ys"]);
+    match hits.empty {
+        Some(Empty::Barren(labels)) => {
+            assert!(labels.iter().all(|l| !l.contains("xs")), "{labels:?}")
+        }
+        Some(Empty::Unqualified { .. }) | None => panic!("{:?}", hits.empty),
+        Some(_) => {}
+    }
 }
 
 /// An index whose text rows are the only ones marked `instance`.

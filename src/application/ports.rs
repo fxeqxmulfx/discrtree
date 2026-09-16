@@ -37,7 +37,19 @@ pub trait DeclRepo {
     /// because the last component is rarely unique -- seventy-eight constants
     /// end in `.inner` -- and the exported one is the one nearly every row
     /// means: it heads 376 rows against 8 for the next.
+    ///
+    /// Counted only over rows that print the word bare, which is what an
+    /// exported name does and a field or a variable that shares its name does
+    /// not. See [`crate::domain::decl::prints_bare`].
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>>;
+
+    /// Whether any row is called `name` or mentions it: a constant the index
+    /// knows by exactly that spelling, `deriv` or `id`, whatever else ends in
+    /// it.
+    fn is_constant(&self, name: &DeclName) -> Result<bool> {
+        let everything = Query { generated: true, ..Query::new() };
+        Ok(self.contains(name)? || !self.used_by(name, &everything)?.is_empty())
+    }
 
     /// Names that exist at all, for turning scanned identifiers into
     /// dependencies.
