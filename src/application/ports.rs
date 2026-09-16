@@ -88,14 +88,14 @@ pub trait DeclRepo {
         Ok(None)
     }
 
-    /// Each name `source` has a row for in `module`, with that row's lines.
-    /// `None` from a store that cannot say, which is then read as "the rows
-    /// may differ" -- the answer a warning can afford to get wrong.
-    fn spans_in(
+    /// Each name `source` has a row for in `module`, with where that row says
+    /// it is. `None` from a store that cannot say, which is then read as "the
+    /// rows may differ" -- the answer a warning can afford to get wrong.
+    fn located_in(
         &self,
         _source: &SourceId,
         _module: &ModuleName,
-    ) -> Result<Option<BTreeMap<DeclName, Option<Span>>>> {
+    ) -> Result<Option<BTreeMap<DeclName, Located>>> {
         Ok(None)
     }
 }
@@ -224,17 +224,24 @@ pub trait Revisions {
     }
 
     /// The modules of `source` compiled after `since`, each with the names it
-    /// declares and their lines, as the build recorded them. `None` when any
-    /// of them cannot be read, and for the same sources as
-    /// [`Revisions::rebuilt_since`].
+    /// declares, their lines as the build recorded them, and their statements
+    /// as the source spells them at those lines now. `None` when any of them
+    /// cannot be read, and for the same sources as [`Revisions::rebuilt_since`].
     fn declared_since(&self, _source: &SourceId, _since: u64) -> Option<Declared> {
         None
     }
 }
 
-/// Module → the names it declares and their lines: where each declaration is,
-/// and nothing about what it says.
-pub type Declared = BTreeMap<ModuleName, BTreeMap<DeclName, Span>>;
+/// Module → the names it declares, and where each is.
+pub type Declared = BTreeMap<ModuleName, BTreeMap<DeclName, Located>>;
+
+/// Where a declaration is: its lines, and its statement as the source spelled
+/// it there. See [`crate::domain::lean_text::spelled_statement`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub span: Option<Span>,
+    pub statement: Option<String>,
+}
 
 /// A package a `lake` build resolved: the directory it sits in, and the module
 /// prefixes it provides.

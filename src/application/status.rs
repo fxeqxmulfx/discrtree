@@ -12,9 +12,9 @@
 //! whose `Init` and `Std` sit under every one of them.
 
 use crate::application::ports::{
-    Build, DeclRepo, Package, Provenance, Revisions, Toolchain, Workspace,
+    Build, DeclRepo, Located, Package, Provenance, Revisions, Toolchain, Workspace,
 };
-use crate::domain::name::ModuleName;
+use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -160,8 +160,9 @@ pub fn moved_while_read(
 /// every build is too slow to ask for. What a search can miss is a declaration
 /// the build has and the index does not, so a rebuilt project is let off when
 /// every declaration of every module compiled since it was indexed has a row,
-/// at the lines the build gives it. A statement edited in place, on the same
-/// lines, is not seen by this; a new, renamed or moved declaration is.
+/// at the lines the build gives it, spelled as the source spells it there. A
+/// new, renamed, moved or restated declaration keeps the line; an edited proof
+/// does not.
 pub fn stale_for_search(
     repo: &dyn DeclRepo,
     revisions: &dyn Revisions,
@@ -191,8 +192,11 @@ fn indexed_as_built(repo: &dyn DeclRepo, revisions: &dyn Revisions, s: &Stale) -
         return Ok(false);
     }
     for (module, decls) in &declared {
-        let Some(rows) = repo.spans_in(&s.id, module)? else { return Ok(false) };
-        if !decls.iter().all(|(name, span)| rows.get(name) == Some(&Some(*span))) {
+        let Some(rows) = repo.located_in(&s.id, module)? else { return Ok(false) };
+        let indexed = |(name, built): (&DeclName, &Located)| {
+            built.span.is_some() && built.statement.is_some() && rows.get(name) == Some(built)
+        };
+        if !decls.iter().all(indexed) {
             return Ok(false);
         }
     }

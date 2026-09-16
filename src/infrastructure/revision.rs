@@ -17,8 +17,9 @@
 //! What a dump of it actually reads is the build, so the build is what gets
 //! fingerprinted: see [`build_stamp`].
 
-use crate::application::ports::{Declared, Revisions};
+use crate::application::ports::{DeclRepo, Declared, Located, Revisions};
 use crate::domain::decl::Span;
+use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::source::SourceId;
 use crate::error::Result;
@@ -36,6 +37,9 @@ pub struct OnDisk {
     pub manifest: BTreeMap<String, String>,
     /// Source → the toolchain it ships with, for the core sources.
     pub toolchains: BTreeMap<SourceId, String>,
+    /// Source → the directory its modules' `.lean` files are under, for the
+    /// sources compiled here.
+    pub texts: BTreeMap<SourceId, PathBuf>,
 }
 
 impl OnDisk {
@@ -64,13 +68,61 @@ impl OnDisk {
             .into_iter()
             .filter_map(|id| toolchain.clone().map(|t| (id, t)))
             .collect();
+        let texts = cfg
+            .sources
+            .iter()
+            .filter(|s| s.kind == Kind::Local)
+            .map(|s| (SourceId::new(s.name.clone()), cfg.source_dir(s)))
+            .collect();
         OnDisk {
             checkouts,
             builds,
             manifest: manifest(&cfg.root().join("lake-manifest.json")),
             toolchains,
+            texts,
         }
     }
+}
+
+impl OnDisk {
+    /// Each row `repo` holds for `source` in `modules`, with its statement as
+    /// the source spells it at the row's lines -- for
+    /// [`crate::infrastructure::sqlite::SqliteIndex::record_statements`].
+    ///
+    /// A module whose `.lean` file was saved after its `.olean` was written may
+    /// say something no build has read, so it gets none; a later rebuild of it
+    /// is then reported, which is the answer when nobody can tell.
+    pub fn spelled_statements(
+        &self,
+        repo: &dyn DeclRepo,
+        source: &SourceId,
+        modules: &[ModuleName],
+    ) -> Result<Vec<(ModuleName, DeclName, String)>> {
+        let Some(texts) = self.texts.get(source) else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for module in modules {
+            let path = texts.join(module.relative_path());
+            let Some(saved) = mtime(&path) else { continue };
+            if self.rebuilt_since(source, module, saved) != Some(true) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Some(rows) = repo.located_in(source, module)? else { continue };
+            for (name, at) in rows {
+                if let Some(s) = at.span.and_then(|span| lean_text::spelled_statement(&text, span))
+                {
+                    out.push((module.clone(), name, s));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// When a file was last written, in seconds since the Unix epoch.
+fn mtime(path: &Path) -> Option<u64> {
+    let t = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
 }
 
 impl Revisions for OnDisk {
@@ -93,35 +145,41 @@ impl Revisions for OnDisk {
     fn rebuilt_since(&self, source: &SourceId, module: &ModuleName, since: u64) -> Option<bool> {
         let lib = self.builds.get(source)?;
         let rel: PathBuf = module.as_str().split('.').collect::<PathBuf>().with_extension("olean");
-        [lib.join("lean").join(&rel), lib.join(&rel)].iter().find_map(|p| {
-            let t = std::fs::metadata(p).ok()?.modified().ok()?;
-            let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            Some(secs > since)
-        })
+        [lib.join("lean").join(&rel), lib.join(&rel)].iter().find_map(|p| Some(mtime(p)? > since))
     }
 
     /// From the `.ilean` Lean writes beside each `.olean`: its `decls` maps
     /// every name the module declares to the range of the declaration, with
     /// lines counted from zero. Private names are left out, as the dump leaves
-    /// them out.
+    /// them out. The statements are read from the module's `.lean` file.
     fn declared_since(&self, source: &SourceId, since: u64) -> Option<Declared> {
         let lib = self.builds.get(source)?;
+        let texts = self.texts.get(source)?;
         let root = [lib.join("lean"), lib.clone()].into_iter().find(|d| d.is_dir())?;
         let mut compiled = Vec::new();
         oleans(&root, &root, &mut compiled);
         let mut out = Declared::new();
         for (rel, _, _) in compiled.into_iter().filter(|(_, _, t)| *t > since) {
             let olean = root.join(&rel);
-            let module = rel.strip_suffix(".olean")?.replace(std::path::MAIN_SEPARATOR, ".");
-            let decls = out.entry(ModuleName::new(module)).or_default();
-            let text = std::fs::read_to_string(olean.with_extension("ilean")).ok()?;
-            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let module = ModuleName::new(
+                rel.strip_suffix(".olean")?.replace(std::path::MAIN_SEPARATOR, "."),
+            );
+            let ilean = std::fs::read_to_string(olean.with_extension("ilean")).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&ilean).ok()?;
+            let mut source_text = None;
+            let decls = out.entry(module.clone()).or_default();
             for (name, range) in json.get("decls")?.as_object()? {
                 if name.starts_with("_private.") {
                     continue;
                 }
                 let line = |i: usize| Some(u32::try_from(range.get(i)?.as_u64()?).ok()? + 1);
-                decls.insert(DeclName::new(name.clone()), Span::new(line(0)?, line(2)?));
+                let span = Span::new(line(0)?, line(2)?);
+                if source_text.is_none() {
+                    let path = texts.join(module.relative_path());
+                    source_text = Some(std::fs::read_to_string(path).ok()?);
+                }
+                let statement = lean_text::spelled_statement(source_text.as_deref()?, span);
+                decls.insert(DeclName::new(name.clone()), Located { span: Some(span), statement });
             }
         }
         Some(out)

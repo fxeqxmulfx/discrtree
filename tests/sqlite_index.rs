@@ -506,6 +506,7 @@ fn a_shown_row_is_stale_only_when_its_own_module_was_rebuilt() {
         builds: [(id.clone(), lib.clone())].into(),
         manifest: Default::default(),
         toolchains: Default::default(),
+        texts: Default::default(),
     };
     let shown = |module: &str| {
         let mut rows = std::collections::BTreeMap::new();
@@ -532,49 +533,76 @@ fn a_shown_row_is_stale_only_when_its_own_module_was_rebuilt() {
 /// A rebuild that compiled a module again without changing what it declares
 /// leaves every row the search could want in the index, and the line that
 /// said otherwise after every `lake build` went unread. A declaration the
-/// index has no row for, or has at other lines, is what makes it stale.
+/// index has no row for, has at other lines, or states otherwise than the
+/// source now does is what makes it stale.
 #[test]
 fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() {
     let dir = TempDir::new("dt-ilean-rev");
     let lib = dir.path().join(".lake/build/lib");
     let pkg = lib.join("lean/Transformer/CRASP");
+    let src = dir.path().join("src");
+    let file = src.join("Transformer/CRASP/Basic.lean");
     std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let now = std::time::SystemTime::now();
+    let ago = |secs| now - std::time::Duration::from_secs(secs);
+    let save = |text: &str, at| {
+        std::fs::write(&file, text).unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(at).unwrap();
+    };
+    let proved = "namespace T\n\ntheorem depth_le (f : Form) :\n    f.depth ≤ 1 := by\n  simp\n";
+    save(proved, ago(300));
     std::fs::write(pkg.join("Basic.olean"), "compiled").unwrap();
     let dumped = revision::build_stamp(&lib).unwrap();
-    let written = std::fs::metadata(pkg.join("Basic.olean")).unwrap().modified().unwrap();
-    let indexed_at = written.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 100;
+    let indexed_at = ago(100).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
     let id = SourceId::new("project");
+    let module = ModuleName::new("Transformer.CRASP.Basic");
     let mut db = SqliteIndex::in_memory().unwrap();
-    let mut row = theorem("T.depth_le", "project", "Transformer.CRASP.Basic", "LE.le", &[]);
-    row.span = Some(Span::new(109, 111));
+    let mut row = theorem("T.depth_le", "project", module.as_str(), "LE.le", &[]);
+    row.span = Some(Span::new(3, 5));
     db.put(&[row]).unwrap();
     db.finish().unwrap();
-    let was =
-        Provenance { revision: Some(dumped), indexed_at, decls: 1, ..Provenance::by_this_build() };
-    db.record(&id, &was).unwrap();
     let disk = revision::OnDisk {
         checkouts: Default::default(),
         builds: [(id.clone(), lib.clone())].into(),
         manifest: Default::default(),
         toolchains: Default::default(),
+        texts: [(id.clone(), src.clone())].into(),
     };
+    let statements = disk.spelled_statements(&db, &id, std::slice::from_ref(&module)).unwrap();
+    assert_eq!(statements[0].2, "theorem depth_le (f : Form) : f.depth ≤ 1");
+    db.record_statements(&id, &statements).unwrap();
+    let was =
+        Provenance { revision: Some(dumped), indexed_at, decls: 1, ..Provenance::by_this_build() };
+    db.record(&id, &was).unwrap();
+
     std::fs::write(pkg.join("Basic.olean"), "compiled again").unwrap();
     let declaring = |decls: &str| {
-        std::fs::write(pkg.join("Basic.ilean"), format!(r#"{{"version":2,"decls":{{{decls}}}}}"#))
+        std::fs::write(pkg.join("Basic.ilean"), format!(r#"{{"version":5,"decls":{{{decls}}}}}"#))
             .unwrap();
         status::stale_for_search(&db, &disk, [id.clone()]).unwrap().len()
     };
-
     assert_eq!(status::stale_among(&db, &disk, [id.clone()]).unwrap().len(), 1);
-    let same = r#""T.depth_le":[108,0,110,7,108,16,108,24]"#;
+    let same = r#""T.depth_le":[2,0,4,6,2,8,2,16]"#;
     assert_eq!(declaring(same), 0, "the rebuild declares what the index holds");
     let private = r#""_private.Transformer.CRASP.Basic.0.T.aux":[1,0,2,7,1,4,1,7]"#;
     assert_eq!(declaring(&format!("{same},{private}")), 0, "a private name has no row");
-    assert_eq!(declaring(&format!("{same},\"T.depth_or\":[94,0,94,91,94,16,94,24]")), 1);
-    assert_eq!(declaring(r#""T.depth_le":[120,0,122,7,120,16,120,24]"#), 1, "it moved");
+    assert_eq!(declaring(&format!("{same},\"T.depth_or\":[0,0,1,5,0,8,0,16]")), 1, "new");
+    assert_eq!(declaring(r#""T.depth_le":[3,0,5,6,3,8,3,16]"#), 1, "it moved");
+
+    save("namespace T\n\ntheorem depth_le (f : Form) :\n    f.depth ≤ 1 := by\n  omega\n", now);
+    assert_eq!(declaring(same), 0, "a proof edited in place changes no row");
+    save("namespace T\n\ntheorem depth_le (f : Form) :\n    f.depth = 1 := by\n  simp\n", now);
+    assert_eq!(declaring(same), 1, "a statement edited in place does");
+
     std::fs::remove_file(pkg.join("Basic.ilean")).unwrap();
-    assert_eq!(status::stale_for_search(&db, &disk, [id]).unwrap().len(), 1, "unreadable");
+    assert_eq!(status::stale_for_search(&db, &disk, [id.clone()]).unwrap().len(), 1, "unreadable");
+
+    // A file saved after the build it was dumped from may say what no build
+    // read, so no statement is kept for it.
+    save(proved, now + std::time::Duration::from_secs(100));
+    assert!(disk.spelled_statements(&db, &id, &[module]).unwrap().is_empty());
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,
@@ -847,7 +875,8 @@ fn an_index_written_by_an_older_dt_opens_and_says_so() {
     // the same revision, and no answer to the question of who wrote them.
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format;",
+        "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format; \
+         ALTER TABLE decl DROP COLUMN statement;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 2i64).unwrap();
@@ -855,6 +884,8 @@ fn an_index_written_by_an_older_dt_opens_and_says_so() {
 
     let db = SqliteIndex::open(&path).expect("an older index is migrated, not refused");
     assert_eq!(db.count_source(&id).unwrap(), 1, "the rows survive the migration");
+    let rows = db.located_in(&id, &ModuleName::new("M")).unwrap().unwrap();
+    assert_eq!(rows[&DeclName::new("Real.exp_pos")].statement, None, "no statement was kept");
     let was = db.provenance(&id).unwrap().unwrap();
     assert_eq!(was.writer, None);
     assert!(was.outdated(), "rows nobody stamped are older than this build's");

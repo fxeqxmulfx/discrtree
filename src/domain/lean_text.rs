@@ -6,6 +6,7 @@
 //! `elaborated: false`, and nothing downstream may treat them as if they had
 //! been through the elaborator.
 
+use crate::domain::decl::Span;
 use crate::domain::name::{DeclName, ModuleName};
 
 /// One declaration as it appears in a file.
@@ -461,9 +462,122 @@ fn mentions_sorry(body: &str) -> bool {
     body.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == "sorry")
 }
 
+/// A declaration's statement as its source spells it: the lines of `span`,
+/// docstring and attributes included, up to the `:=`, `where` or first `|`
+/// alternative that begins its body, with whitespace collapsed. `None` when
+/// the text has no such lines.
+///
+/// This is what tells an edited statement from an edited proof without asking
+/// Lean. The build says where a declaration is and nothing about what it says;
+/// a statement changed in place keeps its lines, and only the text shows it.
+/// A `:=` inside brackets is a default argument, and one inside a comment or a
+/// string is not code, so neither ends the statement.
+pub fn spelled_statement(text: &str, span: Span) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = (span.start as usize, span.end as usize);
+    if start == 0 || end < start || end > lines.len() {
+        return None;
+    }
+    let body = lines[start - 1..end].join("\n");
+    let cut = body_start(&body).unwrap_or(body.len());
+    Some(body[..cut].split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Where the body of a declaration starts, by the rule [`spelled_statement`]
+/// gives.
+fn body_start(s: &str) -> Option<usize> {
+    let ident = |c: char| c.is_alphanumeric() || "_'.!?".contains(c);
+    let mut depth = 0usize;
+    let mut comment = 0usize;
+    let mut chars = s.char_indices().peekable();
+    let mut prev = '\n';
+    let mut line_opens = true;
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, n)| n);
+        if comment > 0 {
+            match (c, next) {
+                ('/', Some('-')) => {
+                    comment += 1;
+                    chars.next();
+                }
+                ('-', Some('/')) => {
+                    comment -= 1;
+                    chars.next();
+                }
+                _ => {}
+            }
+            prev = c;
+            continue;
+        }
+        match (c, next) {
+            ('/', Some('-')) => {
+                comment = 1;
+                chars.next();
+            }
+            ('-', Some('-')) => {
+                while chars.peek().is_some_and(|&(_, n)| n != '\n') {
+                    chars.next();
+                }
+            }
+            ('"', _) => {
+                while let Some((_, n)) = chars.next() {
+                    if n == '"' {
+                        break;
+                    }
+                    if n == '\\' {
+                        chars.next();
+                    }
+                }
+            }
+            ('(' | '[' | '{' | '⦃' | '⟨', _) => depth += 1,
+            (')' | ']' | '}' | '⦄' | '⟩', _) => depth = depth.saturating_sub(1),
+            (':', Some('=')) if depth == 0 => return Some(i),
+            ('|', _) if depth == 0 && line_opens && i > 0 => return Some(i),
+            ('w', _)
+                if depth == 0
+                    && !ident(prev)
+                    && s[i..].strip_prefix("where").is_some_and(|r| !r.starts_with(ident)) =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        line_opens = c == '\n' || (line_opens && c.is_whitespace());
+        prev = c;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spelled_statement_ends_where_the_body_begins() {
+        let text = "\
+/-- Doc with := inside. -/
+@[simp] theorem sat_or (w : List σ) (d : ℕ := 0) :
+    (φ₁.or φ₂).sat w i = -- a := in a comment
+      (φ₁.sat w i || φ₂.sat w i) := by
+  simp [Form.or, Form.sat]
+instance : Foo Bar where
+  foo := 1
+def f : ℕ → ℕ
+  | 0 => 1
+  | n + 1 => n
+theorem whereabouts : \"where :=\" = s := rfl
+";
+        let at = |a, b| spelled_statement(text, Span::new(a, b)).unwrap();
+        assert_eq!(
+            at(1, 5),
+            "/-- Doc with := inside. -/ @[simp] theorem sat_or (w : List σ) (d : ℕ := 0) : \
+             (φ₁.or φ₂).sat w i = -- a := in a comment (φ₁.sat w i || φ₂.sat w i)"
+        );
+        assert_eq!(at(6, 7), "instance : Foo Bar");
+        assert_eq!(at(8, 10), "def f : ℕ → ℕ");
+        assert_eq!(at(11, 11), "theorem whereabouts : \"where :=\" = s");
+        assert_eq!(spelled_statement(text, Span::new(11, 12)), None);
+    }
 
     #[test]
     fn a_range_may_start_with_an_indented_header() {

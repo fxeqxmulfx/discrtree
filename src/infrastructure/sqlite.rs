@@ -2,7 +2,7 @@
 //! the conclusion head and a side table for constants, so conditions combine
 //! with `AND` and a query is milliseconds rather than a scan.
 
-use crate::application::ports::{DeclRepo, DeclSink, Mention, Provenance};
+use crate::application::ports::{DeclRepo, DeclSink, Located, Mention, Provenance};
 use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS decl (
   sorry       INTEGER NOT NULL DEFAULT 0,
   line_start  INTEGER,
   line_end    INTEGER,
-  elaborated  INTEGER NOT NULL DEFAULT 1
+  elaborated  INTEGER NOT NULL DEFAULT 1,
+  statement   TEXT
 );
 
 -- One row per (name, source, module). Two sources are two answers to the same
@@ -93,7 +94,7 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// The one index the side tables have, and the one thing a load does not need.
 ///
@@ -168,16 +169,20 @@ fn check_version(conn: &Connection) -> Result<()> {
 /// still means what it did, and the two new ones read as "written by a dt that
 /// did not record it" — which is exactly what that file is. Rebuilding a 1.2 GB
 /// index to learn a fact the empty column already states is the cost of not
-/// having this.
+/// having this. `decl.statement` is the same kind of column: empty reads as
+/// "not recorded", which is what an index from before it is.
 fn migrate(conn: &Connection, found: i64) -> Result<bool> {
-    if found != 2 {
-        return Ok(false);
+    if found == 2 {
+        conn.execute_batch(
+            "ALTER TABLE source ADD COLUMN writer TEXT; \
+             ALTER TABLE source ADD COLUMN row_format INTEGER;",
+        )?;
     }
-    conn.execute_batch(
-        "ALTER TABLE source ADD COLUMN writer TEXT; \
-         ALTER TABLE source ADD COLUMN row_format INTEGER;",
-    )?;
-    Ok(true)
+    if found == 2 || found == 3 {
+        conn.execute_batch("ALTER TABLE decl ADD COLUMN statement TEXT;")?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub struct SqliteIndex {
@@ -307,6 +312,37 @@ impl SqliteIndex {
         )?;
         let n = tx.execute("DELETE FROM decl WHERE source = ?1", params![source.as_str()])?;
         Ok(n)
+    }
+
+    /// The modules `source` has rows in.
+    pub fn modules_of(&self, source: &SourceId) -> Result<Vec<ModuleName>> {
+        let mut stmt =
+            self.conn.prepare_cached("SELECT DISTINCT module FROM decl WHERE source = ?1")?;
+        let rows = stmt.query_map(params![source.as_str()], |r| r.get::<_, String>(0))?;
+        Ok(rows.map(|m| m.map(ModuleName::new)).collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keep each row's statement as its source spells it, beside the row.
+    ///
+    /// Written after a load rather than by it, because the dump is read from
+    /// the build and the statement from the source: they are two reads, and
+    /// only the caller knows whether the source still says what was built.
+    pub fn record_statements(
+        &mut self,
+        source: &SourceId,
+        statements: &[(ModuleName, DeclName, String)],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut update = tx.prepare_cached(
+                "UPDATE decl SET statement = ?1 WHERE source = ?2 AND module = ?3 AND name = ?4",
+            )?;
+            for (module, name, text) in statements {
+                update.execute(params![text, source.as_str(), module.as_str(), name.as_str()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn count(&self) -> Result<usize> {
@@ -527,18 +563,19 @@ impl DeclRepo for SqliteIndex {
         self.provenance_of(source)
     }
 
-    fn spans_in(
+    fn located_in(
         &self,
         source: &SourceId,
         module: &ModuleName,
-    ) -> Result<Option<BTreeMap<DeclName, Option<Span>>>> {
+    ) -> Result<Option<BTreeMap<DeclName, Located>>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT name, line_start, line_end FROM decl WHERE source = ?1 AND module = ?2",
+            "SELECT name, line_start, line_end, statement FROM decl \
+             WHERE source = ?1 AND module = ?2",
         )?;
         let rows = stmt.query_map(params![source.as_str(), module.as_str()], |r| {
             let (start, end): (Option<u32>, Option<u32>) = (r.get(1)?, r.get(2)?);
             let span = start.zip(end).map(|(s, e)| Span::new(s, e));
-            Ok((DeclName::new(r.get::<_, String>(0)?), span))
+            Ok((DeclName::new(r.get::<_, String>(0)?), Located { span, statement: r.get(3)? }))
         })?;
         Ok(Some(rows.collect::<rusqlite::Result<_>>()?))
     }

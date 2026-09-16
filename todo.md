@@ -2460,3 +2460,21 @@ declaration and nothing about what it says, so the check needs something that
 does: the statement as the source spells it, kept beside the row.
 
 Seen with dt 0.48.0, 2026-09-16.
+
+Fixed in 0.49.0.  `dt index` keeps, beside each row of a source compiled here,
+its statement as the source spells it: the declaration's lines up to the
+`:=`, `where` or `|` that starts the body, docstring included, whitespace
+collapsed (`decl.statement`, schema 4; a schema 3 index gains the column in
+place).  A module whose file was saved after its `.olean` gets none.  After a
+rebuild the search compares each recompiled declaration's statement in the
+source now with the one kept, besides its name and lines.  On a copy of the
+transformer project, indexed with 0.49.0 and `Basic.olean` touched each time:
+
+    proof of depth_le edited, same lines         no line
+    `= max` changed to `≤ max`, same lines       line printed
+    statement changed back                       no line
+
+A statement edited but not yet rebuilt also prints the line once its module
+has been rebuilt since the index was written: the index is behind the source
+then too.  An index from before 0.49.0 has no statements, so the line prints
+after a rebuild until the project is refreshed once.

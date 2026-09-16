@@ -592,6 +592,9 @@ impl App {
             }
             sqlite.clear_source(&id)?;
             let read = jsonl::stream(&path, |chunk| sqlite.put(chunk))?;
+            let modules = sqlite.modules_of(&id)?;
+            let statements = revs.spelled_statements(&sqlite, &id, &modules)?;
+            sqlite.record_statements(&id, &statements)?;
             let stored = sqlite.count_source(&id)?;
             sqlite.record(&id, &Provenance { decls: stored, ..was })?;
             changed = true;
