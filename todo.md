@@ -2170,7 +2170,7 @@ sweep answer exactly as before.
 
 ## A word in lower case is read as a constant unless a field is written on it
 
-0.15.0 reads one letter as a variable, and 0.34.0 reads a word a field is
+0.15.0 reads one letter as a variable, and 0.37.0 reads a word a field is
 written on as one.  Every other word in lower case is a constant, and the
 names people give lists, hypotheses and accumulators are words:
 
