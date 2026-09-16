@@ -48,9 +48,41 @@ pub trait DeclRepo {
         Ok(None)
     }
 
+    /// The declarations whose statement or proof mentions `name`, narrowed by
+    /// `within`'s source, module prefix and whether generated names count.
+    ///
+    /// Only `name`, `source`, `module` and `kind` of each row need be filled
+    /// in: a constant like `Eq` is mentioned by most of the index, and the
+    /// answer is a list of names.
+    fn used_by(&self, name: &DeclName, within: &Query) -> Result<Vec<Mention>>;
+
     /// What the source was when it was indexed, if the store remembers.
     fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
         Ok(None)
+    }
+}
+
+/// A declaration that mentions a constant, and whether its statement does or
+/// only its proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mention {
+    pub decl: Decl,
+    pub in_statement: bool,
+}
+
+impl Mention {
+    /// The rule for a store that holds whole rows: the statement's constants
+    /// and the proof's, with `within` applied as it is to a search.
+    pub fn of(d: &Decl, name: &DeclName, within: &Query) -> Option<Mention> {
+        let in_statement = d.consts.contains(name);
+        let narrowed = Query {
+            source: within.source.clone(),
+            module: within.module.clone(),
+            generated: within.generated,
+            ..Query::new()
+        };
+        ((in_statement || d.deps.contains(name)) && narrowed.matches(d))
+            .then(|| Mention { decl: d.clone(), in_statement })
     }
 }
 
@@ -144,6 +176,14 @@ impl Provenance {
 /// the manifest the build resolved.
 pub trait Revisions {
     fn current(&self, source: &SourceId) -> Result<Option<String>>;
+
+    /// Whether `module` of `source` was compiled after `since`, in seconds
+    /// since the Unix epoch. `None` when that cannot be told module by module,
+    /// which is every source but one built here -- and then the source's own
+    /// revision is all there is to go on.
+    fn rebuilt_since(&self, _source: &SourceId, _module: &ModuleName, _since: u64) -> Option<bool> {
+        None
+    }
 }
 
 /// A package a `lake` build resolved: the directory it sits in, and the module

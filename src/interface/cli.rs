@@ -190,6 +190,28 @@ pub enum Command {
         depth: String,
     },
 
+    /// What rests on a declaration: everything whose statement or proof
+    /// mentions it.
+    ///
+    /// The reverse of `deps`, one level deep, grouped by module. A name marked
+    /// `*` mentions it in its statement, which is all `find --uses` can see.
+    Rdeps {
+        /// Fully qualified declaration name.
+        name: String,
+        /// Module prefix, e.g. Transformer.CRASP.
+        #[arg(long = "in", value_name = "MODULE")]
+        module: Option<String>,
+        /// Restrict to one source, as named in discrtree.toml.
+        #[arg(long, value_name = "NAME")]
+        source: Option<String>,
+        /// Include names the compiler generated.
+        #[arg(long)]
+        generated: bool,
+        /// Maximum names listed. The first line says how many there are in all.
+        #[arg(long, value_name = "N", default_value_t = 100)]
+        limit: usize,
+    },
+
     /// Materialize a declaration and its tree into the project.
     ///
     /// The tree stops at the importable frontier: a dependency that can be
@@ -256,6 +278,7 @@ pub struct FindArgs {
     pub concl: Option<String>,
 
     /// Constants the type must mention, e.g. Real.exp,Finset.sum. All of them.
+    /// The statement only: `dt rdeps` finds what mentions a constant in a proof.
     #[arg(long, value_delimiter = ',', value_name = "CONST,...")]
     pub uses: Vec<String>,
 
@@ -272,7 +295,8 @@ pub struct FindArgs {
     #[arg(long, value_name = "KIND")]
     pub kind: Option<String>,
 
-    /// Free text over name, type and docstring. Whole words, not substrings.
+    /// Free text over the name, type and docstring of each declaration; module
+    /// docstrings are not read. Whole words, not substrings.
     /// Repeatable, and several words in one --text mean the same thing: all of
     /// them must appear.
     #[arg(long, value_name = "WORDS")]
@@ -285,6 +309,11 @@ pub struct FindArgs {
     /// Drop declarations proved by sorry.
     #[arg(long)]
     pub no_sorry: bool,
+
+    /// Include names the compiler generated (ctorIdx, congr_simp, T.ctor.elim, ...),
+    /// which are hidden otherwise.
+    #[arg(long)]
+    pub generated: bool,
 
     /// Maximum results. The footer says when more matched than were shown.
     #[arg(long, value_name = "N", default_value_t = crate::domain::query::DEFAULT_LIMIT)]

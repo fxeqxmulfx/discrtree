@@ -1491,3 +1491,138 @@ order of how little they change. The head that is unknown to the index needs
 no new line — a constant that is nowhere a head is a barren condition and was
 already named as one. A pattern that fails only *with* a flag is still a
 combination, because there the flag is the thing to drop.
+
+## 0.28.0, from the transformer project
+
+**A pattern with `--name` blames the combination when the conclusion is an
+`Iff`.**
+
+    $ dt find 'List.Sublist _ _' --name sublist_cons_iff
+    no match: every condition matches on its own; drop one
+
+`List.sublist_cons_iff` is `l <+ a :: l' ↔ …`: its conclusion head is `Iff`,
+so the shape can never match it, and no flag is worth dropping. The row the
+name finds is already in hand; the message could say what its conclusion is —
+"`--name sublist_cons_iff` finds `List.sublist_cons_iff`, whose conclusion is
+`_ ↔ _`; the pattern is matched against the conclusion" — or `find` could match
+a relation pattern against either side of an `Iff`, which is where rewriting
+lemmas keep it.
+
+**`--in <module>` lists what the compiler generated.**
+`dt find --source project --in Transformer.CRASP.PiecewiseTestable` answers
+with `PT.ctorIdx` among the first ten rows, and a module with inductives also
+gives `*.elim`, `ctorElim`, `ctorElimType` and `*.congr_simp`. Nobody writes
+those names; they push the declarations of the file off the first page, and
+there is no flag to hide them. Either they are hidden by default (with
+`--generated` to ask for them), or they are ranked after everything written by
+hand.
+
+**`--text` does not search module docstrings, and does not say so.**
+`dt find --source project --text typo` answers `no match: --text typo matches
+nothing on its own`, although the module docstring of
+`Transformer.CRASP.PiecewiseTestable` has a paragraph headed "A typo." Module
+headers are where a file explains itself, so they are the first place a word
+search should look; if they are out of scope, `--help` and the no-match line
+should say that `--text` reads declaration docstrings only.
+
+**No reverse dependencies.** Before changing the signature of
+`Transformer.CRASP.PT.depth_toForm` the question is who uses it. `dt deps`
+answers the forward question exactly (it lists `PT.depth_toForm` among the
+constants `definableL_of_kPiecewiseTestable` rests on), but the reverse one has
+no command, and the flag that looks like it answers only for statements:
+
+    $ dt find --source project --uses Transformer.CRASP.PT.depth_toForm
+    no match: --uses Transformer.CRASP.PT.depth_toForm matches nothing on its own
+
+That reads as "nothing uses it", which is false, and it sent the search back to
+grep. Either `dt rdeps <name>` (or `--used-by`) over the proof constants the
+index already has, or the no-match line says that `--uses` reads statements
+only and points at the proofs that do mention the constant.
+
+**The staleness line is per source, not per module.** After a `lake build`
+that rebuilt four `Transformer.CRASP.*` modules, `dt show
+Transformer.CRASP.Form.sat_le` — in `Transformer.CRASP.Basic`, which was not
+rebuilt — still ends with `project was rebuilt since it was indexed; rows may
+be missing`. The row it printed cannot be missing or stale. This is the mtime
+comparison asked for under "Staleness line reappears after every `lake
+build`", seen again at 0.28.0.
+
+**`++` in a pattern is read as `+`.** Looking for `List.range'_append`:
+
+    $ dt find "List.range' _ _ _ ++ List.range' _ _ _ = _"
+    no match: every condition matches on its own; drop one
+    $ dt find "List.take _ _ ++ _ = _"
+    List.sum_take_add_sum_drop  ... (List.take i L).sum + (List.drop i L).sum = L.sum
+    List.add_sum_eraseIdx       ...
+
+`List.take_append_drop : List.take i l ++ List.drop i l = l` is indexed and
+elaborated, and `dt find "HAppend.hAppend _ _ = _" --in
+Init.Data.List.TakeDrop` finds it, so the fault is in parsing the notation: the
+first two results are sums, which is what `+` would match. Likely the
+tokenizer tries `+` before `++`; `+++`, `<++>`, `::` and other notations that
+share a prefix may have the same problem. The no-match line makes it worse:
+with a pattern and no flags the only "conditions" are the pattern and the
+`--elaborated` it implies, so "drop one" is not something the user can act on.
+
+**`dt refresh project` can leave the project stale at once.** Right after a
+`lake build`, a commit and `dt refresh project` (495060 rows), with no build or
+edit afterwards, every query ended with `project was rebuilt since it was
+indexed; rows may be missing`, and `dt status` three minutes later said:
+
+    project  local  true  true  2374  3m ago  430a4c0 (now 245f6a0, stale)
+
+A second `dt refresh project`, again with nothing in between, recorded
+`245f6a0` and the warning went away. So the first refresh recorded a revision
+that was already out of date when it finished: most likely the revision is
+taken before the dump, and the dump itself changes what the revision hashes
+(the build of a new module, `PositionalReductionCount`, had been added to the
+project just before). Either take the revision after the dump, or have
+`refresh` check it again at the end and say so when it moved.
+
+Fixed in 0.29.0.
+
+**`++`, `::` and the other symbols of several characters are one symbol.** The
+tokenizer reads the longest notation first (`<:+:`, `<+:`, `<:+`, `<+`, `++`,
+`::`), and a pattern is split where Lean would split it: at the loosest
+operator, with Lean's precedences and associativity, rather than at the first
+relation in the text. So `_ = _ ↔ _ = _` is an `Iff`, `a - b + c` is an
+`HAdd` of an `HSub`, and the `∈` of `∑ i ∈ Finset.range n, f i = _` is the
+binder's range, not the relation. `∉` is `Not (Membership.mem …)`, as it
+elaborates.
+
+    $ dt find "List.range' _ _ _ ++ List.range' _ _ _ = _"
+    List.range'_append_1  theorem  Init.Data.List.Range
+    List.range'_append  theorem  Init.Data.List.Range
+
+A constant written inside a pattern is named as such in a no-match line (`` `X`
+in the pattern ``, not `--uses X`), and when the shape matches but never
+together with those constants, that is what the line says.
+
+**A name that finds a declaration of another shape says what its shape is.**
+Matching a relation against either side of an `Iff` would make every pattern
+two searches and blur what a conclusion is, so the answer is the message, with
+the one-character rewrite when the pattern is a side:
+
+    $ dt find 'List.Sublist _ _' --name sublist_cons_iff
+    no match: `List.sublist_cons_iff` concludes `Iff` over `List.Sublist Or`,
+    and a pattern is matched against the whole conclusion; to match one side
+    of it, append ` ↔ _` to the pattern
+
+**Compiler-generated names are hidden unless `--generated`.** `ctorIdx`,
+`ctorElim`, `ctorElimType`, `congr_simp`, `ofNat_ctorIdx`, what is under
+`brecOn`, and an `elim` whose type is about `ctorIdx` (so `Or.elim` stays). A
+search only they answer says so rather than `no match`.
+
+**`dt rdeps <name>`** lists what mentions a declaration, in a proof or in a
+statement (marked `*`), grouped by module, with `--in`, `--source`, `--limit`
+and `--generated`. `--uses` still reads statements; its no-match line and
+`--help` now say so and point at `dt rdeps`.
+
+**`--text` reads declarations, not module docstrings**, and says so in `--help`
+and in its no-match line. Module headers are not in the dump, and reading them
+would mean a row kind that is not a declaration; that is left out of scope.
+
+**`dt show` is stale only if a shown module was rebuilt.** A local source whose
+build moved is let off when the `.olean` of every module `show` printed is
+older than the index. A search still warns: what it did not find may be in a
+module that was rebuilt.

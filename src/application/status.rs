@@ -14,8 +14,10 @@
 use crate::application::ports::{
     Build, DeclRepo, Package, Provenance, Revisions, Toolchain, Workspace,
 };
+use crate::domain::name::ModuleName;
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceStatus {
@@ -123,6 +125,38 @@ pub fn stale_among(
         }
     }
     Ok(out)
+}
+
+/// [`stale_among`], for a command that printed these rows and nothing else.
+///
+/// A rebuilt project is stale as a source, and "rows may be missing" is true
+/// of a search over it. It is not true of `dt show`: the row it printed is
+/// there, and it is out of date only if its own module was compiled again.
+/// After a build that touched four modules, every `show` of a declaration in
+/// the other hundred ended in a warning about it -- a line that is wrong most
+/// of the time is a line nobody reads the time it is right. So a source whose
+/// build moved is let off when each module shown is known not to have been
+/// rebuilt since the index was written.
+pub fn stale_for_rows(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    rows: &BTreeMap<SourceId, BTreeSet<ModuleName>>,
+) -> Result<Vec<Stale>> {
+    let mut out = stale_among(repo, revisions, rows.keys().cloned())?;
+    let mut kept = Vec::with_capacity(out.len());
+    for s in out.drain(..) {
+        let untouched = matches!(s.why, Why::Moved { .. })
+            && match repo.provenance(&s.id)? {
+                Some(was) => rows[&s.id]
+                    .iter()
+                    .all(|m| revisions.rebuilt_since(&s.id, m, was.indexed_at) == Some(false)),
+                None => false,
+            };
+        if !untouched {
+            kept.push(s);
+        }
+    }
+    Ok(kept)
 }
 
 /// What `dt status` has to say.

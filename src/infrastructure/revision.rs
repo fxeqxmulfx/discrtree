@@ -18,6 +18,7 @@
 //! fingerprinted: see [`build_stamp`].
 
 use crate::application::ports::Revisions;
+use crate::domain::name::ModuleName;
 use crate::domain::source::SourceId;
 use crate::error::Result;
 use crate::infrastructure::config::{Config, Kind};
@@ -83,6 +84,19 @@ impl Revisions for OnDisk {
             return Ok(Some(toolchain.clone()));
         }
         Ok(self.manifest.get(source.as_str()).cloned())
+    }
+
+    /// By the module's `.olean`, which a build rewrites exactly when it
+    /// compiles the module. Lake has written them under `lib/lean` and, before
+    /// that, straight under `lib`; whichever exists is the one it reads.
+    fn rebuilt_since(&self, source: &SourceId, module: &ModuleName, since: u64) -> Option<bool> {
+        let lib = self.builds.get(source)?;
+        let rel: PathBuf = module.as_str().split('.').collect::<PathBuf>().with_extension("olean");
+        [lib.join("lean").join(&rel), lib.join(&rel)].iter().find_map(|p| {
+            let t = std::fs::metadata(p).ok()?.modified().ok()?;
+            let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some(secs > since)
+        })
     }
 }
 

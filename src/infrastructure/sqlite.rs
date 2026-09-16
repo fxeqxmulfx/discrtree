@@ -2,7 +2,7 @@
 //! the conclusion head and a side table for constants, so conditions combine
 //! with `AND` and a query is milliseconds rather than a scan.
 
-use crate::application::ports::{DeclRepo, DeclSink, Provenance};
+use crate::application::ports::{DeclRepo, DeclSink, Mention, Provenance};
 use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
@@ -522,6 +522,51 @@ impl DeclRepo for SqliteIndex {
         self.provenance_of(source)
     }
 
+    /// `dep` has no index on `name`: it would be the size of the table again,
+    /// twelve million rows in a Mathlib index, for a question asked before a
+    /// refactor rather than on every search. The scan is a second warm.
+    fn used_by(&self, name: &DeclName, within: &Query) -> Result<Vec<Mention>> {
+        let mut filter = String::new();
+        let mut binds: Vec<String> = vec![name.to_string()];
+        if let Some(s) = &within.source {
+            filter.push_str(" AND d.source = ?");
+            binds.push(s.to_string());
+        }
+        if let Some(m) = &within.module {
+            filter.push_str(" AND (d.module = ? OR d.module LIKE ?)");
+            binds.push(m.clone());
+            binds.push(format!("{m}.%"));
+        }
+        if !within.generated {
+            filter.push_str(&format!(" AND {NOT_GENERATED}"));
+            binds.push(decl::GENERATED_ELIM.into());
+        }
+        let sql = format!(
+            "SELECT d.name, d.source, d.module, d.kind, d.elaborated, \
+             EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const = ?1) \
+             FROM decl d WHERE d.id IN (SELECT decl_id FROM dep WHERE name = ?1 \
+             UNION SELECT decl_id FROM uses WHERE const = ?1){filter}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(bind.as_slice(), |r| {
+            let mut d = Decl::stub(
+                &r.get::<_, String>(0)?,
+                &r.get::<_, String>(1)?,
+                &r.get::<_, String>(2)?,
+            );
+            d.kind = DeclKind::parse(&r.get::<_, String>(3)?);
+            d.elaborated = r.get(4)?;
+            Ok(Mention { decl: d, in_statement: r.get(5)? })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {
         let mut stmt = self
             .conn
@@ -539,6 +584,13 @@ impl DeclRepo for SqliteIndex {
 
 /// Translate a [`Query`] into SQL. Separate from the connection so it can be
 /// tested without one.
+/// `Decl::is_generated`, spelled for SQL, with one bind: `GENERATED_ELIM`.
+/// `_` is a LIKE wildcard, so the names with an underscore in them escape it.
+const NOT_GENERATED: &str = "NOT (d.name LIKE '%.ctorIdx' OR d.name LIKE '%.ctorElim' \
+     OR d.name LIKE '%.ctorElimType' OR d.name LIKE '%.congr!_simp' ESCAPE '!' \
+     OR d.name LIKE '%.ofNat!_ctorIdx' ESCAPE '!' OR d.name LIKE '%.brecOn.%' \
+     OR (d.name LIKE '%.elim' AND instr(d.type, ?) > 0))";
+
 fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
@@ -589,6 +641,10 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     }
     if q.no_sorry {
         where_clauses.push("d.sorry = 0".into());
+    }
+    if !q.generated {
+        where_clauses.push(NOT_GENERATED.into());
+        binds.push(decl::GENERATED_ELIM.into());
     }
     if !q.text.is_empty() {
         if has_fts {

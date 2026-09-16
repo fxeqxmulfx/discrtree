@@ -10,6 +10,11 @@ use crate::error::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// How many rows a diagnosis reads to see how answers spread, rather than the
+/// best few: wide enough to show a spread, narrow enough that a condition
+/// matching half the corpus does not pay for a full scan.
+const SPREAD: usize = 60;
+
 pub struct Find<'a> {
     pub repo: &'a dyn DeclRepo,
     /// Consulted only when a search came back empty, to tell a module prefix
@@ -77,6 +82,33 @@ pub enum Empty {
         /// The same arguments in the other order match.
         swapped: bool,
     },
+    /// The pattern's shape matches, and these constants, also written in the
+    /// pattern, are mentioned by nothing of that shape.
+    ///
+    /// `List.range' _ _ _ ++ List.range' _ _ _ = _` is four conditions inside
+    /// and one to whoever wrote it, and "drop one" names no flag they gave.
+    NotInShape {
+        absent: Vec<DeclName>,
+        /// No one of them is missing on its own; only all of them at once.
+        together: bool,
+    },
+    /// `--name` names a declaration outright, and its conclusion is not the
+    /// pattern's.
+    ///
+    /// `dt find 'List.Sublist _ _' --name sublist_cons_iff`: the lemma is an
+    /// `Iff` with a `Sublist` on one side, the pattern is matched against the
+    /// whole conclusion, and no flag is worth dropping. The row is in hand, so
+    /// the answer is what it says.
+    NamedElsewise {
+        name: DeclName,
+        shape: Shape,
+        /// The pattern's conclusion head is one of that conclusion's arguments:
+        /// the pattern describes a side of it.
+        on_a_side: bool,
+    },
+    /// Something matches, and all of it is what the compiler generated, which
+    /// `find` hides unless asked.
+    OnlyGenerated,
     /// A bare word in the pattern is the last component of constants the index
     /// does hold, and none of them answered either. `export Inner (inner)`
     /// makes Lean print `inner` for `Inner.inner`, so a pattern copied back out
@@ -230,6 +262,13 @@ impl Find<'_> {
                 candidates: candidates.clone(),
             });
         }
+        // Hidden rather than absent: the rows are there, and the flag that
+        // shows them is the whole repair.
+        if !query.generated
+            && !self.repo.find(&Query { generated: true, limit: 1, ..query.clone() })?.is_empty()
+        {
+            return Ok(Empty::OnlyGenerated);
+        }
         // A module prefix is the one condition that can fail for a reason no
         // probe can see. Every other empty answer means the index was asked and
         // said no; this one means the index was never told. The build is asked
@@ -276,9 +315,19 @@ impl Find<'_> {
         {
             return Ok(Empty::InstancesAreDefs);
         }
-        let conditions = query.conditions();
+        let mut conditions = query.conditions();
         if conditions.len() < 2 {
-            return Ok(Empty::Plain);
+            // Still worth naming when the condition reads less than its flag
+            // suggests: "matches nothing" from `--uses` reads as "nothing uses
+            // it", and the renderer has a line to add about that.
+            return Ok(match conditions.pop() {
+                Some((label, _))
+                    if label.starts_with("--uses ") || label.starts_with("--text ") =>
+                {
+                    Empty::Barren(vec![label])
+                }
+                _ => Empty::Plain,
+            });
         }
         let mut barren = Vec::new();
         for (label, probe) in conditions {
@@ -295,7 +344,48 @@ impl Find<'_> {
         if !query.shape.is_empty() && self.shape_fails_alone(query)? {
             return self.no_such_shape(&query.shape);
         }
+        // The same, one step out: the shape matches, and what else the pattern
+        // names is what nothing of that shape mentions. Still not "drop one" --
+        // with no flags given, the only conditions are the pattern's own.
+        if !query.pattern_uses.is_empty()
+            && let Some(empty) = self.absent_from_shape(query)?
+        {
+            return Ok(empty);
+        }
+        if let Some(empty) = self.named_elsewise(query)? {
+            return Ok(empty);
+        }
         Ok(Empty::Combination { elsewhere: self.elsewhere(query)? })
+    }
+
+    /// The declaration `--name` names outright, when it is there and the
+    /// pattern does not fit it.
+    ///
+    /// Asked last of the pattern's diagnoses, and only of a name that is a
+    /// whole name or a whole last component: a fragment finds many rows, and
+    /// "`--name sublist` finds `List.sublist_cons_iff`" would be a guess at
+    /// which of them was meant.
+    fn named_elsewise(&self, query: &Query) -> Result<Option<Empty>> {
+        let Some(n) = &query.name else { return Ok(None) };
+        if query.shape.is_empty() {
+            return Ok(None);
+        }
+        let both =
+            Query { name: Some(n.clone()), shape: query.shape.clone(), limit: 1, ..Query::new() };
+        if !self.repo.find(&both)?.is_empty() {
+            return Ok(None);
+        }
+        let by_name = Query { name: Some(n.clone()), limit: SPREAD, ..Query::new() };
+        let asked = n.to_lowercase();
+        let found = self.repo.find(&by_name)?.into_iter().filter(|d| d.shaped()).find(|d| {
+            d.name.as_str().to_lowercase() == asked || d.name.base().to_lowercase() == asked
+        });
+        Ok(found.map(|d| {
+            let on_a_side = query.shape.concl.as_ref().is_some_and(|c| {
+                d.shape.args.iter().any(|a| matches!(a, ArgHead::Named(x) if x == c))
+            });
+            Empty::NamedElsewise { name: d.name, shape: d.shape, on_a_side }
+        }))
     }
 
     /// Whether the pattern, with every flag dropped, still matches nothing.
@@ -308,6 +398,38 @@ impl Find<'_> {
             return Ok(true);
         }
         Ok(self.repo.find(&bare)?.is_empty())
+    }
+
+    /// The constants written in the pattern that nothing of its shape
+    /// mentions, when the pattern on its own matches nothing. Each on its own
+    /// where some fail that way; all of them where only the set does.
+    fn absent_from_shape(&self, query: &Query) -> Result<Option<Empty>> {
+        let with = |uses: Vec<DeclName>| Query {
+            shape: query.shape.clone(),
+            uses,
+            pattern_uses: query.pattern_uses.clone(),
+            limit: 1,
+            ..Query::new()
+        };
+        let whole = with(query.pattern_uses.clone());
+        if whole != *query && !self.repo.find(&whole)?.is_empty() {
+            return Ok(None);
+        }
+        let mut absent = Vec::new();
+        if query.pattern_uses.len() > 1 {
+            for u in &query.pattern_uses {
+                if self.repo.find(&with(vec![u.clone()]))?.is_empty() {
+                    absent.push(u.clone());
+                }
+            }
+        }
+        // Where the probes found none missing alone, it is all of them at once;
+        // where there was only one, the pattern that failed was its probe.
+        let together = absent.is_empty() && query.pattern_uses.len() > 1;
+        if absent.is_empty() {
+            absent = query.pattern_uses.clone();
+        }
+        Ok(Some(Empty::NotInShape { absent, together }))
     }
 
     /// The three near misses of a shape that matches nothing: the arguments in
@@ -348,7 +470,6 @@ impl Find<'_> {
         if shape.concl.is_none() || !shape.args.iter().any(|a| matches!(a, ArgHead::Named(_))) {
             return Ok(Vec::new());
         }
-        const SPREAD: usize = 60;
         let free = Shape { concl: None, args: shape.args.clone() };
         let rows = self.repo.find(&Query { shape: free, limit: SPREAD, ..Query::new() })?;
         let mut counts: BTreeMap<DeclName, usize> = BTreeMap::new();
@@ -371,7 +492,6 @@ impl Find<'_> {
         // Wider than `limit`, because what is wanted here is the spread over
         // modules rather than the ten best rows, and narrow enough that a
         // condition matching half the corpus does not pay for a full scan.
-        const SPREAD: usize = 60;
         let rows = self.repo.find(&Query { module: None, limit: SPREAD, ..query.clone() })?;
         let mut counts: BTreeMap<ModuleName, usize> = BTreeMap::new();
         for d in rows {

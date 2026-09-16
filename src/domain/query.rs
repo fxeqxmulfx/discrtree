@@ -18,6 +18,11 @@ pub struct Query {
     /// Constants the type must mention. Conditions combine with AND, because
     /// `--uses Real.exp,Finset.sum` means both.
     pub uses: Vec<DeclName>,
+    /// Those of `uses` that were written inside the pattern rather than given
+    /// as `--uses`. Not a condition of its own: it says how to *name* one, so
+    /// that an empty result blames `` `List.range'` in the pattern `` rather
+    /// than a flag the reader never typed.
+    pub pattern_uses: Vec<DeclName>,
     /// Module prefix, e.g. `Mathlib.Analysis`.
     pub module: Option<String>,
     pub source: Option<SourceId>,
@@ -30,6 +35,8 @@ pub struct Query {
     pub elaborated_only: bool,
     /// Drop rows whose proof is `sorry`.
     pub no_sorry: bool,
+    /// Include what the compiler generated. See [`Decl::is_generated`].
+    pub generated: bool,
     pub limit: usize,
 }
 
@@ -88,7 +95,12 @@ impl Query {
             }
         }
         for c in &self.uses {
-            out.push((format!("--uses {c}"), one(Query { uses: vec![c.clone()], ..Query::new() })));
+            let label = if self.pattern_uses.contains(c) {
+                format!("`{c}` in the pattern")
+            } else {
+                format!("--uses {c}")
+            };
+            out.push((label, one(Query { uses: vec![c.clone()], ..Query::new() })));
         }
         if let Some(m) = &self.module {
             out.push((format!("--in {m}"), one(Query { module: Some(m.clone()), ..Query::new() })));
@@ -123,6 +135,9 @@ impl Query {
             return false;
         }
         if self.no_sorry && d.has_sorry {
+            return false;
+        }
+        if !self.generated && d.is_generated() {
             return false;
         }
         if let Some(n) = &self.name
@@ -250,6 +265,15 @@ mod tests {
     /// of its own suffixes, because within the substring matches nothing
     /// preferred the row whose name *is* the query. Past the default limit
     /// that reads as "not indexed" rather than "look further down".
+    #[test]
+    fn a_constant_written_in_the_pattern_is_not_called_a_flag() {
+        let mut q = Query::new();
+        q.uses = vec![DeclName::new("List.take"), DeclName::new("Real.exp")];
+        q.pattern_uses = vec![DeclName::new("List.take")];
+        let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, vec!["`List.take` in the pattern", "--uses Real.exp"]);
+    }
+
     #[test]
     fn a_name_given_in_full_ranks_above_the_names_that_extend_it() {
         let named = |n: &str| {

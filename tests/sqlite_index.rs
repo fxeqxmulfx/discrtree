@@ -8,7 +8,7 @@ use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, Provenance};
 use discrtree::application::status;
 use discrtree::domain::decl::{ArgHead, DeclKind, Shape, Span};
-use discrtree::domain::name::DeclName;
+use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
 use discrtree::infrastructure::revision;
@@ -383,6 +383,53 @@ fn a_module_compiled_after_the_dump_makes_the_project_stale() {
     assert_ne!(current, &dumped);
 }
 
+/// `dt show` printed rows, and a rebuild makes them stale only if it compiled
+/// their module again. A build elsewhere in the project moves the source, but
+/// the row shown from an untouched module is neither missing nor out of date.
+#[test]
+fn a_shown_row_is_stale_only_when_its_own_module_was_rebuilt() {
+    let dir = TempDir::new("dt-module-rev");
+    let lib = dir.path().join(".lake/build/lib");
+    let pkg = lib.join("lean/Transformer/CRASP");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("Basic.olean"), "compiled").unwrap();
+    let dumped = revision::build_stamp(&lib).unwrap();
+    let written = std::fs::metadata(pkg.join("Basic.olean")).unwrap().modified().unwrap();
+    let indexed_at = written.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 100;
+
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let id = SourceId::new("project");
+    let was =
+        Provenance { revision: Some(dumped), indexed_at, decls: 1, ..Provenance::by_this_build() };
+    db.record(&id, &was).unwrap();
+    let disk = revision::OnDisk {
+        checkouts: Default::default(),
+        builds: [(id.clone(), lib.clone())].into(),
+        manifest: Default::default(),
+        toolchains: Default::default(),
+    };
+    let shown = |module: &str| {
+        let mut rows = std::collections::BTreeMap::new();
+        rows.insert(id.clone(), [ModuleName::new(module)].into());
+        status::stale_for_rows(&db, &disk, &rows).unwrap()
+    };
+
+    std::fs::write(pkg.join("Hull.olean"), "compiled since").unwrap();
+    assert_eq!(status::stale_among(&db, &disk, [id.clone()]).unwrap().len(), 1);
+    assert!(shown("Transformer.CRASP.Basic").is_empty(), "Basic was not rebuilt");
+    // A module whose file cannot be found is not known to be untouched.
+    assert_eq!(shown("Transformer.CRASP.Gone").len(), 1);
+
+    let later = std::time::UNIX_EPOCH + std::time::Duration::from_secs(indexed_at + 100);
+    std::fs::File::options()
+        .write(true)
+        .open(pkg.join("Basic.olean"))
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert_eq!(shown("Transformer.CRASP.Basic").len(), 1, "Basic was rebuilt");
+}
+
 /// Every source is at whatever the build tree under this root fingerprints to,
 /// which is what the real adapter does for a `local` source.
 struct OneBuild(std::path::PathBuf);
@@ -694,4 +741,56 @@ fn a_source_that_moved_and_was_written_by_an_older_dt_is_reported_as_moved() {
     let revs = FakeRevisions::at(&[("mathlib", "4f8b12c")]);
     let stale = status::stale_among(&db, &revs, [id]).unwrap();
     assert!(stale[0].why.needs_reread(), "a moved source is read again: {:?}", stale[0].why);
+}
+
+/// `used_by` reads both side tables, and the SQL filter on generated names
+/// agrees with `Decl::is_generated`.
+#[test]
+fn what_mentions_a_name_is_read_from_proofs_and_statements() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let mut in_proof = theorem("B.proof", "mathlib", "Mathlib.B", "Eq", &["Real.exp"]);
+    in_proof.consts.clear();
+    let mut elim = theorem("Form.and.elim", "project", "T", "Eq", &["Real.exp"]);
+    elim.ty = "(t : Form) → t.ctorIdx = 3 → motive t".into();
+    let rows = vec![
+        theorem("A.stated", "mathlib", "Mathlib.A", "Eq", &["Real.exp"]),
+        in_proof,
+        theorem("Form.ctorIdx", "project", "T", "Eq", &["Real.exp"]),
+        elim,
+        theorem("Or.elim", "project", "T", "Eq", &["Real.exp"]),
+        theorem("C.unrelated", "mathlib", "Mathlib.A", "Eq", &["Real.log"]),
+    ];
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let root = DeclName::new("Real.exp");
+
+    let names = |q: &Query| {
+        let mut got: Vec<(String, bool)> = db
+            .used_by(&root, q)
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.decl.name.to_string(), m.in_statement))
+            .collect();
+        got.sort();
+        got
+    };
+    let own = |s: &str| (s.to_string(), true);
+    assert_eq!(
+        names(&Query::new()),
+        vec![own("A.stated"), ("B.proof".to_string(), false), own("Or.elim")]
+    );
+    let mut all = Query::new();
+    all.generated = true;
+    assert_eq!(names(&all).len(), 5);
+    let mut within = Query::new();
+    within.module = Some("Mathlib".into());
+    assert_eq!(names(&within).len(), 2, "a module prefix covers its children");
+    within.source = Some(SourceId::new("project"));
+    assert!(names(&within).is_empty());
+
+    let mut named = Query::new();
+    named.name = Some("elim".into());
+    let found: Vec<String> =
+        db.find(&named).unwrap().into_iter().map(|d| d.name.to_string()).collect();
+    assert_eq!(found, vec!["Or.elim".to_string()]);
 }

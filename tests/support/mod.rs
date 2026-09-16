@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use discrtree::application::ports::{DeclRepo, ProjectWriter, SourceFiles};
+use discrtree::application::ports::{DeclRepo, Mention, ProjectWriter, SourceFiles};
 use discrtree::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
@@ -116,6 +116,10 @@ impl DeclRepo for FakeRepo {
 
     fn get_many(&self, names: &[DeclName]) -> Result<Vec<Decl>> {
         Ok(names.iter().filter_map(|n| self.decls.iter().find(|d| &d.name == n).cloned()).collect())
+    }
+
+    fn used_by(&self, name: &DeclName, within: &Query) -> Result<Vec<Mention>> {
+        Ok(self.decls.iter().filter_map(|d| Mention::of(d, name, within)).collect())
     }
 
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {

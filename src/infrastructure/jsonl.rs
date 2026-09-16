@@ -5,7 +5,7 @@
 //! happens to emit is not part of the domain. Changing the dump changes this
 //! file and nothing else.
 
-use crate::application::ports::DeclRepo;
+use crate::application::ports::{DeclRepo, Mention};
 use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
@@ -226,6 +226,10 @@ impl DeclRepo for JsonlRepo {
             names.iter().enumerate().map(|(i, n)| (n, i)).collect();
         found.sort_by_key(|d| position.get(&d.name).copied().unwrap_or(usize::MAX));
         Ok(found)
+    }
+
+    fn used_by(&self, name: &DeclName, within: &Query) -> Result<Vec<Mention>> {
+        Ok(self.decls.iter().filter_map(|d| Mention::of(d, name, within)).collect())
     }
 
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {

@@ -7,6 +7,7 @@ pub mod find;
 pub mod generated;
 pub mod index;
 pub mod ports;
+pub mod rdeps;
 pub mod ship;
 pub mod show;
 pub mod status;

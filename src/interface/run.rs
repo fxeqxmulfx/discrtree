@@ -9,6 +9,7 @@ use crate::application::deps::{Deps, DepsResult};
 use crate::application::find::{self, Dup, Find};
 use crate::application::index;
 use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
+use crate::application::rdeps::Rdeps;
 use crate::application::ship::Fetch;
 use crate::application::show::Show;
 use crate::application::status::{self, Status};
@@ -81,6 +82,16 @@ impl App {
                 self.show(&names, import_only)
             }
             Command::Deps { name, depth } => self.deps(&name, &depth),
+            Command::Rdeps { name, module, source, generated, limit } => {
+                let within = Query {
+                    module,
+                    source: source.map(SourceId::new),
+                    generated,
+                    limit,
+                    ..Query::new()
+                };
+                self.rdeps(&name, &within)
+            }
             Command::Add { name, write, force } => self.add(&name, write, force),
             Command::Find(args) => self.find(&args),
             Command::Dup { file, threshold } => self.dup(&file, threshold),
@@ -167,11 +178,18 @@ impl App {
         for e in &missed {
             eprintln!("dt: {e}");
         }
-        let from = match missed.is_empty() {
-            true => shown.iter().map(|s| s.decl.source.clone()).collect(),
-            false => BTreeSet::new(),
-        };
-        self.warn_stale(repo.as_ref(), from);
+        if !missed.is_empty() {
+            self.warn_stale(repo.as_ref(), BTreeSet::new());
+            return Ok(());
+        }
+        let mut rows: BTreeMap<SourceId, BTreeSet<ModuleName>> = BTreeMap::new();
+        for s in &shown {
+            rows.entry(s.decl.source.clone()).or_default().insert(s.decl.module.clone());
+        }
+        let revs = OnDisk::read(&self.cfg);
+        if let Ok(stale) = status::stale_for_rows(repo.as_ref(), &revs, &rows) {
+            self.print_stale(stale);
+        }
         Ok(())
     }
 
@@ -193,6 +211,26 @@ impl App {
             Ok(result) => {
                 print!("{}", render::deps(&result));
                 self.warn_stale(repo.as_ref(), closure_sources(&result));
+                Ok(())
+            }
+            Err(e) => {
+                self.warn_stale(repo.as_ref(), BTreeSet::new());
+                Err(e)
+            }
+        }
+    }
+
+    fn rdeps(&self, name: &str, within: &Query) -> Result<()> {
+        self.check_source(within)?;
+        let repo = self.repo()?;
+        let build = LakeBuild::read(&self.cfg);
+        let rdeps = Rdeps { repo: repo.as_ref(), build: &build };
+        match rdeps.run(&DeclName::new(name), within) {
+            Ok(users) => {
+                print!("{}", render::rdeps(&users));
+                // Every source that could hold a user, not the ones that do:
+                // a user missing from a stale source is what the line warns of.
+                self.warn_stale(repo.as_ref(), find::sources_of(repo.as_ref(), within));
                 Ok(())
             }
             Err(e) => {
@@ -281,6 +319,10 @@ impl App {
         // A search that failed because its warning failed would be a worse
         // outcome than the staleness the warning was about to report.
         let Ok(stale) = status::stale_among(repo, &revs, among) else { return };
+        self.print_stale(stale);
+    }
+
+    fn print_stale(&self, stale: Vec<status::Stale>) {
         for s in stale {
             let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
             eprint!("{}", render::stale(&s, kind));
@@ -797,6 +839,7 @@ fn query_of(a: &FindArgs) -> Result<Query> {
     // the flag is implied rather than silently ignored.
     q.elaborated_only = a.elaborated || q.needs_shape();
     q.no_sorry = a.no_sorry;
+    q.generated = a.generated;
     q.limit = a.limit;
     Ok(q)
 }

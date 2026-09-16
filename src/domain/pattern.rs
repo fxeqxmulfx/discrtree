@@ -10,40 +10,90 @@ use crate::domain::decl::{ArgHead, Shape};
 use crate::domain::name::DeclName;
 use crate::domain::query::Query;
 
-/// Notation to head symbol, with how loosely it binds: the loosest notation on
-/// a side is its outermost application, and so is the head symbol the index is
-/// keyed by. `a⁻¹ + b⁻¹` is an addition, not an inverse.
+/// Notation to head symbol, with Lean's own binding strength and whether it
+/// associates to the left: the loosest notation on a side is its outermost
+/// application, and so is the head symbol the index is keyed by. `a⁻¹ + b⁻¹`
+/// is an addition, not an inverse, and `a - b + c` is an addition too, because
+/// `+` and `-` bind alike and associate to the left.
 ///
 /// Only entries where the mapping is unambiguous: a wrong guess here turns a
 /// search into an empty result with no explanation. `→` is deliberately absent
 /// — an implication is a binder in the elaborated term, never a conclusion
 /// head, and it is split off before any of this. See [`split_on_arrows`].
-const NOTATION: &[(&str, &str, u8)] = &[
-    ("≤", "LE.le", 0),
-    ("<", "LT.lt", 0),
-    ("≥", "GE.ge", 0),
-    (">", "GT.gt", 0),
-    ("=", "Eq", 0),
-    ("≠", "Ne", 0),
-    ("↔", "Iff", 0),
-    ("∈", "Membership.mem", 0),
-    ("∉", "Membership.mem", 0),
-    ("⊆", "HasSubset.Subset", 0),
-    ("∣", "Dvd.dvd", 0),
-    ("∧", "And", 1),
-    ("∨", "Or", 1),
-    ("∑", "Finset.sum", 2),
-    ("∏", "Finset.prod", 2),
-    ("+", "HAdd.hAdd", 3),
-    ("-", "HSub.hSub", 3),
-    ("⊓", "Min.min", 3),
-    ("⊔", "Max.max", 3),
-    ("*", "HMul.hMul", 4),
-    ("/", "HDiv.hDiv", 4),
-    ("%", "HMod.hMod", 4),
-    ("^", "HPow.hPow", 5),
-    ("⁻¹", "Inv.inv", 6),
+const NOTATION: &[(&str, &str, u16, bool)] = &[
+    ("↔", "Iff", 20, false),
+    ("∨", "Or", 30, false),
+    ("∧", "And", 35, false),
+    ("≤", "LE.le", 50, false),
+    ("<", "LT.lt", 50, false),
+    ("≥", "GE.ge", 50, false),
+    (">", "GT.gt", 50, false),
+    ("=", "Eq", 50, false),
+    ("≠", "Ne", 50, false),
+    ("∈", "Membership.mem", 50, false),
+    // Elaborated as `¬ (a ∈ s)`: see [`parse`], which says so.
+    ("∉", "Membership.mem", 50, false),
+    ("⊆", "HasSubset.Subset", 50, false),
+    ("∣", "Dvd.dvd", 50, false),
+    ("<+", "List.Sublist", 50, false),
+    ("<+:", "List.IsPrefix", 50, false),
+    ("<:+", "List.IsSuffix", 50, false),
+    ("<:+:", "List.IsInfix", 50, false),
+    ("+", "HAdd.hAdd", 65, true),
+    ("-", "HSub.hSub", 65, true),
+    ("++", "HAppend.hAppend", 65, true),
+    ("∪", "Union.union", 65, true),
+    ("::", "List.cons", 67, false),
+    ("∑", "Finset.sum", 67, false),
+    ("∏", "Finset.prod", 67, false),
+    ("⊔", "Max.max", 68, true),
+    ("⊓", "Min.min", 69, true),
+    ("*", "HMul.hMul", 70, true),
+    ("/", "HDiv.hDiv", 70, true),
+    ("%", "HMod.hMod", 70, true),
+    ("∩", "Inter.inter", 70, true),
+    ("\\", "SDiff.sdiff", 70, true),
+    ("•", "HSMul.hSMul", 73, false),
+    ("^", "HPow.hPow", 75, false),
+    ("∘", "Function.comp", 90, false),
+    ("⁻¹", "Inv.inv", 1024, false),
 ];
+
+/// The notation a head symbol is written with, where it has one: `↔` for
+/// `Iff`. The first spelling wins, so `Membership.mem` is `∈` and not `∉`.
+pub fn symbol(head: &str) -> Option<&'static str> {
+    NOTATION.iter().find(|(_, h, ..)| *h == head).map(|(sym, ..)| *sym)
+}
+
+/// How loosely a relation binds at most. Notation at this strength or looser
+/// is what a statement is *about* -- `a ≤ b ∧ c ≤ d` is a conjunction -- and
+/// the pattern is split there; anything tighter is inside one of the sides.
+const RELATION: u16 = 50;
+
+/// Symbols written with more than one character, longest first so that `<+:`
+/// is not read as `<+` and a stray `:`. Without these `++` tokenized as two
+/// additions and `List.take _ _ ++ _ = _` answered with sums.
+///
+/// The second of each pair is the token it becomes: `->` is `→` and `<=` is
+/// `≤`, because a keyboard has one and Lean prints the other.
+const COMPOUNDS: &[(&str, &str)] = &[
+    ("<:+:", "<:+:"),
+    ("<+:", "<+:"),
+    ("<:+", "<:+"),
+    ("<+", "<+"),
+    ("++", "++"),
+    ("::", "::"),
+    ("->", "→"),
+    ("=>", "=>"),
+    ("<=", "≤"),
+    (">=", "≥"),
+    ("!=", "≠"),
+];
+
+/// Binders whose variables run up to a comma: `∀ x ∈ s,` and `∑ i ∈ s,`. The
+/// `∈` there says where the variable ranges and is not the relation the
+/// statement is about, so it is treated as bracketed. See [`depths`].
+const BINDER_PREFIXES: &[&str] = &["∀", "∃", "∃!", "∑", "∏", "⋃", "⋂"];
 
 /// Notation that encloses its argument rather than standing between two: an
 /// opening delimiter, what closes it, and the constant the pair names.
@@ -121,24 +171,44 @@ pub struct Parsed {
 /// become `uses` conditions. With no notation symbol, the leading identifier
 /// becomes the conclusion head and the rest become arguments.
 pub fn parse(pattern: &str) -> Parsed {
+    let mut p = read(pattern);
+    p.query.pattern_uses = p.query.uses.clone();
+    p
+}
+
+fn read(pattern: &str) -> Parsed {
     let (all, lambdas) = strip_lambdas(&tokenize(pattern));
     let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
+    let tokens = without_foralls(&tokens);
     let assumed = conditions_of(&hypotheses);
     let count = hypotheses.len();
     let mut query = Query::new();
 
     match split_on_operator(&tokens) {
         Some((lhs, op, rhs)) => {
-            let concl = NOTATION
-                .iter()
-                .find(|(sym, ..)| *sym == op)
-                .map(|(_, head, _)| DeclName::new(*head));
             let (left_head, left_rest) = side(&lhs);
             let (right_head, right_rest) = side(&rhs);
-            query.shape = Shape::new(concl, vec![left_head, right_head]);
-            query.uses = dedup(left_rest.into_iter().chain(right_rest).chain(assumed).collect());
+            let rest = left_rest.into_iter().chain(right_rest).chain(assumed);
+            if op == "∉" {
+                // `a ∉ s` is `¬ (a ∈ s)` once elaborated: a negation with one
+                // argument, whose sides are a level further down than a shape
+                // reaches. What they name is still in the type.
+                let sides = [left_head, right_head].into_iter().filter_map(|h| match h {
+                    ArgHead::Named(n) => Some(n),
+                    ArgHead::Any => None,
+                });
+                query.shape = Shape::new(
+                    Some(DeclName::new("Not")),
+                    vec![ArgHead::Named(DeclName::new("Membership.mem"))],
+                );
+                query.uses = dedup(rest.chain(sides).collect());
+            } else {
+                let concl = notation(&op).map(|(_, head, ..)| DeclName::new(head));
+                query.shape = Shape::new(concl, vec![left_head, right_head]);
+                query.uses = dedup(rest.collect());
+            }
             Parsed {
                 query,
                 operator: Some(op),
@@ -273,6 +343,14 @@ fn tokenize(s: &str) -> Vec<String> {
         if c.is_whitespace() {
             continue;
         }
+        let ahead: String = std::iter::once(c).chain(cs.clone().take(3)).collect();
+        if let Some((written, token)) = COMPOUNDS.iter().find(|(w, _)| ahead.starts_with(w)) {
+            for _ in 1..written.chars().count() {
+                cs.next();
+            }
+            out.push((*token).to_string());
+            continue;
+        }
         match c {
             // The type a bracket notation is ascribed with -- the `_ℝ` of
             // `⟪x, y⟫_ℝ` -- belongs to the bracket, the way `¹` belongs to
@@ -295,18 +373,6 @@ fn tokenize(s: &str) -> Vec<String> {
                     sym.push(cs.next().unwrap_or_default());
                 }
                 out.push(sym);
-            }
-            // `->` for `→`, because a keyboard has one and not the other, and
-            // without this it reads as a subtraction followed by `>`.
-            '-' if cs.peek() == Some(&'>') => {
-                cs.next();
-                out.push("→".to_string());
-            }
-            // A lambda's arrow, which is one token and not `Eq` applied to
-            // `GT.gt`. `↦` needs nothing: it is a character of its own.
-            '=' if cs.peek() == Some(&'>') => {
-                cs.next();
-                out.push("=>".to_string());
             }
             _ => out.push(c.to_string()),
         }
@@ -368,6 +434,22 @@ fn split_on_arrows(tokens: &[String]) -> (Vec<Vec<String>>, Vec<String>) {
     (parts.into_iter().filter(|p| !p.is_empty()).collect(), concl)
 }
 
+/// The conclusion with the `∀ …,` in front of it taken off, because a
+/// [`Shape`] is read off a statement with its binders stripped: `∀ {a b : Int},
+/// |a + b| ≤ |a| + |b|`, pasted whole out of a goal, asks what `|a + b| ≤ |a| +
+/// |b|` asks. `∃` stays: an existential is what such a statement concludes.
+fn without_foralls(tokens: &[String]) -> Vec<String> {
+    let depth = depths(tokens);
+    let mut i = 0;
+    while tokens.get(i).is_some_and(|t| t == "∀") {
+        match (i + 1..tokens.len()).find(|j| tokens[*j] == "," && depth[*j] == depth[i]) {
+            Some(comma) => i = comma + 1,
+            None => break,
+        }
+    }
+    tokens[i..].to_vec()
+}
+
 /// What the hypotheses can still be searched for: the head symbol of each, and
 /// the constants it mentions. Both are in the declaration's type, so both are
 /// honest `--uses` conditions — unlike the shape, which only the conclusion has.
@@ -386,14 +468,28 @@ fn conditions_of(hypotheses: &[Vec<String>]) -> Vec<DeclName> {
         .collect()
 }
 
-/// The first notation symbol that names a relation, with the tokens either side.
-/// Relations bind loosest, so the first one found is the top level.
+/// The loosest top-level notation that is a relation or looser, with the
+/// tokens either side.
+///
+/// Loosest and not first: `a = b ↔ c = d` is an `Iff` and `a ≤ b ∧ c ≤ d` is an
+/// `And`, and splitting at the first relation read both as something else.
+/// Everything this looser than [`RELATION`] associates to the right or not at
+/// all, so of equals the first is the outermost.
 fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<String>)> {
-    const RELATIONS: &[&str] = &["≤", "<", "≥", ">", "=", "≠", "↔", "∈", "∉", "⊆", "∣"];
     let depth = depths(tokens);
-    let i =
-        tokens.iter().zip(&depth).position(|(t, d)| *d == 0 && RELATIONS.contains(&t.as_str()))?;
+    let (i, _) = tokens
+        .iter()
+        .zip(&depth)
+        .enumerate()
+        .filter(|(_, (_, d))| **d == 0)
+        .filter_map(|(i, (t, _))| notation(t).map(|(.., prec, _)| (i, prec)))
+        .filter(|(_, prec)| *prec <= RELATION)
+        .min_by_key(|(_, prec)| *prec)?;
     Some((tokens[..i].to_vec(), tokens[i].clone(), tokens[i + 1..].to_vec()))
+}
+
+fn notation(token: &str) -> Option<(&'static str, &'static str, u16, bool)> {
+    NOTATION.iter().find(|(sym, ..)| *sym == token).copied()
 }
 
 /// One side of a relation: its head symbol, and the identifiers left over.
@@ -440,13 +536,19 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
         };
     }
     let depth = depths(tokens);
-    tokens
+    let top: Vec<_> = tokens
         .iter()
         .zip(&depth)
         .filter(|(_, d)| **d == 0)
-        .filter_map(|(t, _)| NOTATION.iter().find(|(sym, ..)| sym == t))
-        .min_by_key(|(.., prec)| *prec)
-        .map(|(_, head, _)| DeclName::new(*head))
+        .filter_map(|(t, _)| notation(t))
+        .collect();
+    let loosest = top.iter().map(|(.., prec, _)| *prec).min()?;
+    let mut at = top.into_iter().filter(|(.., prec, _)| *prec == loosest);
+    // `a - b + c` is `(a - b) + c`: of operators that associate to the left,
+    // the last one is applied outermost.
+    let first = at.next()?;
+    let outer = if first.3 { at.next_back().unwrap_or(first) } else { first };
+    Some(DeclName::new(outer.1))
 }
 
 /// How deeply each token is bracketed. An opening delimiter and its closer are
@@ -463,6 +565,9 @@ fn depths(tokens: &[String]) -> Vec<usize> {
         if open.last().is_some_and(|close| t.starts_with(close)) {
             open.pop();
             out.push(open.len());
+        } else if BINDER_PREFIXES.contains(&t.as_str()) {
+            out.push(open.len());
+            open.push(",");
         } else if let Some((_, close, _)) = BRACKETS.iter().find(|(o, ..)| *o == t.as_str()) {
             out.push(open.len());
             open.push(close);
@@ -502,7 +607,7 @@ fn unreadable(tokens: &[String]) -> Vec<String> {
             || is_numeral(t)
             || t == "→"
             || IGNORED.contains(&t.as_str())
-            || NOTATION.iter().any(|(sym, ..)| *sym == t.as_str())
+            || notation(t).is_some()
             || BRACKETS.iter().any(|(o, c, _)| *o == t.as_str() || t.starts_with(c))
     };
     dedup_strings(tokens.iter().filter(|t| !known(t)).cloned().collect())
@@ -810,7 +915,7 @@ mod tests {
     /// reported, so the caller can say `no match` and name it.
     #[test]
     fn a_symbol_the_parser_cannot_read_is_reported_rather_than_dropped() {
-        assert_eq!(parse("_ ∩ _ ⊆ _").unknown, vec!["∩"]);
+        assert_eq!(parse("_ ∆ _ ⊆ _").unknown, vec!["∆"]);
         // Notation, brackets and punctuation are read, not reported -- a
         // statement pasted whole out of a goal is mostly punctuation.
         assert!(parse("∀ {a b : Int}, |a + b| ≤ |a| + |b|").unknown.is_empty());
@@ -835,6 +940,65 @@ mod tests {
         // head still wins.
         assert_eq!(parse("_ + 1 ≤ Real.exp _").query.shape.args[0], arg("HAdd.hAdd"));
         assert_eq!(parse("Nat.succ 1").query.shape.args, vec![arg("OfNat.ofNat")]);
+    }
+
+    /// The report: `List.take _ _ ++ _ = _` answered with sums, because `++`
+    /// was read as two `+`. A symbol spelled with several characters is one
+    /// token, and the longest spelling wins.
+    #[test]
+    fn a_symbol_of_several_characters_is_one_symbol() {
+        let p = parse("List.take _ _ ++ _ = _");
+        assert_eq!(p.query.shape.args, vec![arg("HAppend.hAppend"), arg("_")]);
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        let p = parse("l <+ a :: l'");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("List.Sublist")));
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("List.cons")]);
+        assert_eq!(parse("_ <+: _").query.shape.concl, Some(DeclName::new("List.IsPrefix")));
+        assert_eq!(parse("_ <:+: _").query.shape.concl, Some(DeclName::new("List.IsInfix")));
+        assert_eq!(parse("_ <= _").query, parse("_ ≤ _").query);
+    }
+
+    /// `a = b ↔ c = d` is an `Iff` of two equations. Splitting at the first
+    /// relation made it an equation whose right side was an `Iff`.
+    #[test]
+    fn the_loosest_relation_is_the_one_the_statement_is_about() {
+        let p = parse("_ = _ ↔ _ = _");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Iff")));
+        assert_eq!(p.query.shape.args, vec![arg("Eq"), arg("Eq")]);
+        let p = parse("a ≤ b ∧ c ≤ d");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("And")));
+        assert_eq!(p.query.shape.args, vec![arg("LE.le"), arg("LE.le")]);
+        let p = parse("a ∈ l ↔ a = b ∨ a ∈ l'");
+        assert_eq!(p.query.shape.args, vec![arg("Membership.mem"), arg("Or")]);
+    }
+
+    /// `a - b + c` is `(a - b) + c`, and `a ^ b ^ c` is `a ^ (b ^ c)`.
+    #[test]
+    fn operators_that_bind_alike_associate_as_lean_says() {
+        assert_eq!(parse("a - b + c = _").query.shape.args[0], arg("HAdd.hAdd"));
+        assert_eq!(parse("a * b ^ c = _").query.shape.args[0], arg("HMul.hMul"));
+        assert_eq!(parse("a :: l ++ m = _").query.shape.args[0], arg("HAppend.hAppend"));
+    }
+
+    /// The variable of a big operator or a quantifier ranges over something,
+    /// and that `∈` is not the relation the statement is about.
+    #[test]
+    fn a_binder_range_is_not_a_relation() {
+        let p = parse("∑ i ∈ s, f i = _");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Eq")));
+        assert_eq!(p.query.shape.args, vec![arg("Finset.sum"), arg("_")]);
+        let p = parse("∀ {a b : Int}, |a + b| ≤ |a| + |b|");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
+        assert_eq!(p.query.shape.args, vec![arg("abs"), arg("HAdd.hAdd")]);
+    }
+
+    /// `a ∉ s` elaborates to `¬ (a ∈ s)`, and that is what the index keys it by.
+    #[test]
+    fn not_in_is_a_negated_membership() {
+        let p = parse("_ ∉ Finset.range _");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("Not")));
+        assert_eq!(p.query.shape.args, vec![arg("Membership.mem")]);
+        assert_eq!(p.query.uses, vec![DeclName::new("Finset.range")]);
     }
 
     #[test]

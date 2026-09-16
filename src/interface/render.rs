@@ -8,10 +8,12 @@ use crate::application::add::AddReport;
 use crate::application::deps::DepsResult;
 use crate::application::find::{Asked, Duplicate, Empty, Hits};
 use crate::application::ports::Missing;
+use crate::application::rdeps::Users;
 use crate::application::show::{Shown, Source};
 use crate::application::status::{Report, SourceStatus, Stale, Why};
-use crate::domain::decl::Decl;
+use crate::domain::decl::{ArgHead, Decl};
 use crate::domain::lean_core;
+use crate::domain::pattern;
 use crate::domain::source::SourceKind;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,6 +45,28 @@ pub fn unreadable(symbols: &[String]) -> String {
     )
 }
 
+/// What a barren flag does not read, for the two flags whose names promise
+/// more than they search.
+///
+/// `--uses X` matching nothing reads as "nothing uses X", and it sent a reader
+/// back to grep for a lemma twenty proofs rest on: the flag reads statements.
+/// `--text` reads declarations, and a word from a module's header is not in
+/// any of them.
+fn scope_notes(labels: &[String]) -> String {
+    let mut out = String::new();
+    if let Some(c) = labels.iter().find_map(|l| l.strip_prefix("--uses ")) {
+        out.push_str(&format!(
+            "; --uses reads statements only — `dt rdeps {c}` lists the proofs that use it"
+        ));
+    }
+    if labels.iter().any(|l| l.starts_with("--text ")) {
+        out.push_str(
+            "; --text reads the names, types and docstrings of declarations, not module docstrings",
+        );
+    }
+    out
+}
+
 /// A hit is two lines: what it is called, followed by what it says.
 ///
 /// Nothing here is padded or separated by blank lines. This output is read far
@@ -57,10 +81,10 @@ pub fn find(hits: &Hits, long: bool) -> String {
         // condition and dropping one, and a wrong guess costs another search.
         return match &hits.empty {
             Some(Empty::Barren(c)) if c.len() == 1 => {
-                format!("no match: {} matches nothing on its own\n", c[0])
+                format!("no match: {} matches nothing on its own{}\n", c[0], scope_notes(c))
             }
             Some(Empty::Barren(c)) => {
-                format!("no match: {} match nothing on their own\n", c.join(", "))
+                format!("no match: {} match nothing on their own{}\n", c.join(", "), scope_notes(c))
             }
             Some(Empty::Combination { elsewhere }) if elsewhere.is_empty() => {
                 "no match: every condition matches on its own; drop one\n".into()
@@ -174,6 +198,41 @@ pub fn find(hits: &Hits, long: bool) -> String {
                 };
                 format!("no match: nothing has that shape{near}\n")
             }
+            Some(Empty::NotInShape { absent, together }) => {
+                let shown: Vec<String> = absent.iter().map(|n| format!("`{n}`")).collect();
+                let what = if *together {
+                    format!("{} together", shown.join(" and "))
+                } else {
+                    shown.join(" or ")
+                };
+                format!(
+                    "no match: the shape matches, but nothing of that shape mentions {what}; a \
+                     name inside a side is looked for anywhere in the statement\n"
+                )
+            }
+            // A relation with the pattern's head on one side is the case worth
+            // a rewrite: that side is what the reader was after.
+            Some(Empty::NamedElsewise { name, shape, on_a_side }) => {
+                let concl = shape.concl.as_ref().map_or("_", |c| c.as_str());
+                let args: Vec<&str> = shape.args.iter().map(ArgHead::as_str).collect();
+                let over = match args.len() {
+                    0 => String::new(),
+                    _ => format!(" over `{}`", args.join(" ")),
+                };
+                let rewrite = match pattern::symbol(concl) {
+                    Some(sym) if *on_a_side => {
+                        format!("; to match one side of it, append ` {sym} _` to the pattern")
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "no match: `{name}` concludes `{concl}`{over}, and a pattern is matched \
+                     against the whole conclusion{rewrite}\n"
+                )
+            }
+            Some(Empty::OnlyGenerated) => "no match: only names the compiler generated match \
+                 (ctorIdx, congr_simp, …), which are hidden — add --generated to see them\n"
+                .into(),
             // Naming a source is not optional in the repair: the dump is out
             // of date and nothing on disk has moved, so a bare `dt refresh`
             // reports that there is nothing to do.
@@ -332,6 +391,42 @@ pub fn deps(r: &DepsResult) -> String {
             }
             out.push_str("\nRe-run with --depth 1 or --depth 2 for the readable part.\n");
         }
+    }
+    out
+}
+
+/// Who mentions a declaration, one line per module.
+///
+/// Full names, because the next step is `dt show` on one of them; the module
+/// is said once, because it is what repeats.
+pub fn rdeps(u: &Users) -> String {
+    if u.total == 0 {
+        return format!("nothing in the index mentions {}\n", u.root);
+    }
+    let starred = u.shown.iter().any(|m| m.in_statement);
+    let mut out = format!(
+        "{}: used by {}{}{}\n",
+        u.root,
+        u.total,
+        match u.total - u.shown.len() {
+            0 => String::new(),
+            _ => format!(", first {} shown; --limit for more", u.shown.len()),
+        },
+        if starred { " (* in the statement)" } else { "" },
+    );
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for m in &u.shown {
+        let d = &m.decl;
+        let head = format!("  {}{}:", d.module, mark(d));
+        let item = format!("{}{}", d.name, if m.in_statement { "*" } else { "" });
+        match groups.last_mut() {
+            Some((h, items)) if *h == head => items.push(item),
+            _ => groups.push((head, vec![item])),
+        }
+    }
+    for (head, items) in &groups {
+        let items: Vec<&str> = items.iter().map(String::as_str).collect();
+        out.push_str(&wrapped(head, &items));
     }
     out
 }
@@ -663,7 +758,7 @@ fn first_line(s: &str, width: usize) -> std::borrow::Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::decl::Span;
+    use crate::domain::decl::{Shape, Span};
     use crate::domain::name::DeclName;
 
     fn hits(rows: Vec<Decl>) -> Hits {
@@ -914,6 +1009,73 @@ mod tests {
         // "drop one": there is no flag here to drop.
         let r = shape(vec![], vec![], false);
         assert_eq!(r, "no match: nothing has that shape\n");
+    }
+
+    #[test]
+    fn a_pattern_answered_by_its_parts_says_which_part() {
+        let empty = |e: Empty| {
+            find(
+                &Hits { rows: Vec::new(), truncated: false, empty: Some(e), read_as: Vec::new() },
+                false,
+            )
+        };
+        let names = |ns: &[&str]| ns.iter().map(|n| DeclName::new(*n)).collect::<Vec<_>>();
+
+        let r =
+            empty(Empty::NotInShape { absent: names(&["List.take", "List.drop"]), together: true });
+        assert!(r.contains("mentions `List.take` and `List.drop` together"), "{r}");
+        let r = empty(Empty::NotInShape { absent: names(&["List.drop"]), together: false });
+        assert!(r.contains("mentions `List.drop`;"), "{r}");
+
+        let iff = Shape::new(
+            Some(DeclName::new("Iff")),
+            vec![ArgHead::parse("List.Sublist"), ArgHead::parse("Or")],
+        );
+        let elsewise = |on_a_side| {
+            empty(Empty::NamedElsewise {
+                name: DeclName::new("List.sublist_cons_iff"),
+                shape: iff.clone(),
+                on_a_side,
+            })
+        };
+        let r = elsewise(true);
+        assert!(
+            r.contains("`List.sublist_cons_iff` concludes `Iff` over `List.Sublist Or`"),
+            "{r}"
+        );
+        assert!(r.contains("append ` ↔ _`"), "{r}");
+        assert!(!elsewise(false).contains("append"), "no side to match");
+
+        assert!(empty(Empty::OnlyGenerated).contains("--generated"));
+
+        let r = empty(Empty::Barren(vec!["--uses Real.exp_le_exp".into()]));
+        assert!(r.contains("`dt rdeps Real.exp_le_exp`"), "{r}");
+        let r = empty(Empty::Barren(vec!["--text crasp".into(), "--in M".into()]));
+        assert!(r.contains("not module docstrings"), "{r}");
+        assert!(!empty(Empty::Barren(vec!["--in M".into()])).contains(';'));
+    }
+
+    #[test]
+    fn rdeps_says_each_module_once_and_marks_the_statements() {
+        use crate::application::ports::Mention;
+        let at = |name: &str, module: &str, in_statement| Mention {
+            decl: Decl::stub(name, "mathlib", module),
+            in_statement,
+        };
+        let users = |shown: Vec<Mention>, total| Users { root: DeclName::new("X"), shown, total };
+
+        let r = rdeps(&users(
+            vec![at("A.a", "M.A", false), at("A.b", "M.A", true), at("B.c", "M.B", false)],
+            3,
+        ));
+        assert_eq!(r.lines().next(), Some("X: used by 3 (* in the statement)"), "{r}");
+        assert_eq!(r.matches("M.A").count(), 1, "{r}");
+        assert!(r.contains("A.b*"), "{r}");
+        assert!(!r.contains("B.c*"), "{r}");
+
+        let r = rdeps(&users(vec![at("B.c", "M.B", false)], 40));
+        assert_eq!(r.lines().next(), Some("X: used by 40, first 1 shown; --limit for more"), "{r}");
+        assert_eq!(rdeps(&users(Vec::new(), 0)), "nothing in the index mentions X\n");
     }
 
     /// `--in Batteries` is not a prefix to correct, and telling the reader it

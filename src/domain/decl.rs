@@ -164,6 +164,10 @@ impl Shape {
     }
 }
 
+/// What the type of a constructor's generated `elim` says, and a handwritten
+/// `elim` does not: which constructor it is, by index.
+pub const GENERATED_ELIM: &str = "ctorIdx = ";
+
 /// One declaration, from any corpus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decl {
@@ -206,6 +210,24 @@ impl Decl {
         }
     }
 
+    /// Whether the compiler made this declaration up: what `inductive` and
+    /// `@[congr]` leave behind next to the names a file actually declares.
+    ///
+    /// Kept in the index and hidden from `find` rather than dropped by the
+    /// dump, so that an index written by an older dump benefits too and
+    /// `--generated` can still ask. `elim` is also a name people choose --
+    /// `Or.elim`, `False.elim` -- so only the one Lean makes for a constructor
+    /// counts, and that one is told by its type, which is stated in terms of
+    /// `ctorIdx`.
+    pub fn is_generated(&self) -> bool {
+        const GENERATED: &[&str] =
+            &["ctorIdx", "ctorElim", "ctorElimType", "congr_simp", "ofNat_ctorIdx"];
+        let name = self.name.as_str();
+        GENERATED.contains(&self.name.base())
+            || name.contains(".brecOn.")
+            || (self.name.base() == "elim" && self.ty.contains(GENERATED_ELIM))
+    }
+
     /// Whether the row carries enough structure for shape search.
     pub fn shaped(&self) -> bool {
         self.elaborated && self.shape.concl.is_some()
@@ -245,6 +267,21 @@ mod tests {
 
     fn shape(concl: &str, args: &[&str]) -> Shape {
         Shape::new(Some(DeclName::new(concl)), args.iter().map(|a| ArgHead::parse(a)).collect())
+    }
+
+    #[test]
+    fn what_the_compiler_writes_is_told_from_what_a_person_does() {
+        let named = |n: &str, ty: &str| {
+            let mut d = Decl::stub(n, "project", "M");
+            d.ty = ty.into();
+            d.is_generated()
+        };
+        assert!(named("Form.ctorIdx", ""));
+        assert!(named("Form.and.congr_simp", ""));
+        assert!(named("Form.brecOn.go", ""));
+        assert!(named("Form.and.elim", "(t : Form) → t.ctorIdx = 3 → motive t"));
+        assert!(!named("Or.elim", "(a ∨ b) → (a → c) → (b → c) → c"));
+        assert!(!named("Form.sat_le", ""));
     }
 
     #[test]

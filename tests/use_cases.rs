@@ -950,3 +950,157 @@ fn asking_for_a_declaration_by_its_whole_name_puts_it_first() {
     let hits = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
     assert_eq!(hits.rows.first().map(|d| d.name.as_str()), Some("Real.exp"), "{:?}", hits.rows);
 }
+
+fn shaped_as(
+    name: &str,
+    module: &str,
+    concl: &str,
+    args: &[&str],
+    consts: &[&str],
+) -> discrtree::domain::decl::Decl {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let mut d = theorem(name, "mathlib", module, concl, consts);
+    d.shape =
+        Shape::new(Some(DeclName::new(concl)), args.iter().map(|a| ArgHead::parse(a)).collect());
+    d
+}
+
+/// A name inside a pattern is one condition to whoever wrote it, and "matches
+/// nothing on its own" is not true of it: the shape matches, and so does the
+/// name, only never in the same statement.
+#[test]
+fn a_constant_the_shape_never_mentions_is_named_as_such() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let repo = FakeRepo {
+        decls: vec![
+            shaped_as("List.a", "M", "Eq", &["_", "HAppend.hAppend", "_"], &["List.take"]),
+            shaped_as("List.b", "M", "Eq", &["_", "HAppend.hAppend", "_"], &["List.drop"]),
+            shaped_as("List.c", "M", "LE.le", &["_", "_"], &["List.take", "List.drop"]),
+        ],
+    };
+    let pattern = |uses: &[&str]| {
+        let mut q = Query::new();
+        q.shape = Shape::new(
+            Some(DeclName::new("Eq")),
+            vec![ArgHead::parse("HAppend.hAppend"), ArgHead::Any],
+        );
+        q.uses = uses.iter().map(|u| DeclName::new(*u)).collect();
+        q.pattern_uses = q.uses.clone();
+        q
+    };
+
+    let found = Find { repo: &repo, build: &NoBuild }.run(&pattern(&["List.length"])).unwrap();
+    assert!(matches!(found.empty, Some(Empty::Barren(_))), "absent everywhere: {:?}", found.empty);
+
+    // Each of the two sits under this shape somewhere; never both.
+    let found = Find { repo: &repo, build: &NoBuild }.run(&pattern(&["List.take", "List.drop"]));
+    let Some(Empty::NotInShape { absent, together }) = found.unwrap().empty else {
+        panic!("expected the pattern's constants to be blamed")
+    };
+    assert!(together);
+    assert_eq!(absent, vec![DeclName::new("List.take"), DeclName::new("List.drop")]);
+
+    let mut repo = repo;
+    repo.decls.remove(1);
+    let found = Find { repo: &repo, build: &NoBuild }.run(&pattern(&["List.take", "List.drop"]));
+    assert_eq!(
+        found.unwrap().empty,
+        Some(Empty::NotInShape { absent: vec![DeclName::new("List.drop")], together: false })
+    );
+}
+
+/// `--name sublist_cons_iff` with the pattern `List.Sublist _ _` found
+/// nothing, and the lemma was there: it concludes an `Iff` with the sublist
+/// on one side. The name is exact, so what the reader got wrong is the shape.
+#[test]
+fn a_named_declaration_of_another_shape_is_shown_with_its_shape() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let repo = FakeRepo {
+        decls: vec![
+            shaped_as("List.sublist_cons_iff", "M", "Iff", &["List.Sublist", "Or"], &[]),
+            shaped_as("List.Sublist.refl", "M", "List.Sublist", &["_", "_"], &[]),
+        ],
+    };
+    let mut q = Query::new();
+    q.name = Some("sublist_cons_iff".into());
+    q.shape = Shape::new(Some(DeclName::new("List.Sublist")), vec![ArgHead::Any, ArgHead::Any]);
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    let Some(Empty::NamedElsewise { name, shape, on_a_side }) = found else {
+        panic!("expected the named declaration, got {found:?}")
+    };
+    assert_eq!(name, DeclName::new("List.sublist_cons_iff"));
+    assert_eq!(shape.concl, Some(DeclName::new("Iff")));
+    assert!(on_a_side, "the pattern is one side of that `Iff`");
+
+    // A fragment of a name is a search, not a declaration to point at.
+    q.name = Some("sublist_cons".into());
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    assert!(!matches!(found, Some(Empty::NamedElsewise { .. })), "got {found:?}");
+}
+
+/// `ctorIdx` and `congr_simp` outnumbered the lemmas of a small module. They
+/// are hidden, and a search only they answer says so instead of "no match".
+#[test]
+fn a_search_only_generated_names_answer_says_they_are_hidden() {
+    let mut elim = theorem("Form.and.elim", "mathlib", "M", "Eq", &[]);
+    elim.ty = "(t : Form) → t.ctorIdx = 3 → motive t".into();
+    let repo = FakeRepo {
+        decls: vec![
+            theorem("Form.ctorIdx", "mathlib", "M", "Eq", &[]),
+            elim,
+            theorem("Or.elim", "mathlib", "M", "Eq", &[]),
+        ],
+    };
+    let named = |n: &str| {
+        let mut q = Query::new();
+        q.name = Some(n.into());
+        q
+    };
+    let run = |q: &Query| Find { repo: &repo, build: &NoBuild }.run(q).unwrap();
+
+    assert!(run(&named("ctorIdx")).rows.is_empty());
+    assert_eq!(run(&named("ctorIdx")).empty, Some(Empty::OnlyGenerated));
+    assert_eq!(run(&named("Form.and.elim")).empty, Some(Empty::OnlyGenerated));
+    assert_eq!(run(&named("elim")).rows.len(), 1, "`Or.elim` is written by hand");
+    let mut shown = named("ctorIdx");
+    shown.generated = true;
+    assert_eq!(run(&shown).rows.len(), 1);
+}
+
+/// `dt rdeps` reads proofs as well as statements, which is what `--uses`
+/// could not, and says which of the two each mention is.
+#[test]
+fn rdeps_lists_what_mentions_a_declaration_in_a_proof_or_a_statement() {
+    use discrtree::application::rdeps::Rdeps;
+    let mut in_proof = theorem("B.proof", "mathlib", "Mathlib.B", "Eq", &["X.root"]);
+    in_proof.consts.clear();
+    let mut recursive = theorem("X.root", "mathlib", "Mathlib.X", "Eq", &["X.root"]);
+    recursive.consts.clear();
+    let repo = FakeRepo {
+        decls: vec![
+            recursive,
+            theorem("A.stated", "mathlib", "Mathlib.A", "Eq", &["X.root"]),
+            in_proof,
+            theorem("C.unrelated", "mathlib", "Mathlib.A", "Eq", &["Y"]),
+        ],
+    };
+    let rdeps = Rdeps { repo: &repo, build: &NoBuild };
+    let root = DeclName::new("X.root");
+
+    let u = rdeps.run(&root, &Query::new()).unwrap();
+    assert_eq!(u.total, 2, "itself and the unrelated one are not users");
+    let shown: Vec<(&str, bool)> =
+        u.shown.iter().map(|m| (m.decl.name.as_str(), m.in_statement)).collect();
+    assert_eq!(shown, vec![("A.stated", true), ("B.proof", false)]);
+
+    let mut first = Query::new();
+    first.limit = 1;
+    let u = rdeps.run(&root, &first).unwrap();
+    assert_eq!((u.total, u.shown.len()), (2, 1));
+
+    let mut within = Query::new();
+    within.module = Some("Mathlib.B".into());
+    assert_eq!(rdeps.run(&root, &within).unwrap().total, 1);
+
+    assert!(rdeps.run(&DeclName::new("Nope"), &Query::new()).is_err());
+}
