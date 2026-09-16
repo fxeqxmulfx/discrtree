@@ -89,6 +89,32 @@ fn an_unqualified_word_resolves_to_the_commonest_constant_called_that() {
     assert!(!db.is_constant(&DeclName::new("inner")).unwrap());
 }
 
+/// A field is a whole last component: `.le_exp` does not end `exp_le_exp`.
+#[test]
+fn a_field_names_the_declarations_that_end_in_it() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    let rows = vec![
+        theorem("Real.exp_le_exp", "mathlib", "Mathlib.Analysis.Exp", "LE.le", &["Real.exp"]),
+        theorem("Finset.sum_le_sum", "mathlib", "Mathlib.Algebra.Order", "LE.le", &[]),
+        theorem("Complex.exp", "mathlib", "Mathlib.Analysis.Exp", "Eq", &[]),
+        theorem("Real.exp", "mathlib", "Mathlib.Analysis.Exp", "Eq", &[]),
+    ];
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let ending = |f: &str| {
+        db.ending_in(&DeclName::new(f))
+            .unwrap()
+            .into_iter()
+            .map(|n| n.into_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ending(".exp_le_exp"), ["Real.exp_le_exp"]);
+    assert_eq!(ending(".le_exp"), Vec::<String>::new());
+    assert_eq!(ending(".sum_le_sum"), ["Finset.sum_le_sum"]);
+    // The one statements mention comes first, whatever its name.
+    assert_eq!(ending(".exp"), ["Real.exp", "Complex.exp"]);
+}
+
 #[test]
 fn the_conclusion_head_narrows_the_search() {
     let db = loaded();

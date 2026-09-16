@@ -571,6 +571,24 @@ impl DeclRepo for SqliteIndex {
         Ok(out)
     }
 
+    /// A scan, as the `GLOB` a field is everywhere else: a suffix cannot seek
+    /// the name index, and the whole table is a twentieth of a second. The
+    /// count is a seek per name.
+    fn ending_in(&self, field: &DeclName) -> Result<Vec<DeclName>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.name FROM (SELECT DISTINCT name FROM decl WHERE name GLOB ?1) n \
+             ORDER BY (SELECT count(*) FROM uses WHERE const = n.name) DESC, n.name",
+        )?;
+        let rows = stmt.query_map([format!("*{}", glob_escaped(field.as_str()))], |r| {
+            Ok(DeclName::new(r.get::<_, String>(0)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {
         let mut stmt = self
             .conn

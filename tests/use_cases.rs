@@ -1231,3 +1231,31 @@ fn rdeps_lists_what_mentions_a_declaration_in_a_proof_or_a_statement() {
 
     assert!(rdeps.run(&DeclName::new("Nope"), &Query::new()).is_err());
 }
+
+/// A field is the one declaration it names, and when it names several the
+/// error says which, rather than that there is nothing.
+#[test]
+fn rdeps_reads_a_field_as_the_one_declaration_it_names() {
+    use discrtree::application::rdeps::Rdeps;
+    let repo = FakeRepo {
+        decls: vec![
+            theorem("Real.deriv_exp", "mathlib", "Mathlib.R", "Eq", &[]),
+            theorem("Complex.deriv_exp", "mathlib", "Mathlib.C", "Eq", &[]),
+            theorem("intervalIntegral.integral_mono_on", "mathlib", "Mathlib.I", "LE.le", &[]),
+            theorem("A.user", "mathlib", "Mathlib.A", "Eq", &["intervalIntegral.integral_mono_on"]),
+        ],
+    };
+    let rdeps = Rdeps { repo: &repo, build: &NoBuild };
+
+    let u = rdeps.run(&DeclName::new(".integral_mono_on"), &Query::new()).unwrap();
+    assert_eq!(u.root.as_str(), "intervalIntegral.integral_mono_on");
+    assert_eq!(u.total, 1);
+
+    let e = match rdeps.run(&DeclName::new(".deriv_exp"), &Query::new()) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("two declarations end in .deriv_exp"),
+    };
+    assert!(e.contains("Complex.deriv_exp, Real.deriv_exp"), "{e}");
+    assert!(rdeps.run(&DeclName::new(".nowhere"), &Query::new()).is_err());
+    assert!(rdeps.run(&DeclName::new("exp"), &Query::new()).is_err(), "a whole name is itself");
+}

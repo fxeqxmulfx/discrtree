@@ -2281,3 +2281,18 @@ the whole name, and says nothing about what it could have been:
 `Complex.deriv_exp`, and `.length` fifty-two.
 
 Seen with dt 0.42.0, 2026-09-16.
+
+Fixed in 0.43.0.  A field is the one declaration that ends in it, and the
+answer's first line names it; when several end in it, the error lists them,
+the ones most statements mention first:
+
+    $ dt rdeps .integral_mono_on
+    intervalIntegral.integral_mono_on: used by 5
+    $ dt rdeps .length
+    dt: .length ends 52 declarations; name one: List.length,
+      SimpleGraph.Walk.length, RelSeries.length, Module.length, …, and 42 more
+
+Not every declaration it names, as `find --uses` reads it: a refactor changes
+one, and the users of fifty-two `length`s have nothing in common.  A name
+without a dot is still the whole name, so `dt rdeps exp_le_exp` still says
+it is not in the index.

@@ -25,7 +25,13 @@ pub struct Users {
 impl Rdeps<'_> {
     /// `within` narrows by `--source` and `--in`; its other conditions are
     /// not read.
+    ///
+    /// A field, `.integral_mono_on`, is the one declaration it names, and
+    /// [`Users::root`] then says which. It is not every declaration it names,
+    /// as it is for `find --uses`: a refactor changes one of them, and
+    /// `.length` names fifty-two whose users have nothing in common.
     pub fn run(&self, name: &DeclName, within: &Query) -> Result<Users> {
+        let name = &self.meant(name)?;
         if self.repo.get(name)?.is_none() {
             if let Some(missing) = self.build.declaring(name.as_str()) {
                 bail!("{}", missing.about(name))
@@ -47,4 +53,26 @@ impl Rdeps<'_> {
         all.truncate(within.limit);
         Ok(Users { root: name.clone(), shown: all, total })
     }
+
+    fn meant(&self, name: &DeclName) -> Result<DeclName> {
+        if !name.is_field() {
+            return Ok(name.clone());
+        }
+        let mut named = self.repo.ending_in(name)?;
+        match named.len() {
+            0 => bail!("no declaration in the index ends in {name}"),
+            1 => Ok(named.remove(0)),
+            n => {
+                let shown: Vec<&str> = named.iter().take(SHOWN).map(DeclName::as_str).collect();
+                let more = match n.saturating_sub(SHOWN) {
+                    0 => String::new(),
+                    m => format!(", and {m} more"),
+                };
+                bail!("{name} ends {n} declarations; name one: {}{more}", shown.join(", "))
+            }
+        }
+    }
 }
+
+/// How many of the declarations an ambiguous field names the error lists.
+const SHOWN: usize = 10;

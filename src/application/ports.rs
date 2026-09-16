@@ -77,6 +77,11 @@ pub trait DeclRepo {
     /// answer is a list of names.
     fn used_by(&self, name: &DeclName, within: &Query) -> Result<Vec<Mention>>;
 
+    /// The declared names a field names, each once: every `….length` for
+    /// `.length`, the ones most statements mention first, then by name. See
+    /// [`DeclName::names`].
+    fn ending_in(&self, field: &DeclName) -> Result<Vec<DeclName>>;
+
     /// What the source was when it was indexed, if the store remembers.
     fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
         Ok(None)

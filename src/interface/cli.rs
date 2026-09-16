@@ -239,7 +239,8 @@ pub enum Command {
     /// The reverse of `deps`, one level deep, grouped by module. A name marked
     /// `*` mentions it in its statement, which is all `find --uses` can see.
     Rdeps {
-        /// Fully qualified declaration name.
+        /// Fully qualified declaration name, or `.field` for the one
+        /// declaration ending in it.
         name: String,
         /// Module prefix, e.g. Transformer.CRASP.
         #[arg(long = "in", value_name = "MODULE")]

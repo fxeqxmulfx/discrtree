@@ -234,6 +234,17 @@ impl DeclRepo for JsonlRepo {
         Ok(self.decls.iter().filter_map(|d| Mention::of(d, name, within)).collect())
     }
 
+    fn ending_in(&self, field: &DeclName) -> Result<Vec<DeclName>> {
+        let names: std::collections::BTreeSet<&DeclName> =
+            self.decls.iter().map(|d| &d.name).filter(|n| field.names(n)).collect();
+        let mut names: Vec<DeclName> = names.into_iter().cloned().collect();
+        // Stable, so a tie stays in name order.
+        names.sort_by_key(|n| {
+            std::cmp::Reverse(self.decls.iter().filter(|d| d.consts.contains(n)).count())
+        });
+        Ok(names)
+    }
+
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
         Ok(decl::commonest_called(
             self.decls.iter().map(|d| (d.ty.as_str(), d.shape.heads().collect())),
