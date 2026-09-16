@@ -41,6 +41,8 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("<:+:", "List.IsInfix", 50, false),
     ("+", "HAdd.hAdd", 65, true),
     ("-", "HSub.hSub", 65, true),
+    // The same `-` with no term before it. See [`notation_at`].
+    ("-", "Neg.neg", 75, false),
     ("++", "HAppend.hAppend", 65, true),
     ("∪", "Union.union", 65, true),
     ("::", "List.cons", 67, false),
@@ -142,8 +144,6 @@ pub struct Parsed {
     pub query: Query,
     /// The notation that became the conclusion head, if any.
     pub operator: Option<String>,
-    /// Identifiers that could not be placed in the shape and became `--uses`.
-    pub extra_constants: Vec<DeclName>,
     /// Tokens read as wildcards rather than as constants. See [`is_variable`].
     pub variables: Vec<String>,
     /// Lambdas read as `_`, as they were written. See [`strip_lambdas`].
@@ -167,8 +167,8 @@ pub struct Parsed {
 /// The rule is small enough to state in full: the pattern is split on `→`,
 /// everything before the last arrow becomes a `--uses` condition, and what is
 /// left is split on the top-level notation symbol, that symbol becomes the conclusion head, and the
-/// head identifier of each side becomes an argument. Identifiers elsewhere
-/// become `uses` conditions. With no notation symbol, the leading identifier
+/// head identifier of each side becomes an argument. Identifiers and notation
+/// elsewhere become `uses` conditions. With no notation symbol, the leading identifier
 /// becomes the conclusion head and the rest become arguments.
 pub fn parse(pattern: &str) -> Parsed {
     let mut p = read(pattern);
@@ -178,13 +178,13 @@ pub fn parse(pattern: &str) -> Parsed {
 
 fn read(pattern: &str) -> Parsed {
     let (all, lambdas) = strip_lambdas(&expand_indexing(lex(pattern)));
-    let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
+    let variables = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
     let tokens = without_foralls(&tokens);
     let assumed = conditions_of(&hypotheses);
-    let count = hypotheses.len();
     let mut query = Query::new();
+    let mut operator = None;
 
     match split_on_operator(&tokens) {
         Some((lhs, op, rhs)) => {
@@ -203,82 +203,59 @@ fn read(pattern: &str) -> Parsed {
                     Some(DeclName::new("Not")),
                     vec![ArgHead::Named(DeclName::new("Membership.mem"))],
                 );
-                query.uses = dedup(rest.chain(sides).collect());
+                query.uses = rest.chain(sides).collect();
             } else {
                 let concl = notation(&op).map(|(_, head, ..)| DeclName::new(head));
                 query.shape = Shape::new(concl, vec![left_head, right_head]);
-                query.uses = dedup(rest.collect());
+                query.uses = rest.collect();
             }
-            Parsed {
-                query,
-                operator: Some(op),
-                extra_constants: Vec::new(),
-                variables: vars,
-                lambdas,
-                hypotheses: count,
-                unknown,
-            }
+            operator = Some(op);
         }
-        None => {
-            let ids = constants(&tokens);
-            match ids.split_first() {
-                Some((head, rest)) => {
-                    let args = tokens
-                        .iter()
-                        .skip_while(|t| t.as_str() != head.as_str())
-                        .skip(1)
-                        .filter(|t| is_ident(t) || is_numeral(t) || *t == "_")
-                        .map(|t| arg_head(t))
-                        .collect();
-                    query.shape = Shape::new(Some(head.clone()), args);
-                    query.uses = dedup(rest.iter().cloned().chain(assumed).collect());
-                    Parsed {
-                        query,
-                        operator: None,
-                        extra_constants: Vec::new(),
-                        variables: vars,
-                        lambdas,
-                        hypotheses: count,
-                        unknown,
-                    }
-                }
-                // No name to key on, but notation is a name: `⟪x, y⟫_ℝ`
-                // says `Inner.inner` as plainly as `Real.exp x` says
-                // `Real.exp`. Which argument is which is another matter --
-                // notation hides the implicit ones -- so the head is all this
-                // claims, and a head alone still matches.
-                None if head_of(&tokens).is_some() => {
-                    query.shape = Shape::new(head_of(&tokens), Vec::new());
-                    query.uses = dedup(assumed);
-                    Parsed {
-                        query,
-                        operator: None,
-                        extra_constants: Vec::new(),
-                        variables: vars,
-                        lambdas,
-                        hypotheses: count,
-                        unknown,
-                    }
-                }
-                None => {
-                    // Nothing recognisable: fall back to free text rather than
-                    // returning an unconstrained query.
-                    query.text = pattern.split_whitespace().map(str::to_string).collect();
-                    Parsed {
-                        query,
-                        operator: None,
-                        extra_constants: Vec::new(),
-                        variables: vars,
-                        hypotheses: count,
-                        // Nothing was dropped: the pattern is searched whole,
-                        // lambda and all.
-                        lambdas: Vec::new(),
-                        unknown: Vec::new(),
-                    }
-                }
+        None => match constants(&tokens).split_first() {
+            Some((head, rest)) => {
+                let args = tokens
+                    .iter()
+                    .skip_while(|t| t.as_str() != head.as_str())
+                    .skip(1)
+                    .filter(|t| is_ident(t) || is_numeral(t) || *t == "_")
+                    .map(|t| arg_head(t))
+                    .collect();
+                query.shape = Shape::new(Some(head.clone()), args);
+                query.uses = rest.iter().cloned().chain(assumed).collect();
             }
-        }
+            // No name to key on, but notation is a name: `⟪x, y⟫_ℝ` says
+            // `Inner.inner` as plainly as `Real.exp x` says `Real.exp`. Which
+            // argument is which is another matter -- notation hides the
+            // implicit ones -- so the head is all this claims, and a head
+            // alone still matches.
+            None if head_of(&tokens).is_some() => {
+                query.shape = Shape::new(head_of(&tokens), Vec::new());
+                query.uses = assumed;
+            }
+            None => {
+                // Nothing recognisable: fall back to free text rather than
+                // returning an unconstrained query.
+                query.text = pattern.split_whitespace().map(str::to_string).collect();
+                return Parsed {
+                    query,
+                    operator: None,
+                    variables,
+                    hypotheses: hypotheses.len(),
+                    // Nothing was dropped: the pattern is searched whole,
+                    // lambda and all.
+                    lambdas: Vec::new(),
+                    unknown: Vec::new(),
+                };
+            }
+        },
     }
+    // What the shape does not already say. A head of it is in every type the
+    // shape matches, and a condition that repeats it is one more to blame
+    // when the search comes back empty, for no row it could rule out.
+    let nested: Vec<DeclName> =
+        notation_in(&all).into_iter().filter(|n| !query.shape.heads().any(|h| h == n)).collect();
+    query.uses = dedup(std::mem::take(&mut query.uses).into_iter().chain(nested).collect());
+    Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown }
 }
 
 /// Each lambda replaced by the `_` it can honestly be read as, and the lambdas
@@ -605,6 +582,70 @@ fn notation(token: &str) -> Option<(&'static str, &'static str, u16, bool)> {
     NOTATION.iter().find(|(sym, ..)| *sym == token).copied()
 }
 
+/// The notation the token at `i` is, which for a `-` depends on what is before
+/// it: with a term there it subtracts, and with none it negates, as at the
+/// start of a side, after an operator or just inside a bracket.
+///
+/// The two bind differently, and the head of a side depends on it. `-a * b` is
+/// `(-a) * b`, a product, and `-x ^ 2` is `-(x ^ 2)`, a negation -- read as a
+/// subtraction, both were a `-` looser than anything next to it.
+fn notation_at(
+    tokens: &[String],
+    depth: &[usize],
+    i: usize,
+) -> Option<(&'static str, &'static str, u16, bool)> {
+    let negates =
+        tokens[i] == "-" && !(i > 0 && depth[i] <= depth[i - 1] && ends_term(&tokens[i - 1]));
+    match negates {
+        true => NOTATION.iter().find(|(_, head, ..)| *head == "Neg.neg").copied(),
+        false => notation(&tokens[i]),
+    }
+}
+
+/// Whether a term can end with this token: a name, a `_`, a literal, a postfix
+/// operator or something that closes. An opening `|` is excluded by the caller,
+/// which can see it opened.
+fn ends_term(t: &str) -> bool {
+    t == "_"
+        || is_ident(t)
+        || is_numeral(t)
+        || t.starts_with('⁻')
+        || ["]", "}", "⟩", "⦄"].contains(&t)
+        || BRACKETS.iter().any(|(_, close, _)| t.starts_with(close))
+}
+
+/// The constants the notation among these tokens stands for, wherever in them
+/// it is written: `(_ ++ _)[_]?` mentions `HAppend.hAppend` as surely as
+/// `List.length (_ ++ _)` mentions `List.length`. A bracket counts once it is
+/// closed, since only then is it the bracket and not a stray `|`.
+///
+/// Except the relation a binder ranges with, which is not always in the type
+/// it is written in: `∑ i ∈ s, f i` is `Finset.sum s f`, with no membership
+/// in it, and a condition asking for one would rule out the very lemma the
+/// pattern was copied from.
+fn notation_in(tokens: &[String]) -> Vec<DeclName> {
+    let depth = depths(tokens);
+    // The innermost group each token is in, by where it opened.
+    let opener = |i: usize| (0..i).rfind(|j| depth[*j] < depth[i]);
+    (0..tokens.len())
+        .filter_map(|i| {
+            if let Some((_, close, Some(head))) = BRACKETS.iter().find(|(o, ..)| *o == tokens[i]) {
+                // A closing `|` is spelled the way an opening one is, and
+                // opens nothing.
+                let opens = depth.get(i + 1).is_some_and(|d| *d > depth[i]);
+                let closed = (i + 1..tokens.len())
+                    .find(|k| depth[*k] <= depth[i])
+                    .is_some_and(|k| tokens[k].starts_with(close));
+                return (opens && closed).then(|| DeclName::new(*head));
+            }
+            let (_, head, prec, _) = notation_at(tokens, &depth, i)?;
+            let ranges = prec <= RELATION
+                && opener(i).is_some_and(|j| BINDER_PREFIXES.contains(&tokens[j].as_str()));
+            (!ranges).then(|| DeclName::new(head))
+        })
+        .collect()
+}
+
 /// One side of a relation: its head symbol, and the identifiers left over.
 ///
 /// Notation wins over identifiers, because notation is the outermost
@@ -649,11 +690,9 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
         };
     }
     let depth = depths(tokens);
-    let top: Vec<_> = tokens
-        .iter()
-        .zip(&depth)
-        .filter(|(_, d)| **d == 0)
-        .filter_map(|(t, _)| notation(t))
+    let top: Vec<_> = (0..tokens.len())
+        .filter(|i| depth[*i] == 0)
+        .filter_map(|i| notation_at(tokens, &depth, i))
         .collect();
     let loosest = top.iter().map(|(.., prec, _)| *prec).min()?;
     let mut at = top.into_iter().filter(|(.., prec, _)| *prec == loosest);
@@ -1100,6 +1139,8 @@ mod tests {
         let p = parse("∑ i ∈ s, f i = _");
         assert_eq!(p.query.shape.concl, Some(DeclName::new("Eq")));
         assert_eq!(p.query.shape.args, vec![arg("Finset.sum"), arg("_")]);
+        // Nor a condition: the sum elaborates with no membership in it.
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
         let p = parse("∀ {a b : Int}, |a + b| ≤ |a| + |b|");
         assert_eq!(p.query.shape.concl, Some(DeclName::new("LE.le")));
         assert_eq!(p.query.shape.args, vec![arg("abs"), arg("HAdd.hAdd")]);
@@ -1133,7 +1174,7 @@ mod tests {
             "GetElem?.getElem?"
         ])));
         assert!(!p.query.shape.matches(&stored(&["ENat", "Nat.cast", "OfNat.ofNat"])));
-        assert_eq!(parse("_[_]? = _").query, p.query);
+        assert_eq!(parse("_[_]? = _").query.shape, p.query.shape);
         for (pattern, head) in [
             ("l[i] = _", "GetElem.getElem"),
             ("xs[i]'h = _", "GetElem.getElem"),
@@ -1167,6 +1208,58 @@ mod tests {
         // `!=` is still the `≠` it is typed for, after a name or a bracket.
         assert_eq!(parse("a!=b").query, parse("a ≠ b").query);
         assert_eq!(parse("l[i]!=x").query, parse("l[i] ≠ x").query);
+    }
+
+    /// The report, one step on: `(_ ++ _)[_]? = _` read the index and not the
+    /// `++` inside it, and `List.getElem?_append_right` came 185th among the
+    /// equations between two indexes. Notation inside a side is in the type as
+    /// surely as a name there is, and is searched for the same way.
+    #[test]
+    fn notation_inside_a_side_is_a_condition_as_a_name_there_is() {
+        let p = parse("(_ ++ _)[_]? = _");
+        assert_eq!(p.query.shape.args, vec![arg("GetElem?.getElem?"), arg("_")]);
+        assert_eq!(p.query.uses, vec![DeclName::new("HAppend.hAppend")]);
+        assert_eq!(p.query.pattern_uses, p.query.uses, "blamed as written in the pattern");
+        assert_eq!(parse("‖x - y‖ ≤ _").query.uses, vec![DeclName::new("HSub.hSub")]);
+        assert_eq!(parse("a⁻¹ + b⁻¹ ≤ _").query.uses, vec![DeclName::new("Inv.inv")]);
+        assert_eq!(parse("Real.sqrt |x| = _").query.uses, vec![DeclName::new("abs")]);
+        // A hypothesis says what it mentions, notation and all.
+        let p = parse("0 ≤ -a → a ≤ 0");
+        assert_eq!(p.query.uses, vec![DeclName::new("LE.le"), DeclName::new("Neg.neg")]);
+        // What the shape says already is not said again.
+        assert!(parse("|_ + _| ≤ |_| + |_|").query.uses.is_empty());
+        assert!(parse("_ ∉ _").query.uses.is_empty());
+        // The relation a binder ranges with is left out; what the range is
+        // written with is not.
+        let p = parse("∑ i ∈ s ∪ t, f i = _");
+        assert_eq!(p.query.uses, vec![DeclName::new("Union.union")]);
+        assert!(parse("∀ x ∈ s, f x ∈ t").query.uses.is_empty());
+        // A `|` that closes nothing is not an absolute value.
+        assert!(!parse("Real.exp _ = {x | x ≤ 0}").query.uses.contains(&DeclName::new("abs")));
+    }
+
+    /// A `-` with no term before it negates, and binds tighter than a
+    /// subtraction: `-a * b` is a product of `-a`, and `-x ^ 2` is the negation
+    /// of a power.
+    #[test]
+    fn a_minus_with_no_term_before_it_is_a_negation() {
+        for (pattern, head) in [
+            ("-_ ≤ _", "Neg.neg"),
+            ("-x ^ 2 = _", "Neg.neg"),
+            ("-a * b = _", "HMul.hMul"),
+            ("a * -b = _", "HMul.hMul"),
+            ("a - -b = _", "HSub.hSub"),
+            ("(a) - b = _", "HSub.hSub"),
+            ("a⁻¹ - b = _", "HSub.hSub"),
+            ("‖x‖ - ‖y‖ ≤ _", "HSub.hSub"),
+            ("|-a| = _", "abs"),
+        ] {
+            assert_eq!(parse(pattern).query.shape.args[0], arg(head), "{pattern}");
+        }
+        assert_eq!(parse("_ = -_ + _").query.shape.args[1], arg("HAdd.hAdd"));
+        assert_eq!(parse("-a * b = _").query.uses, vec![DeclName::new("Neg.neg")]);
+        assert_eq!(parse("Real.exp (-x) = _").query.uses, vec![DeclName::new("Neg.neg")]);
+        assert_eq!(parse("|a - b| = _").query.uses, vec![DeclName::new("HSub.hSub")]);
     }
 
     #[test]

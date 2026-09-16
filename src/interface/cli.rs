@@ -1,6 +1,7 @@
 //! Argument parsing only.
 
 use clap::{Args, Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -38,6 +39,44 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// The command line, with a pattern that starts with a negation read as the
+    /// pattern it is.
+    ///
+    /// `dt find '-_ * _ = _'` was refused: to the parser an argument that
+    /// starts with `-` is a flag, and no flag is spelled `-_`. Taking hyphens
+    /// as the start of a pattern outright takes every misspelt flag for one
+    /// too, and `--elaborted` searched for itself. So the command line is read
+    /// as written first, and only when that fails is an argument of `find` no
+    /// flag is spelled like -- a `-` and anything but letters after it -- read
+    /// again from behind a `--`. The error is the one the line as written got.
+    pub fn read(argv: Vec<OsString>) -> Result<Cli, clap::Error> {
+        let err = match Cli::try_parse_from(&argv) {
+            Ok(cli) => return Ok(cli),
+            Err(e) => e,
+        };
+        let Some(i) = negation(&argv) else { return Err(err) };
+        let mut moved = argv;
+        let pattern = moved.remove(i);
+        moved.extend([OsString::from("--"), pattern]);
+        Cli::try_parse_from(moved).map_err(|_| err)
+    }
+}
+
+/// Where the argument of `dt find` is that starts with a `-` no flag can,
+/// unless a `--` is already there to say what is a flag.
+fn negation(argv: &[OsString]) -> Option<usize> {
+    let find = argv.iter().position(|a| a == "find")?;
+    if argv.iter().any(|a| a == "--") {
+        return None;
+    }
+    (find + 1..argv.len()).find(|i| {
+        argv[*i].to_str().and_then(|a| a.strip_prefix('-')).is_some_and(|rest| {
+            !rest.starts_with('-') && rest.chars().any(|c| !c.is_ascii_alphabetic())
+        })
+    })
 }
 
 #[derive(Subcommand, Debug)]
@@ -325,4 +364,32 @@ pub struct FindArgs {
     /// about a third more output.
     #[arg(long)]
     pub long: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(argv: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::read(argv.iter().map(OsString::from).collect())
+    }
+
+    /// `-_ * _ = _` could not be typed: it was an unknown flag `-_`. It reads
+    /// as a pattern wherever it is written, and a misspelt flag still reads as
+    /// the mistake it is.
+    #[test]
+    fn a_pattern_may_start_with_a_negation() {
+        for argv in [
+            &["dt", "find", "-_ * _ = _", "--limit", "3"][..],
+            &["dt", "-v", "find", "--limit", "3", "-_ * _ = _"],
+        ] {
+            let Command::Find(a) = read(argv).unwrap().command else { panic!("{argv:?}") };
+            assert_eq!(a.pattern.as_deref(), Some("-_ * _ = _"), "{argv:?}");
+            assert_eq!(a.limit, 3, "{argv:?}");
+        }
+        let err = read(&["dt", "find", "--elaborted"]).unwrap_err().to_string();
+        assert!(err.contains("'--elaborted'"), "{err}");
+        assert!(read(&["dt", "find", "-vx"]).is_err(), "letters after a `-` are flags");
+        assert!(read(&["dt", "find", "--limit", "-1"]).is_err(), "and a value is not a pattern");
+    }
 }

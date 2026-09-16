@@ -207,7 +207,7 @@ pub fn find(hits: &Hits, long: bool) -> String {
                 };
                 format!(
                     "no match: the shape matches, but nothing of that shape mentions {what}; a \
-                     name inside a side is looked for anywhere in the statement\n"
+                     name or notation inside a side is looked for anywhere in the statement\n"
                 )
             }
             // A relation with the pattern's head on one side is the case worth

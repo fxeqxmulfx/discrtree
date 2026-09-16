@@ -1832,3 +1832,78 @@ every pattern with nested notation, so it is left to an entry of its own.
 Written as the lemma states it, `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?` is still
 `no match`, for a different reason: `l₁.length` is field notation on a
 variable, and read as a name it names nothing.
+
+---
+
+## Notation inside a side is read as nothing, and a `-` before a term is a subtraction
+
+The rest of the entry above.  A shape is a conclusion head and the heads of
+its arguments, and notation below that was dropped without a word: in
+`(_ ++ _)[_]? = _` the `++` said nothing, and `List.getElem?_append_right`
+was row 185.  A name that deep becomes a `--uses` condition; notation, which
+is a name spelled differently, did not, and `--verbose` did not say so:
+
+    $ dt find '(_ ++ _)[_]? = _' --verbose
+    dt: `(_ ++ _)[_]? = _` read as conclusion Eq, 2 argument(s), operator `=`
+
+Reading notation wherever it is needs `-` read right, and it was not.  Lean
+has two: `a - b` is `HSub.hSub` at 65, `-a` is `Neg.neg` at 75.  Every `-`
+was the subtraction, so a side that starts with one was read by an operator
+it does not have:
+
+    $ dt find -v '_ = -_ * _'
+    dt: `_ = -_ * _` read as conclusion Eq, 2 argument(s), operator `=`
+    Nat.zero_sub_one  theorem  Init.Data.Nat.Basic
+      0 - 1 = 0
+
+and a pattern that starts with one could not be typed at all:
+
+    $ dt find '-_ * _ = _'
+    error: unexpected argument '-_' found
+
+Seen with dt 0.34.0, 2026-09-16.
+
+Fixed in 0.35.0.
+
+**Notation as a condition.**  Notation anywhere in the pattern becomes a
+`--uses` condition, as a name there does, and `--verbose` lists the
+conditions the pattern became:
+
+    $ dt find '(_ ++ _)[_]? = _' --verbose
+    dt: `(_ ++ _)[_]? = _` read as conclusion Eq, 2 argument(s), operator `=`, --uses HAppend.hAppend
+    List.getElem?_concat_length  theorem  Init.Data.List.Lemmas
+    …
+    List.getElem?_append_right   theorem  Init.Data.List.Lemmas
+    …
+    10 result(s)
+
+Row 8 of 10.  Three things are left out.  A head the shape already has is
+in every row the shape matches, so as a condition it rules nothing out and
+is one more name to blame when the answer is empty: `|_ + _| ≤ |_| + |_|`
+has no conditions.  A bracket counts once it closes, so the `|` in
+`{x | x ≤ 0}` is not an absolute value.  And the relation a binder ranges
+with is not always in the type: `∑ i ∈ s, f i` is `Finset.sum s f`, with no
+membership in it, and a condition asking for one would rule out the lemma
+the pattern was copied from.
+
+**Negation.**  A `-` with no term before it -- at the start of a side, after
+an operator, just inside a bracket -- is `Neg.neg`, and binds as Lean binds
+it: `-a * b` is a product of `-a`, and `-x ^ 2` is the negation of a power.
+
+    $ dt find -v '_ = -_ * _'
+    dt: `_ = -_ * _` read as conclusion Eq, 2 argument(s), operator `=`, --uses Neg.neg
+    Complex.I_mul_I  theorem  Mathlib.Basic.Complex.Basic
+      Complex.I * Complex.I = -1
+    Int.neg_eq_neg_one_mul  theorem  Init.Data.Int.Lemmas
+      ∀ (a : Int), -a = -1 * a
+
+The first row has its `-` on the other side: a condition is looked for
+anywhere in the statement, not where the pattern put it.
+
+**The command line.**  `dt find '-_ * _ = _'` works, wherever the pattern is
+among the flags.  Taking every argument that starts with `-` as a possible
+pattern took misspelt flags too (`--elaborted` searched for itself), so the
+line is read as written first.  Only if that fails is an argument of `find`
+that no flag is spelled like -- a `-` and then anything but letters -- read
+again from behind a `--`.  A misspelt flag still gets the error, and the
+suggestion, it got before.
