@@ -153,6 +153,52 @@ pub fn moved_while_read(
     Ok(out)
 }
 
+/// [`stale_among`], for a search: the sources whose rows may be missing.
+///
+/// A project is rebuilt after nearly every edit, and a line after every search
+/// that said so went unread by the time it mattered, while a refresh after
+/// every build is too slow to ask for. What a search can miss is a declaration
+/// the build has and the index does not, so a rebuilt project is let off when
+/// every declaration of every module compiled since it was indexed has a row,
+/// at the lines the build gives it. A statement edited in place, on the same
+/// lines, is not seen by this; a new, renamed or moved declaration is.
+pub fn stale_for_search(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    among: impl IntoIterator<Item = SourceId>,
+) -> Result<Vec<Stale>> {
+    let mut kept = Vec::new();
+    for s in stale_among(repo, revisions, among)? {
+        if !indexed_as_built(repo, revisions, &s)? {
+            kept.push(s);
+        }
+    }
+    Ok(kept)
+}
+
+/// Whether a source that moved only rebuilt what the index already holds.
+fn indexed_as_built(repo: &dyn DeclRepo, revisions: &dyn Revisions, s: &Stale) -> Result<bool> {
+    if !matches!(s.why, Why::Moved { .. }) {
+        return Ok(false);
+    }
+    let Some(was) = repo.provenance(&s.id)? else { return Ok(false) };
+    let Some(declared) = revisions.declared_since(&s.id, was.indexed_at) else {
+        return Ok(false);
+    };
+    // A build that moved and compiled nothing since has changed in a way the
+    // modules cannot show -- a file deleted, or compiled while it was dumped.
+    if declared.is_empty() {
+        return Ok(false);
+    }
+    for (module, decls) in &declared {
+        let Some(rows) = repo.spans_in(&s.id, module)? else { return Ok(false) };
+        if !decls.iter().all(|(name, span)| rows.get(name) == Some(&Some(*span))) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// [`stale_among`], for a command that printed these rows and nothing else.
 ///
 /// A rebuilt project is stale as a source, and "rows may be missing" is true
@@ -162,7 +208,8 @@ pub fn moved_while_read(
 /// the other hundred ended in a warning about it -- a line that is wrong most
 /// of the time is a line nobody reads the time it is right. So a source whose
 /// build moved is let off when each module shown is known not to have been
-/// rebuilt since the index was written.
+/// rebuilt since the index was written, or when the index holds what the
+/// rebuild declares, as [`stale_for_search`] decides.
 pub fn stale_for_rows(
     repo: &dyn DeclRepo,
     revisions: &dyn Revisions,
@@ -178,7 +225,7 @@ pub fn stale_for_rows(
                     .all(|m| revisions.rebuilt_since(&s.id, m, was.indexed_at) == Some(false)),
                 None => false,
             };
-        if !untouched {
+        if !untouched && !indexed_as_built(repo, revisions, &s)? {
             kept.push(s);
         }
     }

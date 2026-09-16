@@ -363,7 +363,7 @@ impl App {
         let revs = OnDisk::read(&self.cfg);
         // A search that failed because its warning failed would be a worse
         // outcome than the staleness the warning was about to report.
-        let Ok(stale) = status::stale_among(repo, &revs, among) else { return };
+        let Ok(stale) = status::stale_for_search(repo, &revs, among) else { return };
         self.print_stale(stale);
     }
 

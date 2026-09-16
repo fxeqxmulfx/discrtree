@@ -9,6 +9,7 @@ use crate::domain::query::Query;
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const SCHEMA: &str = r#"
@@ -524,6 +525,22 @@ impl DeclRepo for SqliteIndex {
 
     fn provenance(&self, source: &SourceId) -> Result<Option<Provenance>> {
         self.provenance_of(source)
+    }
+
+    fn spans_in(
+        &self,
+        source: &SourceId,
+        module: &ModuleName,
+    ) -> Result<Option<BTreeMap<DeclName, Option<Span>>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT name, line_start, line_end FROM decl WHERE source = ?1 AND module = ?2",
+        )?;
+        let rows = stmt.query_map(params![source.as_str(), module.as_str()], |r| {
+            let (start, end): (Option<u32>, Option<u32>) = (r.get(1)?, r.get(2)?);
+            let span = start.zip(end).map(|(s, e)| Span::new(s, e));
+            Ok((DeclName::new(r.get::<_, String>(0)?), span))
+        })?;
+        Ok(Some(rows.collect::<rusqlite::Result<_>>()?))
     }
 
     /// `dep` has no index on `name`: it would be the size of the table again,

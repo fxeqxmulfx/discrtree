@@ -1356,6 +1356,18 @@ per project per session, or the check should compare what actually changed
 (the set of `.olean` mtimes against the indexed modules) rather than the fact
 that a build happened at all.
 
+Fixed in 0.48.0.  A search, and `dt show`, now read the `.ilean` of every
+module compiled since the index was written: its `decls` gives each declared
+name with its lines.  When each of them has a row in that module at those
+lines, the rebuild added nothing a search could miss and the line is not
+printed.  A new, renamed or moved declaration still prints it, and so does a
+rebuild whose modules cannot be read.  On a copy of the transformer build,
+touching every `.olean` but `CRASP/Frame` (which declares four names the index
+lacks) and `Perspective/Section1_Antipodal` (which the root does not import)
+prints nothing; touching `Frame` prints the line.  A statement edited in place
+on the same lines goes unreported; `dt status` still marks the source stale,
+and `dt refresh` still re-reads it.
+
 ## From the transformer session (2026-09-16)
 
 - `dt find` with a lambda in the shape fails: `dt find 'Filter.Tendsto (fun _ => -_)

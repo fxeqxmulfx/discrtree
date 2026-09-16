@@ -17,8 +17,9 @@
 //! What a dump of it actually reads is the build, so the build is what gets
 //! fingerprinted: see [`build_stamp`].
 
-use crate::application::ports::Revisions;
-use crate::domain::name::ModuleName;
+use crate::application::ports::{Declared, Revisions};
+use crate::domain::decl::Span;
+use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::source::SourceId;
 use crate::error::Result;
 use crate::infrastructure::config::{Config, Kind};
@@ -97,6 +98,33 @@ impl Revisions for OnDisk {
             let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
             Some(secs > since)
         })
+    }
+
+    /// From the `.ilean` Lean writes beside each `.olean`: its `decls` maps
+    /// every name the module declares to the range of the declaration, with
+    /// lines counted from zero. Private names are left out, as the dump leaves
+    /// them out.
+    fn declared_since(&self, source: &SourceId, since: u64) -> Option<Declared> {
+        let lib = self.builds.get(source)?;
+        let root = [lib.join("lean"), lib.clone()].into_iter().find(|d| d.is_dir())?;
+        let mut compiled = Vec::new();
+        oleans(&root, &root, &mut compiled);
+        let mut out = Declared::new();
+        for (rel, _, _) in compiled.into_iter().filter(|(_, _, t)| *t > since) {
+            let olean = root.join(&rel);
+            let module = rel.strip_suffix(".olean")?.replace(std::path::MAIN_SEPARATOR, ".");
+            let decls = out.entry(ModuleName::new(module)).or_default();
+            let text = std::fs::read_to_string(olean.with_extension("ilean")).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+            for (name, range) in json.get("decls")?.as_object()? {
+                if name.starts_with("_private.") {
+                    continue;
+                }
+                let line = |i: usize| Some(u32::try_from(range.get(i)?.as_u64()?).ok()? + 1);
+                decls.insert(DeclName::new(name.clone()), Span::new(line(0)?, line(2)?));
+            }
+        }
+        Some(out)
     }
 }
 

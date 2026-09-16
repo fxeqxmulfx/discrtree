@@ -1,12 +1,13 @@
 //! The boundary. Every use case is written against these traits, and every one
 //! of them has a test double in `tests/`.
 
-use crate::domain::decl::Decl;
+use crate::domain::decl::{Decl, Span};
 use crate::domain::lean_core;
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::{SourceId, SourceMeta, Sources};
 use crate::error::Result;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Reading the index.
@@ -84,6 +85,17 @@ pub trait DeclRepo {
 
     /// What the source was when it was indexed, if the store remembers.
     fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
+        Ok(None)
+    }
+
+    /// Each name `source` has a row for in `module`, with that row's lines.
+    /// `None` from a store that cannot say, which is then read as "the rows
+    /// may differ" -- the answer a warning can afford to get wrong.
+    fn spans_in(
+        &self,
+        _source: &SourceId,
+        _module: &ModuleName,
+    ) -> Result<Option<BTreeMap<DeclName, Option<Span>>>> {
         Ok(None)
     }
 }
@@ -210,7 +222,19 @@ pub trait Revisions {
     fn rebuilt_since(&self, _source: &SourceId, _module: &ModuleName, _since: u64) -> Option<bool> {
         None
     }
+
+    /// The modules of `source` compiled after `since`, each with the names it
+    /// declares and their lines, as the build recorded them. `None` when any
+    /// of them cannot be read, and for the same sources as
+    /// [`Revisions::rebuilt_since`].
+    fn declared_since(&self, _source: &SourceId, _since: u64) -> Option<Declared> {
+        None
+    }
 }
+
+/// Module → the names it declares and their lines: where each declaration is,
+/// and nothing about what it says.
+pub type Declared = BTreeMap<ModuleName, BTreeMap<DeclName, Span>>;
 
 /// A package a `lake` build resolved: the directory it sits in, and the module
 /// prefixes it provides.
