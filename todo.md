@@ -2265,3 +2265,19 @@ The pattern from the report now finds only statements about pairs, with
 that ends a binder is not a pair: `(∀ x, p x)` and `(∑ i ∈ s, f i)` group as
 before.  `⟨a, b⟩` still names nothing, because which structure it builds is
 the one thing it does not say.
+
+## `dt rdeps` does not accept a field
+
+`find --uses` reads `.length` as any constant ending in it, and `dt show`
+takes a name as Lean prints it; `dt rdeps` wants the whole name and says
+nothing about what it could have been:
+
+    $ dt rdeps .length
+    dt: .length is not in the index
+    $ dt rdeps exp_le_exp
+    dt: exp_le_exp is not in the index
+
+`Real.exp_le_exp` is the only constant ending in `.exp_le_exp`, and 43 end
+in `.length`.
+
+Seen with dt 0.42.0, 2026-09-16.
