@@ -288,8 +288,8 @@ pub fn show_all(shown: &[Shown], import_only: bool) -> String {
             let line = match &s.import {
                 Some(i) => i.clone(),
                 None => format!(
-                    "-- source `{}` is not importable; `dt add {}` copies it instead",
-                    s.decl.source, s.decl.name
+                    "-- source `{}` is not importable; `dt add --source {} {}` copies it instead",
+                    s.decl.source, s.decl.source, s.decl.name
                 ),
             };
             if !seen.contains(&line) {
@@ -308,8 +308,8 @@ pub fn show(s: &Shown, import_only: bool) -> String {
     match &s.import {
         Some(i) => out.push_str(&format!("{i}\n")),
         None => out.push_str(&format!(
-            "-- source `{}` is not importable; `dt add {}` copies it instead\n",
-            s.decl.source, s.decl.name
+            "-- source `{}` is not importable; `dt add --source {} {}` copies it instead\n",
+            s.decl.source, s.decl.source, s.decl.name
         )),
     }
     if import_only {

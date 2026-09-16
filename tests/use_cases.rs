@@ -226,10 +226,54 @@ fn show_says_which_name_it_could_not_find() {
     assert!(err.contains("No.such") && err.contains("dt find"), "got: {err}");
 }
 
+/// `deps` and `add` start from the row a source has, as `show` shows it: the
+/// hint `show` prints for a text row is `dt add --source`, and without the
+/// flag `add` would import the compiled row instead of copying that one.
+#[test]
+fn deps_and_add_from_a_source_start_from_the_row_that_source_has() {
+    let mut repo = repo();
+    let mut copy = theorem("Real.exp_le_exp", "flt", "FLT.Basic", "Eq", &["Real.exp"]);
+    copy.elaborated = false;
+    repo.decls.insert(0, copy);
+    let (files, ws) = (files(), workspace());
+    let flt = SourceId::new("flt");
+    let name = DeclName::new("Real.exp_le_exp");
+
+    match (Deps { repo: &repo, workspace: &ws, build: &NoBuild, only_in: Some(&flt) })
+        .run(&name, Some(1))
+        .unwrap()
+    {
+        DepsResult::Levels { root, levels, approximate } => {
+            assert_eq!(root.source, flt);
+            assert!(approximate, "the text row's dependencies are guessed");
+            assert_eq!(levels[0].iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Real.exp"]);
+        }
+        _ => panic!("asked for levels"),
+    }
+
+    let add = |only_in| Add { repo: &repo, files: &files, workspace: &ws, only_in }.plan(&name);
+    assert!(add(None).unwrap().is_import_only(), "the compiled row is imported");
+    let report = add(Some(&flt)).unwrap();
+    let copied: Vec<(&str, &str)> = report
+        .plan
+        .files
+        .iter()
+        .flat_map(|f| f.decls.iter().map(|d| (d.name.as_str(), d.source.as_str())))
+        .collect();
+    assert_eq!(copied, [("Real.exp_le_exp", "flt")]);
+
+    let other = SourceId::new("other");
+    let err = match add(Some(&other)) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("`other` has no such row"),
+    };
+    assert_eq!(err, "Real.exp_le_exp is in `flt`, `mathlib`, not in `other`");
+}
+
 #[test]
 fn deps_lists_one_level_at_a_time() {
     let (repo, ws) = (repo(), workspace());
-    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild }
+    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("Other.top"), Some(2))
         .unwrap();
     match result {
@@ -253,7 +297,7 @@ fn deps_of_a_text_row_are_reported_as_approximate() {
     // The whole invariant in one assertion: a guessed list must never be
     // presented as the set of constants a proof term uses.
     let (repo, ws) = (repo(), workspace());
-    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild }
+    let result = Deps { repo: &repo, workspace: &ws, build: &NoBuild, only_in: None }
         .run(&DeclName::new("FLT.guessed"), Some(1))
         .unwrap();
     match result {
@@ -265,7 +309,7 @@ fn deps_of_a_text_row_are_reported_as_approximate() {
 #[test]
 fn deps_with_no_depth_reports_the_size_rather_than_the_contents() {
     let (repo, ws) = (repo(), workspace());
-    match (Deps { repo: &repo, workspace: &ws, build: &NoBuild })
+    match (Deps { repo: &repo, workspace: &ws, build: &NoBuild, only_in: None })
         .run(&DeclName::new("Other.top"), None)
         .unwrap()
     {
@@ -277,7 +321,7 @@ fn deps_with_no_depth_reports_the_size_rather_than_the_contents() {
 #[test]
 fn add_collapses_an_importable_dependency_into_one_import_line() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let report = Add { repo: &repo, files: &files, workspace: &ws }
+    let report = Add { repo: &repo, files: &files, workspace: &ws, only_in: None }
         .plan(&DeclName::new("Other.top"))
         .unwrap();
 
@@ -298,7 +342,7 @@ fn add_collapses_an_importable_dependency_into_one_import_line() {
 #[test]
 fn add_of_a_mathlib_declaration_is_one_import_and_nothing_else() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let report = Add { repo: &repo, files: &files, workspace: &ws }
+    let report = Add { repo: &repo, files: &files, workspace: &ws, only_in: None }
         .plan(&DeclName::new("Real.exp_le_exp"))
         .unwrap();
     assert!(report.is_import_only(), "the correct answer, not a degenerate one");
@@ -311,7 +355,7 @@ fn add_of_a_mathlib_declaration_is_one_import_and_nothing_else() {
 #[test]
 fn a_dry_run_writes_nothing() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let report = Add { repo: &repo, files: &files, workspace: &ws }
+    let report = Add { repo: &repo, files: &files, workspace: &ws, only_in: None }
         .plan(&DeclName::new("Other.top"))
         .unwrap();
     assert!(report.written.is_empty() && report.registered.is_empty());
@@ -321,7 +365,7 @@ fn a_dry_run_writes_nothing() {
 fn writing_emits_provenance_the_source_text_and_an_aggregator_entry() {
     let (repo, files, ws) = (repo(), files(), workspace());
     let mut writer = FakeWriter::default();
-    let report = Add { repo: &repo, files: &files, workspace: &ws }
+    let report = Add { repo: &repo, files: &files, workspace: &ws, only_in: None }
         .write(&DeclName::new("Other.top"), &mut writer, false)
         .unwrap();
 
@@ -359,7 +403,7 @@ fn a_generated_declaration_is_vendored_as_the_one_that_generates_it() {
 
     let ws = workspace();
     let mut writer = FakeWriter::default();
-    Add { repo: &repo, files: &files, workspace: &ws }
+    Add { repo: &repo, files: &files, workspace: &ws, only_in: None }
         .write(&DeclName::new("Other.uses"), &mut writer, false)
         .unwrap();
     let all: String = writer.files.iter().map(|(_, t)| t.as_str()).collect();
@@ -919,7 +963,7 @@ fn a_qualified_name_search_from_an_unindexed_corpus_says_so() {
 fn deps_on_a_name_from_an_unindexed_corpus_names_the_corpus() {
     let (repo, ws) = (repo(), workspace());
     let build = FakeBuild::with(&[("batteries", "Batteries")]).without_core();
-    let fails = |n: &str| match (Deps { repo: &repo, workspace: &ws, build: &build })
+    let fails = |n: &str| match (Deps { repo: &repo, workspace: &ws, build: &build, only_in: None })
         .run(&DeclName::new(n), Some(1))
     {
         Err(e) => e.to_string(),

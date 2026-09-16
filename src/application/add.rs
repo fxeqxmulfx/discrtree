@@ -6,13 +6,14 @@
 //! that cannot be imported an arbitrarily deep tree is the normal case, not an
 //! edge case.
 
-use crate::application::deps::RepoSource;
+use crate::application::deps::{RepoSource, row_in};
 use crate::application::generated;
 use crate::application::ports::{DeclRepo, ProjectWriter, SourceFiles, Workspace};
 use crate::domain::closure::{self, Frontier};
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
+use crate::domain::source::SourceId;
 use crate::domain::vendor::{self, VendorPlan};
 use crate::error::{Result, bail};
 
@@ -40,15 +41,19 @@ pub struct Add<'a> {
     pub repo: &'a dyn DeclRepo,
     pub files: &'a dyn SourceFiles,
     pub workspace: &'a Workspace,
+    /// The source to take the root from: the text copy of a name Mathlib
+    /// also has is copied, where the default row would be imported.
+    pub only_in: Option<&'a SourceId>,
 }
 
 impl Add<'_> {
     /// Resolve the frontier and plan the write. Touches nothing.
     pub fn plan(&self, name: &DeclName) -> Result<AddReport> {
-        if self.repo.get(name)?.is_none() {
+        let Some(root) = row_in(self.repo, name, self.only_in)? else {
             bail!("{name} is not in the index; try `dt find --name {}`", name.base())
-        }
-        let src = RepoSource { repo: self.repo, workspace: self.workspace };
+        };
+        let src =
+            RepoSource { repo: self.repo, workspace: self.workspace, root: Some(root.clone()) };
         let frontier = closure::frontier(std::slice::from_ref(name), &src);
 
         // Only what is left after importable subtrees collapsed gets copied,
@@ -57,6 +62,7 @@ impl Add<'_> {
             .repo
             .get_many(&frontier.materialize)?
             .into_iter()
+            .map(|d| if d.name == root.name { root.clone() } else { d })
             .filter(|d| !self.workspace.sources.importable(&d.source))
             .collect();
 

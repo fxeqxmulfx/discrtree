@@ -231,6 +231,9 @@ pub enum Command {
         /// printing it.
         #[arg(long, value_name = "N|all", default_value = "1")]
         depth: String,
+        /// Start from the row this source has, as `show --source` does.
+        #[arg(long, value_name = "NAME")]
+        source: Option<String>,
     },
 
     /// What rests on a declaration: everything whose statement or proof
@@ -272,6 +275,9 @@ pub enum Command {
         /// Replace files that already exist.
         #[arg(long)]
         force: bool,
+        /// Copy the row this source has, as `show --source` shows it.
+        #[arg(long, value_name = "NAME")]
+        source: Option<String>,
     },
 
     /// Search: by shape, name, constants, module or text

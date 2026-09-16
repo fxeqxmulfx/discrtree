@@ -2318,3 +2318,23 @@ there is no way to ask for the FLT one the hint was about, or for its
 dependencies.
 
 Seen with dt 0.43.0, 2026-09-16.
+
+Fixed in 0.44.0.  `deps` and `add` take `--source` and start from the row
+that source has, as `show` does, with the same error when it has none; the
+walk below the root is unchanged, since a dependency is the constant a proof
+names and the default row is still the one it means.  `show` now hints the
+command that copies the row it showed:
+
+    $ dt show --import-only --source flt AddSubgroup.inertia_mono
+    -- source `flt` is not importable; `dt add --source flt AddSubgroup.inertia_mono` copies it instead
+    $ dt add --source flt AddSubgroup.inertia_mono
+    imports
+      import Mathlib.Algebra.Group.Subgroup.Defs
+    to materialize: 1 declaration(s) in 1 file(s), 2 lines, tree depth 0
+    $ dt deps --source flt AddSubgroup.inertia_mono
+    AddSubgroup.inertia_mono  [text]
+    -- approximate: this source is indexed as text, so dependencies are guessed
+    depth 1 (1)
+      mathlib: AddSubgroup
+    $ dt add --source core AddSubgroup.inertia_mono
+    dt: AddSubgroup.inertia_mono is in `flt`, `mathlib`, not in `core`

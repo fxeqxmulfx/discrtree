@@ -82,7 +82,9 @@ impl App {
                 }
                 self.show(&names, import_only, source.map(SourceId::new).as_ref())
             }
-            Command::Deps { name, depth } => self.deps(&name, &depth),
+            Command::Deps { name, depth, source } => {
+                self.deps(&name, &depth, source.map(SourceId::new).as_ref())
+            }
             Command::Rdeps { name, module, source, generated, limit } => {
                 let within = Query {
                     module,
@@ -93,7 +95,9 @@ impl App {
                 };
                 self.rdeps(&name, &within)
             }
-            Command::Add { name, write, force } => self.add(&name, write, force),
+            Command::Add { name, write, force, source } => {
+                self.add(&name, write, force, source.map(SourceId::new).as_ref())
+            }
             Command::Find(args) => self.find(&args),
             Command::Dup { file, threshold } => self.dup(&file, threshold),
         }
@@ -204,7 +208,10 @@ impl App {
         Ok(())
     }
 
-    fn deps(&self, name: &str, depth: &str) -> Result<()> {
+    fn deps(&self, name: &str, depth: &str, only_in: Option<&SourceId>) -> Result<()> {
+        if let Some(s) = only_in {
+            self.known_source(s)?;
+        }
         let depth =
             match depth {
                 "all" => None,
@@ -217,7 +224,7 @@ impl App {
         // stale source hides, and the root is the one row whose absence ends
         // the command. So the warning is reached on both paths.
         let build = LakeBuild::read(&self.cfg);
-        let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace, build: &build };
+        let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace, build: &build, only_in };
         match decl_name(name).and_then(|name| deps.run(&name, depth)) {
             Ok(result) => {
                 print!("{}", render::deps(&result));
@@ -225,7 +232,7 @@ impl App {
                 Ok(())
             }
             Err(e) => {
-                self.warn_stale(repo.as_ref(), BTreeSet::new());
+                self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
                 Err(e)
             }
         }
@@ -405,9 +412,13 @@ impl App {
 
     // ---- writing ---------------------------------------------------------
 
-    fn add(&self, name: &str, write: bool, force: bool) -> Result<()> {
+    fn add(&self, name: &str, write: bool, force: bool, only_in: Option<&SourceId>) -> Result<()> {
+        if let Some(s) = only_in {
+            self.known_source(s)?;
+        }
         let repo = self.repo()?;
-        let add = Add { repo: repo.as_ref(), files: &self.files, workspace: &self.workspace };
+        let add =
+            Add { repo: repo.as_ref(), files: &self.files, workspace: &self.workspace, only_in };
         let name = decl_name(name)?;
         let report = if write {
             let mut project = Project { imports_file: self.cfg.imports_file() };

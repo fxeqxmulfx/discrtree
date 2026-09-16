@@ -6,6 +6,7 @@
 //! `Mathlib.Analysis.SpecialFunctions.Exp` one would guess, which does not
 //! contain it at all.
 
+use crate::application::deps::row_in;
 use crate::application::generated;
 use crate::application::ports::{Build, DeclRepo, SourceFiles, Workspace};
 use crate::domain::decl::Decl;
@@ -13,7 +14,6 @@ use crate::domain::lean_text;
 use crate::domain::name::DeclName;
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct Shown {
@@ -66,17 +66,7 @@ pub struct Show<'a> {
 
 impl Show<'_> {
     pub fn run(&self, name: &DeclName) -> Result<Shown> {
-        let rows = self.repo.named(name)?;
-        let Some(decl) = rows.iter().find(|d| self.only_in.is_none_or(|s| &d.source == s)) else {
-            // In another source the name is right and the source is not, and
-            // the sources that have it are the correction.
-            if let Some(s) = self.only_in
-                && !rows.is_empty()
-            {
-                let has: BTreeSet<String> =
-                    rows.iter().map(|d| format!("`{}`", d.source)).collect();
-                bail!("{name} is in {}, not in `{s}`", Vec::from_iter(has).join(", "))
-            }
+        let Some(decl) = row_in(self.repo, name, self.only_in)? else {
             // `try --name` is good advice only when the name might be in the
             // index under a different spelling. When the namespace belongs to a
             // package nothing indexed, that search returns the same nothing, or
@@ -90,8 +80,8 @@ impl Show<'_> {
         let import =
             self.workspace.sources.importable(&decl.source).then(|| decl.module.import_line());
 
-        let source = self.source_of(decl)?;
-        Ok(Shown { decl: decl.clone(), import, source })
+        let source = self.source_of(&decl)?;
+        Ok(Shown { decl, import, source })
     }
 
     fn source_of(&self, decl: &Decl) -> Result<Source> {
