@@ -1752,3 +1752,83 @@ an indented `exact foo` would otherwise count.
       theorem  Init.Data.List.Lemmas:2331-2336
 
      @[grind =] theorem filter_replicate : (replicate n a).filter p = if p a then …
+
+---
+
+## The index notation `l[i]?` is dropped from a pattern, and its constant cannot be written
+
+    $ dt find '(_ ++ _)[_]? = _' --verbose
+    dt: `(_ ++ _)[_]? = _` read as conclusion Eq, 2 argument(s), operator `=`
+    ENat.natCast_one  theorem  Mathlib.Data.ENat.Basic
+      ↑1 = 1
+    Cardinal.ofENat_one  theorem  Mathlib.SetTheory.Cardinal.ENat
+      ↑1 = 1
+
+The lemma asked for is `List.getElem?_append_right`,
+`(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?`.  The postfix `[_]?` is neither in the
+notation table nor reported: the left side is read as nothing, the pattern
+widens to `_ = _`, and the rows are whatever equations rank first.  That is
+the widening the 0.23.0 rule ("narrow rather than widen, and name the part")
+was written against; `_[_]? = _` alone does the same.  `l[i]`, `l[i]!` and
+`xs[i]'h` are presumably in the same position.
+
+The advice the rule gives for an unknown symbol — write the constant it stands
+for — cannot be followed here, because the constant's name contains `?`:
+
+    $ dt find 'GetElem?.getElem? (_ ++ _) _ = _'
+    no match: `.getElem` in the pattern reads as nothing here; searching without
+    it would answer a wider question — write the constant it stands for instead,
+    or drop that part of the pattern and give it as --uses
+
+The tokenizer splits `GetElem?.getElem?` at each `?`.  Either `?` (and `!`)
+belong to an identifier when they follow one, as in Lean, or `[_]?` is a
+bracket that stands for `GetElem?.getElem?` (and `[_]` for `GetElem.getElem`,
+`[_]!` for `GetElem?.getElem!`).  `--name getElem?_append` found the lemma.
+
+Seen with dt 0.33.0, 2026-09-16.
+
+Fixed in 0.34.0.  Both halves, since each is how Lean reads it.
+
+A name may have `?` and `!` in it, as Lean's do: `GetElem?.getElem?`,
+`List.head?` and `Option.get!` are one name each.  Before, `List.head? _ = _`
+was quietly a search for `List.head`.  Only after a name, so `_` stays a
+wildcard, and `!=` is still the `≠` it is typed for.
+
+Index notation is expanded the way Lean's macros expand it:
+
+    xs[i]      GetElem.getElem xs i
+    xs[i]'h    GetElem.getElem xs i h
+    xs[i]?     GetElem?.getElem? xs i
+    xs[i]!     GetElem?.getElem! xs i
+
+each as one term in parentheses, so it binds tighter than any operator and
+than an application: `l[i] + 1` is an addition, and `Nat.succ l[i]` is
+`Nat.succ`.  As in Lean, a `[` indexes only a term it is written against --
+`f [i]` still applies `f` to a list -- so the lexer keeps whitespace until the
+expansion has read it.
+
+    $ dt find '(_ ++ _)[_]? = _'
+    BitVec.getElem?_zero_ofNat_one  theorem  Init.Data.BitVec.Lemmas
+      ∀ {w : Nat}, (1#(w + 1))[0]? = some true
+    List.getElem?_nil  theorem  Init.Data.List.Lemmas
+      ∀ {α : Type u_1} {i : Nat}, [][i]? = none
+
+The rows now answer the question asked, as far as a shape reaches.  The `++`
+does not reach: a shape is a conclusion head and the heads of its arguments,
+and what an index is taken of is a level below that.
+`List.getElem?_append_right` is row 185 of that search, and row 8 with the
+`++` given as a condition:
+
+    $ dt find '(_ ++ _)[_]? = _' --uses HAppend.hAppend
+    List.getElem?_concat_length  theorem  Init.Data.List.Lemmas
+    Array.getElem?_append_left   theorem  Init.Data.Array.Lemmas
+    …
+    List.getElem?_append_right   theorem  Init.Data.List.Lemmas
+
+A name that deep already becomes a `--uses` condition, and notation that deep
+could too; `|_ + _|` has lost its `+` the same way since 0.23.0.  That changes
+every pattern with nested notation, so it is left to an entry of its own.
+
+Written as the lemma states it, `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?` is still
+`no match`, for a different reason: `l₁.length` is field notation on a
+variable, and read as a name it names nothing.

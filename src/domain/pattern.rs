@@ -104,7 +104,7 @@ const BINDER_PREFIXES: &[&str] = &["∀", "∃", "∃!", "∑", "∏", "⋃", "�
 /// and the head is whatever they group.
 ///
 /// `⟫` is matched by prefix, because the field a notation is ascribed with
-/// belongs to it: see [`tokenize`].
+/// belongs to it: see [`lex`].
 const BRACKETS: &[(&str, &str, Option<&str>)] = &[
     ("(", ")", None),
     ("‖", "‖", Some("Norm.norm")),
@@ -177,7 +177,7 @@ pub fn parse(pattern: &str) -> Parsed {
 }
 
 fn read(pattern: &str) -> Parsed {
-    let (all, lambdas) = strip_lambdas(&tokenize(pattern));
+    let (all, lambdas) = strip_lambdas(&expand_indexing(lex(pattern)));
     let vars: Vec<String> = dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
@@ -324,7 +324,9 @@ fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
     (out, found)
 }
 
-fn tokenize(s: &str) -> Vec<String> {
+/// The pattern cut into names and symbols, with a [`SPACE`] wherever it had
+/// whitespace.
+fn lex(s: &str) -> Vec<String> {
     /// The superscripts that belong to a postfix operator rather than to the
     /// identifier before it. Rust calls them numeric, so `x⁻¹` would otherwise
     /// tokenize as `x`, `⁻`, and an identifier `¹`.
@@ -333,7 +335,13 @@ fn tokenize(s: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut cs = s.chars().peekable();
     while let Some(c) = cs.next() {
-        if c.is_alphanumeric() || c == '.' || c == '_' || c == '\'' {
+        // A name may have `?` and `!` in it, as in Lean: `List.head?` is one
+        // name, and `GetElem?.getElem?` cut at each `?` was `GetElem` and a
+        // `.getElem` nothing declares. Only after a name, so that `_` stays a
+        // wildcard, and not before `=`, so that `a!=b` is the `≠` it is typed
+        // for.
+        let in_name = (c == '?' || (c == '!' && cs.peek() != Some(&'='))) && is_ident(&cur);
+        if c.is_alphanumeric() || c == '.' || c == '_' || c == '\'' || in_name {
             cur.push(c);
             continue;
         }
@@ -341,6 +349,9 @@ fn tokenize(s: &str) -> Vec<String> {
             out.push(std::mem::take(&mut cur));
         }
         if c.is_whitespace() {
+            if out.last().is_some_and(|t| t != SPACE) {
+                out.push(SPACE.to_string());
+            }
             continue;
         }
         let ahead: String = std::iter::once(c).chain(cs.clone().take(3)).collect();
@@ -374,6 +385,22 @@ fn tokenize(s: &str) -> Vec<String> {
                 }
                 out.push(sym);
             }
+            // What follows the bracket of an index says which index it is --
+            // `l[i]?` is another constant from `l[i]` -- and belongs to the
+            // bracket the way `¹` belongs to `⁻`. A `!` before `=` is the
+            // `!=` Lean reads there.
+            ']' => {
+                let mut sym = String::from(c);
+                let mut ahead = cs.clone();
+                match (ahead.next(), ahead.next()) {
+                    (Some('?' | '\''), _) => sym.push(cs.next().unwrap_or_default()),
+                    (Some('!'), after) if after != Some('=') => {
+                        sym.push(cs.next().unwrap_or_default())
+                    }
+                    _ => {}
+                }
+                out.push(sym);
+            }
             _ => out.push(c.to_string()),
         }
     }
@@ -381,6 +408,92 @@ fn tokenize(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// What whitespace lexes to. It is dropped once the index notation, the one
+/// reading that depends on it, is expanded.
+const SPACE: &str = " ";
+
+/// How the bracket of an index closes, and the constant the index is then an
+/// application of. See [`expand_indexing`].
+const INDEXES: &[(&str, &str)] = &[
+    ("]", "GetElem.getElem"),
+    ("]'", "GetElem.getElem"),
+    ("]?", "GetElem?.getElem?"),
+    ("]!", "GetElem?.getElem!"),
+];
+
+/// Index notation expanded the way Lean's macros expand it: `xs[i]` is
+/// `GetElem.getElem xs i`, `xs[i]?` is `GetElem?.getElem? xs i`, `xs[i]!` is
+/// `GetElem?.getElem! xs i`, and `xs[i]'h` is the first with its proof written
+/// out. Each becomes an application in parentheses, so that it is one term to
+/// what is around it and its head is found the way any other head is.
+///
+/// Read as punctuation, the brackets said nothing: `(_ ++ _)[_]? = _` was an
+/// equation with nothing on its left, and the rows were whatever equations
+/// ranked first.
+///
+/// A `[` indexes only a term it is written against, as in Lean: `l[i]` is an
+/// index and `f [i]` applies `f` to a list. That is why the lexemes keep their
+/// spaces until here.
+fn expand_indexing(lexemes: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // Each `[` not closed yet: where the term it indexes starts and where the
+    // `[` is, or `None` for a list.
+    let mut open: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut spaced = true;
+    for t in lexemes {
+        if t == SPACE {
+            spaced = true;
+            continue;
+        }
+        if t == "[" {
+            open.push(if spaced { None } else { term_start(&out).map(|s| (s, out.len())) });
+            out.push(t);
+        } else if let Some((_, head)) = INDEXES.iter().find(|(close, _)| *close == t) {
+            match open.pop().flatten() {
+                Some((start, at)) => {
+                    out[at] = "(".to_string();
+                    out.push(")".to_string());
+                    out.splice(start..start, ["(".to_string(), head.to_string()]);
+                    out.push(")".to_string());
+                }
+                // A list ends at its `]`, and a `?` after one is punctuation.
+                None => {
+                    out.push("]".to_string());
+                    if t != "]" {
+                        out.push(t[1..].to_string());
+                    }
+                }
+            }
+        } else {
+            out.push(t);
+        }
+        spaced = false;
+    }
+    out
+}
+
+/// Where the term the tokens end with starts, if it is one an index can be
+/// written against: a name, a `_`, or a group in parentheses -- which an
+/// expanded index is too, so `l[i][j]` indexes `l[i]`.
+fn term_start(tokens: &[String]) -> Option<usize> {
+    let last = tokens.len().checked_sub(1)?;
+    match tokens[last].as_str() {
+        ")" => {
+            let mut depth = 0;
+            (0..=last).rev().find(|j| {
+                match tokens[*j].as_str() {
+                    ")" => depth += 1,
+                    "(" => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            })
+        }
+        t if t == "_" || is_ident(t) => Some(last),
+        _ => None,
+    }
 }
 
 fn is_ident(t: &str) -> bool {
@@ -999,6 +1112,61 @@ mod tests {
         assert_eq!(p.query.shape.concl, Some(DeclName::new("Not")));
         assert_eq!(p.query.shape.args, vec![arg("Membership.mem")]);
         assert_eq!(p.query.uses, vec![DeclName::new("Finset.range")]);
+    }
+
+    /// The report: `(_ ++ _)[_]? = _` was read as `_ = _`, because the
+    /// brackets and the `?` were punctuation, and the rows were whatever
+    /// equations ranked first. An index is the constant Lean expands it to.
+    #[test]
+    fn an_index_is_the_constant_its_notation_expands_to() {
+        let p = parse("(_ ++ _)[_]? = _");
+        assert_eq!(p.query.shape.args, vec![arg("GetElem?.getElem?"), arg("_")]);
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        // The lemma asked for is in the index as `Option`, `getElem?`,
+        // `getElem?`; the first row that came back was `↑1 = 1`.
+        let stored = |args: &[&str]| {
+            Shape::new(Some(DeclName::new("Eq")), args.iter().map(|a| arg(a)).collect())
+        };
+        assert!(p.query.shape.matches(&stored(&[
+            "Option",
+            "GetElem?.getElem?",
+            "GetElem?.getElem?"
+        ])));
+        assert!(!p.query.shape.matches(&stored(&["ENat", "Nat.cast", "OfNat.ofNat"])));
+        assert_eq!(parse("_[_]? = _").query, p.query);
+        for (pattern, head) in [
+            ("l[i] = _", "GetElem.getElem"),
+            ("xs[i]'h = _", "GetElem.getElem"),
+            ("l[i]! = _", "GetElem?.getElem!"),
+            ("l[i][j]? = _", "GetElem?.getElem?"),
+            ("(l ++ m)[i + 1] = _", "GetElem.getElem"),
+        ] {
+            assert_eq!(parse(pattern).query.shape.args[0], arg(head), "{pattern}");
+        }
+        // An index binds tighter than an operator, and than an application.
+        assert_eq!(parse("l[i] + 1 = _").query.shape.args[0], arg("HAdd.hAdd"));
+        let p = parse("Nat.succ l[i] = _");
+        assert_eq!(p.query.shape.args[0], arg("Nat.succ"));
+        assert_eq!(p.query.uses, vec![DeclName::new("GetElem.getElem")]);
+        // A bracket with a space before it is a list, as in Lean.
+        let p = parse("List.sum [a] = _");
+        assert_eq!(p.query.shape.args[0], arg("List.sum"));
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+    }
+
+    /// The constant an index stands for could not be written instead: cut at
+    /// each `?`, `GetElem?.getElem?` was `GetElem` and a `.getElem` that reads
+    /// as nothing.
+    #[test]
+    fn a_name_may_have_a_question_mark_or_a_bang_in_it() {
+        let p = parse("GetElem?.getElem? (_ ++ _) _ = _");
+        assert_eq!(p.query.shape.args, vec![arg("GetElem?.getElem?"), arg("_")]);
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        assert_eq!(parse("List.head? _ = _").query.shape.args[0], arg("List.head?"));
+        assert_eq!(parse("Option.get! _ = _").query.shape.args[0], arg("Option.get!"));
+        // `!=` is still the `≠` it is typed for, after a name or a bracket.
+        assert_eq!(parse("a!=b").query, parse("a ≠ b").query);
+        assert_eq!(parse("l[i]!=x").query, parse("l[i] ≠ x").query);
     }
 
     #[test]
