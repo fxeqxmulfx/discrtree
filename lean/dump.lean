@@ -112,13 +112,30 @@ def matchesPrefix (prefixes : Array String) (m : Name) : Bool :=
     let s := m.toString
     prefixes.any fun p => s == p || s.startsWith (p ++ ".")
 
+/-- Where `module` declares `name`.
+
+Asked of the module, not of the name. Lean imports a theorem from two modules
+when they agree -- Mathlib's `Abelian.CommSq` and `Abelian.Monomorphisms` both
+declare the same two instances -- and `findDeclarationRanges?` answers from
+whichever module the name was first imported from, so both rows got the lines
+of one. The name-keyed lookup is kept for what the module's own entries do not
+hold: a range Lean files under another name, or a builtin's. -/
+def rangesIn (module : ModuleIdx) (name : Name) : MetaM (Option DeclarationRanges) := do
+  let env ← getEnv
+  let entries (level : OLeanLevel) :=
+    (declRangeExt.getModuleEntries (level := level) env module).binSearch
+      (name, default) (fun a b => Name.quickLt a.1 b.1) |>.map (·.2)
+  match entries .exported <|> entries .server with
+  | some r => pure (some r)
+  | none   => findDeclarationRanges? name
+
 /-- One JSONL row. Field names match `discrtree::model::Decl`. -/
 def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
-    (module : Name) : MetaM Json := do
+    (module : Name) (moduleIdx : ModuleIdx) : MetaM Json := do
   let env ← getEnv
   let ppType ← try (do pure (toString (← ppExpr ci.type))) catch _ => pure ""
   let concl := conclusion ci.type
-  let range ← findDeclarationRanges? name
+  let range ← rangesIn moduleIdx name
   let doc ← findDocString? env name
   let value? := ci.value? (allowOpaque := true)
   let deps := if withDeps then (value?.map depsOf).getD #[] else #[]
@@ -148,6 +165,15 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     ("elaborated", Json.bool true)
   ]
 
+/-- A declaration to write, and the module that declared it, by name and by
+index: the index is how the module's own entries are read. -/
+structure Work where
+  name : Name
+  module : Name
+  moduleIdx : ModuleIdx
+  info : ConstantInfo
+  deriving Inhabited
+
 /-- Declarations this dump will write, paired with the module they came from.
 
 Asked of the modules rather than of the constants. The environment is indexed
@@ -162,7 +188,7 @@ module names answer the same question.
 Collected up front rather than walked in place: the walk is the only part that
 has to be serial, and it is the cheap part. -/
 def workList (env : Environment) (prefixes : Array String) :
-    Array (Name × Name × ConstantInfo) := Id.run do
+    Array Work := Id.run do
   let names := env.header.moduleNames
   let data := env.header.moduleData
   let mut acc := #[]
@@ -179,7 +205,7 @@ def workList (env : Environment) (prefixes : Array String) :
       let some n := md.constNames[j]? | continue
       if !keep n then continue
       let some ci := md.constants[j]? | continue
-      acc := acc.push (n, m, ci)
+      acc := acc.push { name := n, module := m, moduleIdx := i, info := ci }
   return acc
 
 /-- Threads to dump on. `DISCRTREE_JOBS` overrides.
@@ -206,7 +232,7 @@ Each thread starts from the same `Core.State`, which holds the environment, and
 its result state is dropped: nothing here adds a declaration, so there is
 nothing to merge back. -/
 def dumpShare (source : String) (withDeps : Bool) (out : String)
-    (work : Array (Name × Name × ConstantInfo))
+    (work : Array Work)
     (ctxCore : Core.Context) (sCore : Core.State) : IO (Nat × Nat) := do
   let h ← IO.FS.Handle.mk out IO.FS.Mode.write
   let mut written := 0
@@ -218,8 +244,8 @@ def dumpShare (source : String) (withDeps : Bool) (out : String)
       let mut w := 0
       let mut s := 0
       for j in [i:stop] do
-        let (name, module, ci) := work[j]!
-        match ← (try (some <$> rowOf source withDeps name ci module)
+        let item := work[j]!
+        match ← (try (some <$> rowOf source withDeps item.name item.info item.module item.moduleIdx)
                   catch _ => pure none) with
         | some row => h.putStrLn row.compress; w := w + 1
         | none     => s := s + 1
@@ -259,7 +285,7 @@ def dumpAll : MetaM Unit := do
   -- Round robin rather than contiguous blocks. What a declaration costs is the
   -- size of its proof term, and those cluster by file: contiguous shares leave
   -- one thread on `Mathlib.Analysis` long after the rest have finished.
-  let shares : Array (Array (Name × Name × ConstantInfo)) := Id.run do
+  let shares : Array (Array Work) := Id.run do
     let mut acc := Array.replicate jobs #[]
     for k in [0:work.size] do
       acc := acc.modify (k % jobs) (·.push work[k]!)

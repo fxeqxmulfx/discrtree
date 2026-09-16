@@ -2363,3 +2363,14 @@ name was imported from.  A project of two modules shows it:
 copy them.
 
 Seen with dt 0.44.0, 2026-09-16.
+
+Fixed in 0.45.0.  The dump reads the range from the entries of the module
+that declares the constant, and asks by name only when those hold none:
+
+    Dup.same Dup.A 3 4
+    Dup.same Dup.B 8 9
+
+A dump of Lean's core, 98 376 rows, has the same ranges before and after but
+one: `Eq.ndrec_symm` had the lines of `Eq`, 46–76, because the name lookup
+takes a name ending in `ndrec` for a recursor and asks for its namespace; it
+now has its own, 375–377.  Mathlib's rows change when it is dumped again.
