@@ -2167,3 +2167,30 @@ The lookup still runs only after the search as written found nothing, so a
 pattern that answers costs what it did, and one that fails pays one scan of
 `decl` per bare word, 0.16 s on the probe's index.  The 104 patterns of the
 sweep answer exactly as before.
+
+## A word in lower case is read as a constant unless a field is written on it
+
+0.15.0 reads one letter as a variable, and 0.34.0 reads a word a field is
+written on as one.  Every other word in lower case is a constant, and the
+names people give lists, hypotheses and accumulators are words:
+
+    $ dt find 'xs ++ ys = _'
+    no match: `xs` in the pattern, `ys` in the pattern match nothing on their own
+    $ dt find 'hf.comp hg = _'
+    no match: `hg` in the pattern matches nothing on its own
+
+The same word is read two ways in one pattern.  `xs.length` makes `xs` a
+variable, and the `xs` next to it is still a constant:
+
+    $ dt find '(xs ++ ys).length = xs.length + ys.length'
+    no match: `xs` in the pattern, `ys` in the pattern match nothing on their own
+
+And since 0.40.0 resolves every bare word, a variable that shares its name
+with a field somewhere in Mathlib is read as that field:
+
+    $ dt find 'List.reverse (as ++ bs) = _'
+    no match: `as` is `CategoryTheory.Discrete.as` in the index — Lean prints an
+    exported name without its namespace — and that matches nothing either; also
+    `FundamentalGroupoid.as`, `CategoryTheory.Quotient.as`
+
+Seen with dt 0.40.0, 2026-09-16.
