@@ -685,6 +685,18 @@ hint that the fix is `_`.
 Hit twice in one session: the fallback both times was `dt find --name`, i.e.
 guessing the name, which is the thing `dt find` exists to avoid.
 
+Fixed in 0.15.0.  A binder is one letter and whatever decorations the printer
+put on it -- `a`, `x'`, `f₁`, `α` -- and nothing global is spelled that way, so
+that is the rule: a token of that shape is a wildcard, wherever it appears.  It
+never reaches `--uses`, and a side of a relation whose head is one is `_`.  The
+test is syntactic rather than a lookup in the index, because a lookup would make
+the same pattern mean different things in two projects, and the project where
+something really is called `a` is the project where that is a typo.
+
+`dt find -v` now names what it read as a wildcard, which is where a rule this
+quiet belongs: the pattern is echoed as `conclusion LE.le, 2 argument(s),
+operator `≤`, `a`, `b` as `_``.
+
 ## Implication patterns do not match hypothesis-shaped lemmas
 
 `dt find 'HasFDerivAt _ _ _ → HasFDerivAt _ _ _ → HasFDerivAt _ _ _'
@@ -698,30 +710,6 @@ Hypotheses are binders, not arrows, in the elaborated term, so a `→` pattern
 misses every lemma stated with named hypotheses -- which is most of Mathlib.
 A pattern whose top level is `→` should match a pi type over the same
 argument types.
-
-## "`project` moved since it was indexed" on every query
-
-Every `dt` call in this session, in the directory the project was indexed
-from (`/home/misha/lean_projects/transformer`, unmoved), prints
-
-    dt: `project` moved since it was indexed; this answer may be out of date
-    -- re-run `dt refresh project`
-
-It shows up attached to failed searches, where it reads as the explanation for
-the failure and is not.  Whatever the move check compares (a symlinked or
-`/proc`-resolved path?), it is reporting a move that did not happen.
-
-A binder is one letter and whatever decorations the printer put on it -- `a`,
-`x'`, `f₁`, `α` -- and nothing global is spelled that way, so that is the rule:
-a token of that shape is a wildcard, wherever it appears.  It never reaches
-`--uses`, and a side of a relation whose head is one is `_`.  The test is
-syntactic rather than a lookup in the index, because a lookup would make the
-same pattern mean different things in two projects, and the project where
-something really is called `a` is the project where that is a typo.
-
-`dt find -v` now names what it read as a wildcard, which is where a rule this
-quiet belongs: the pattern is echoed as `conclusion LE.le, 2 argument(s),
-operator `≤`, `a`, `b` as `_``.
 
 Fixed in 0.16.0.  `→` is split off before anything else and never becomes a
 head symbol: what follows the last arrow is the conclusion and is parsed as
@@ -745,6 +733,18 @@ Verified against the real index:
 
     $ dt find 'a ≤ b → b⁻¹ ≤ a⁻¹'
     ENNReal.inv_le_inv'  ...  Filter.inv_le_inv  ...  inv_le_inv'  ...
+
+## "`project` moved since it was indexed" on every query
+
+Every `dt` call in this session, in the directory the project was indexed
+from (`/home/misha/lean_projects/transformer`, unmoved), prints
+
+    dt: `project` moved since it was indexed; this answer may be out of date
+    -- re-run `dt refresh project`
+
+It shows up attached to failed searches, where it reads as the explanation for
+the failure and is not.  Whatever the move check compares (a symlinked or
+`/proc`-resolved path?), it is reporting a move that did not happen.
 
 Fixed in 0.17.0, though not where it was looked for.  The check was right and
 the word was wrong.  Nothing compares paths: a `local` source's revision is a
