@@ -34,6 +34,26 @@ impl DeclName {
         self.0.split_once('.').map_or(&self.0, |(root, _)| root)
     }
 
+    /// The words of an argument that is several names the shell passed as
+    /// one, or `None` for an argument that can be a name.
+    ///
+    /// No Lean name has whitespace outside `«»`. An argument that does was
+    /// joined by the shell, and the usual way is a prime: in an unquoted line,
+    /// `List.range'_one List.mem_range'_1` is one quoted string between the two
+    /// primes, handed over without them.
+    pub fn glued(arg: &str) -> Option<Vec<&str>> {
+        let mut depth = 0usize;
+        let spaced = arg.chars().any(|c| {
+            match c {
+                '«' => depth += 1,
+                '»' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            depth == 0 && c.is_whitespace()
+        });
+        spaced.then(|| arg.split_whitespace().collect())
+    }
+
     /// `Real.exp_le_exp` → `exp_le_exp`.
     pub fn base(&self) -> &str {
         self.0.rsplit_once('.').map_or(&self.0, |(_, b)| b)
@@ -175,6 +195,16 @@ impl From<String> for ModuleName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_argument_with_spaces_is_names_the_shell_joined() {
+        assert_eq!(
+            DeclName::glued("List.range_one List.Perm.mem_iff List.mem_range_1"),
+            Some(vec!["List.range_one", "List.Perm.mem_iff", "List.mem_range_1"])
+        );
+        assert_eq!(DeclName::glued("List.range'_one"), None);
+        assert_eq!(DeclName::glued("Foo.«a b»"), None, "a guillemet name may have a space");
+    }
     use std::path::Path;
 
     #[test]

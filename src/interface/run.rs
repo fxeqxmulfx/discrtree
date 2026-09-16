@@ -164,7 +164,7 @@ impl App {
         let mut shown = Vec::new();
         let mut missed = Vec::new();
         for n in names {
-            match show.run(&DeclName::new(n.as_str())) {
+            match decl_name(n).and_then(|name| show.run(&name)) {
                 Ok(s) => shown.push(s),
                 Err(e) => missed.push(e),
             }
@@ -208,7 +208,7 @@ impl App {
         // the command. So the warning is reached on both paths.
         let build = LakeBuild::read(&self.cfg);
         let deps = Deps { repo: repo.as_ref(), workspace: &self.workspace, build: &build };
-        match deps.run(&DeclName::new(name), depth) {
+        match decl_name(name).and_then(|name| deps.run(&name, depth)) {
             Ok(result) => {
                 print!("{}", render::deps(&result));
                 self.warn_stale(repo.as_ref(), closure_sources(&result));
@@ -226,7 +226,7 @@ impl App {
         let repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
         let rdeps = Rdeps { repo: repo.as_ref(), build: &build };
-        match rdeps.run(&DeclName::new(name), within) {
+        match decl_name(name).and_then(|name| rdeps.run(&name, within)) {
             Ok(users) => {
                 print!("{}", render::rdeps(&users));
                 // Every source that could hold a user, not the ones that do:
@@ -377,7 +377,7 @@ impl App {
     fn add(&self, name: &str, write: bool, force: bool) -> Result<()> {
         let repo = self.repo()?;
         let add = Add { repo: repo.as_ref(), files: &self.files, workspace: &self.workspace };
-        let name = DeclName::new(name);
+        let name = decl_name(name)?;
         let report = if write {
             let mut project = Project { imports_file: self.cfg.imports_file() };
             add.write(&name, &mut project, force)?
@@ -843,6 +843,15 @@ fn files(cfg: &Config) -> Files {
 
 /// The command line as a domain query. A pattern supplies the shape; the
 /// explicit flags refine it, and win where both say something.
+/// A declaration name as given on the command line, refused when the shell
+/// has visibly joined several into it.
+fn decl_name(arg: &str) -> Result<DeclName> {
+    match DeclName::glued(arg) {
+        Some(words) => Err(Error::new(render::glued(arg, &words))),
+        None => Ok(DeclName::new(arg)),
+    }
+}
+
 fn query_of(a: &FindArgs) -> Result<Query> {
     let mut q = match &a.pattern {
         Some(p) => pattern::parse(p).query,

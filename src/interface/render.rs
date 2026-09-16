@@ -682,6 +682,19 @@ pub fn moved_while_read(s: &Stale, kind: Option<SourceKind>) -> String {
     )
 }
 
+/// Why an argument with spaces in it is not looked up. The shell is the
+/// likely cause, so that is what the line explains, and the primes it ate
+/// cannot be put back from here: only the reader knows which names had one.
+pub fn glued(arg: &str, words: &[&str]) -> String {
+    format!(
+        "`{arg}` is {} names in one argument, and no Lean name has a space: a `'` in an \
+         unquoted shell word starts a quoted string that runs to the next `'`, joining the \
+         words between and dropping both primes — pass each name as its own word, in double \
+         quotes if it has a prime (\"List.range'_one\")",
+        words.len()
+    )
+}
+
 /// The `dt` that wrote a source's rows. A version too old to have recorded its
 /// own is named by what is known about it rather than by a guess: it is every
 /// version before the one that started recording, and "an older dt" is the
@@ -1313,6 +1326,15 @@ mod tests {
         };
         let line = moved_while_read(&sha, Some(SourceKind::Lake));
         assert!(line.contains("went from 5ed2965 to 4f8b12c"), "{line}");
+    }
+
+    #[test]
+    fn a_glued_argument_says_what_the_shell_did() {
+        let arg = "List.range_one List.Perm.mem_iff List.mem_range_1";
+        let line = glued(arg, &arg.split(' ').collect::<Vec<_>>());
+        assert!(line.contains("is 3 names in one argument"), "{line}");
+        assert!(line.contains("dropping both primes"), "{line}");
+        assert!(!line.contains("--name"), "a fragment is not worth a search: {line}");
     }
 
     /// A toolchain is not a hash and must not be cut to seven characters:

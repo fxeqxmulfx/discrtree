@@ -1676,3 +1676,35 @@ fails before the search, naming the kinds:
 
 `--help` names the same kinds and the three aliases. `opaque`, `rec` and
 `quot` were in the index all along and are now listed.
+
+**`dt show` reads a name with spaces in it as one name.**  Two primes in an
+unquoted shell line pair up into a quoted string, so
+
+    $ dt show List.range'_one List.Perm.mem_iff List.mem_range'_1
+    dt: List.range_one List.Perm.mem_iff List.mem_range_1 is not in the index; try `dt find --name mem_range_1`
+
+hands `dt` a single argument `List.range_one List.Perm.mem_iff List.mem_range_1`,
+and the answer treats it as one missing declaration, suggesting a search for
+its last word.  No Lean name contains a space: an argument that does is several
+names glued together by the shell, and the primes are gone from them.  The
+answer could say so — "an argument with spaces is several names; a prime in an
+unquoted shell word starts a quoted string, quote each name that has one" —
+instead of suggesting `--name` on a mangled fragment.
+
+Fixed in 0.32.0.
+
+**A name argument with a space in it is refused, and the shell is named.** No
+Lean name has whitespace outside `«»`, so `show`, `deps`, `rdeps` and `add`
+recognise such an argument as several names joined, and say so rather than
+look it up:
+
+    $ dt show List.range'_one List.Perm.mem_iff List.mem_range'_1
+    dt: `List.range_one List.Perm.mem_iff List.mem_range_1` is 3 names in one
+    argument, and no Lean name has a space: a `'` in an unquoted shell word
+    starts a quoted string that runs to the next `'`, joining the words between
+    and dropping both primes — pass each name as its own word, in double quotes
+    if it has a prime ("List.range'_one")
+
+In a `show` batch the rest of the names are still shown. The words are not
+looked up one by one: the primes are gone from them, so a hit would often be a
+different lemma (`List.range_one` rather than `List.range'_one`).
