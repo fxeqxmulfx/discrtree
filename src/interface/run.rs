@@ -866,8 +866,6 @@ fn files(cfg: &Config) -> Files {
     Files { roots, excludes }
 }
 
-/// The command line as a domain query. A pattern supplies the shape; the
-/// explicit flags refine it, and win where both say something.
 /// A declaration name as given on the command line, refused when the shell
 /// has visibly joined several into it.
 fn decl_name(arg: &str) -> Result<DeclName> {
@@ -877,6 +875,8 @@ fn decl_name(arg: &str) -> Result<DeclName> {
     }
 }
 
+/// The command line as a domain query. A pattern supplies the shape; the
+/// explicit flags refine it, and win where both say something.
 fn query_of(a: &FindArgs) -> Result<Query> {
     let mut q = match &a.pattern {
         Some(p) => pattern::parse(p).query,
