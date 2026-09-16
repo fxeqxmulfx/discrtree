@@ -69,7 +69,23 @@ const MODIFIERS: &[&str] = &[
 /// lines and calling them the declaration is the one thing `dt show` exists to
 /// prevent, so it has to be able to tell.
 pub fn declares(text: &str) -> bool {
-    code_lines(text).any(|l| header(l).is_some())
+    range_lines(text).any(|(l, _)| header(l).is_some())
+}
+
+/// The code lines of a declaration range, the first with its indentation cut.
+///
+/// Column zero is how a scan with no range in hand tells a header from a `have`
+/// inside a proof. Here Lean has already said where the declaration starts,
+/// and the first line is that start however it is indented: core writes
+/// ` @[grind =] theorem filter_replicate` with a stray space, and `dt show`
+/// called those lines a declaration of nothing. Every later line keeps the
+/// rule, since a `def` indented inside the range is the nested kind.
+///
+/// Each line comes with the line as written, for [`commands`]: a command it
+/// does not know is recognised by a word followed by the name, and an indented
+/// `exact foo` is that too.
+fn range_lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    code_lines(text).enumerate().map(|(i, l)| (if i == 0 { l.trim_start() } else { l }, l))
 }
 
 /// The lines of a range that are code: not inside a block comment, and not a
@@ -123,12 +139,12 @@ fn comment_depth(line: &str, mut depth: usize) -> usize {
 /// An anonymous `instance : Foo Bar` has no name to compare and is taken at its
 /// word, since nothing else in the file claims that line either.
 pub fn declares_name(text: &str, name: &DeclName) -> bool {
-    code_lines(text).any(|l| match header(l) {
+    range_lines(text).any(|(l, written)| match header(l) {
         Some((_, rest)) => {
             let bound = bound(rest);
             bound.is_empty() || bound.iter().any(|id| names(id, name))
         }
-        None => commands(l, name),
+        None => commands(written, name),
     })
 }
 
@@ -448,6 +464,17 @@ fn mentions_sorry(body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_range_may_start_with_an_indented_header() {
+        let range = " @[grind =] theorem filter_replicate : (replicate n a).filter p = [] := by\n  \
+                     cases n with\n  | zero => simp\n";
+        assert!(declares(range));
+        assert!(declares_name(range, &DeclName::new("List.filter_replicate")));
+        // Only the first line: an indented header further down is nested.
+        let nested = "-- a comment\nexample : True := by\n  theorem inner : True := trivial\n";
+        assert!(!declares_name(nested, &DeclName::new("inner")));
+    }
 
     /// The shape every `Theorems/Thm_<name>.lean` in the FLT corpus has: one
     /// theorem, statement inline, proof delegated.

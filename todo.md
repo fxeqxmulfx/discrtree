@@ -1708,3 +1708,47 @@ look it up:
 In a `show` batch the rest of the names are still shown. The words are not
 looked up one by one: the primes are gone from them, so a hit would often be a
 different lemma (`List.range_one` rather than `List.range'_one`).
+
+---
+
+## `dt show` misses a header that follows an attribute on the same line
+
+    $ dt show List.filter_replicate
+    import Init.Data.List.Lemmas
+
+    List.filter_replicate
+      theorem  Init.Data.List.Lemmas:2331-2336
+      those lines declare nothing: `@[grind =] theorem filter_replicate : (replicate n a).filter p = if p a then replicate n a else [] := by`
+
+The complaint quotes the header it failed to see: the line is
+`@[grind =] theorem filter_replicate`, the word before the name is `theorem`,
+and the name is the one Lean printed.  The rule from 0.26.0 — "a word at column
+zero followed by the name" — reads `@[grind` as that word.  Core writes the
+attribute on the header's line throughout `Init` (`@[simp] theorem`,
+`@[grind =] theorem`), so this is a class of rows, not one.  An attribute
+block `@[...]` at the start of a line (balanced brackets, possibly several:
+`@[simp] @[grind] theorem`) should be skipped before looking for the word, as
+the modifiers `meta` / `public` already are.  The row still printed the
+elaborated type below the complaint, so nothing was lost but the source.
+
+Seen with dt 0.32.0, 2026-09-16.
+
+Fixed in 0.33.0.
+
+**The attribute was not the cause: the line is indented.** In core it reads
+` @[grind =] theorem filter_replicate` with a stray space at column zero, and
+`@[...]` blocks were already skipped. The column-zero rule is what keeps a
+`have` or a nested `def` inside a proof from reading as a header. Within a
+declaration range, though, Lean has already said where the declaration starts,
+so the first code line of the range may now be indented when it opens with a
+known header (`theorem`, `def`, … after attributes and modifiers). Later lines
+keep the rule, and so does the "any word followed by the name" reading, where
+an indented `exact foo` would otherwise count.
+
+    $ dt show List.filter_replicate
+    import Init.Data.List.Lemmas
+
+    List.filter_replicate
+      theorem  Init.Data.List.Lemmas:2331-2336
+
+     @[grind =] theorem filter_replicate : (replicate n a).filter p = if p a then …
