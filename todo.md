@@ -2374,3 +2374,23 @@ A dump of Lean's core, 98 376 rows, has the same ranges before and after but
 one: `Eq.ndrec_symm` had the lines of `Eq`, 46–76, because the name lookup
 takes a name ending in `ndrec` for a recursor and asks for its namespace; it
 now has its own, 375–377.  Mathlib's rows change when it is dumped again.
+
+## `dt dump` fails on a project that does not import `Lean`
+
+The dump script is Lean code about `Lean.Name`, `Lean.Expr` and `MetaM`, and
+its only import is the source's root module.  A Mathlib project brings `Lean`
+in through Mathlib; a project of plain Lean does not, and the script does not
+compile:
+
+    $ cat Dup.lean
+    import Dup.A
+    import Dup.B
+    $ dt dump project
+    …/dump_project.lean:37:7: error(lean.invalidField): Invalid field `isInternalDetail`:
+      The environment does not contain `Lean.Name.isInternalDetail`, …
+    dt: lake env lean failed for source `project` (exit 1); the script is at …
+
+Twenty-seven errors, none of which says what is missing.  Found while testing
+the line-range fix on a two-module project.
+
+Seen with dt 0.45.0, 2026-09-16.
