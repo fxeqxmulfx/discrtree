@@ -488,6 +488,53 @@ fn a_word_that_resolves_to_a_constant_that_answers_nothing_names_the_constant() 
     }
 }
 
+/// `List.count_false_add_count_true` in miniature, with two rows that have
+/// `Bool.false` and `Bool.true` as argument heads, which is where the index
+/// learns what `false` and `true` are called.
+///
+/// The report: `List.count false _ + List.count true _ = _` answered "`false`
+/// in the pattern, `true` in the pattern match nothing on their own", about the
+/// spelling the row itself is printed with. `export Bool (false true)` drops
+/// the namespace wherever the constant is printed, and a word resolved only at
+/// the heads of a pattern missed it one argument down.
+#[test]
+fn a_constant_lean_prints_without_its_namespace_is_resolved_inside_the_pattern_too() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let n = DeclName::new;
+    let mut repo = repo();
+    let mut count =
+        theorem("List.count_false_add_count_true", "mathlib", "Mathlib.Bool", "Eq", &[]);
+    count.ty = "∀ (l : List Bool), List.count false l + List.count true l = l.length".into();
+    count.shape = Shape::new(
+        Some(n("Eq")),
+        vec![ArgHead::Named(n("HAdd.hAdd")), ArgHead::Named(n("List.length"))],
+    );
+    count.consts = ["Eq", "HAdd.hAdd", "List.count", "Bool.false", "Bool.true", "List.length"]
+        .into_iter()
+        .map(n)
+        .collect();
+    repo.decls.push(count);
+    for (name, value) in [("Bool.not_true", "Bool.false"), ("Bool.not_false", "Bool.true")] {
+        let mut d = theorem(name, "core", "Init.Prelude", "Eq", &[]);
+        d.shape = Shape::new(
+            Some(n("Eq")),
+            vec![ArgHead::Named(n("Bool.not")), ArgHead::Named(n(value))],
+        );
+        repo.decls.push(d);
+    }
+    let mut q = Query::new();
+    q.shape = Shape::new(Some(n("Eq")), vec![ArgHead::Named(n("HAdd.hAdd")), ArgHead::Any]);
+    q.uses = vec![n("List.count"), n("false"), n("true")];
+    q.pattern_uses = q.uses.clone();
+    let hits = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
+    let names: Vec<&str> = hits.rows.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, vec!["List.count_false_add_count_true"]);
+    assert_eq!(
+        hits.read_as,
+        vec![("false".to_string(), n("Bool.false")), ("true".to_string(), n("Bool.true"))]
+    );
+}
+
 /// An index whose text rows are the only ones marked `instance`.
 fn with_instances(elaborated_too: bool) -> FakeRepo {
     let mut repo = repo();

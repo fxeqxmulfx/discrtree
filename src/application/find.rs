@@ -184,6 +184,14 @@ fn qualified(query: &Query, called: &[(String, Vec<DeclName>)]) -> Option<Query>
             any = true;
         }
     }
+    // A constant inside the pattern is in both lists, and is renamed in both so
+    // that a failure still blames it as written in the pattern.
+    for u in out.uses.iter_mut().chain(out.pattern_uses.iter_mut()) {
+        if let Some(resolved) = top(u) {
+            *u = resolved;
+            any = true;
+        }
+    }
     any.then_some(out)
 }
 
@@ -225,26 +233,33 @@ impl Find<'_> {
     /// The constants each bare word in the pattern could be naming, commonest
     /// first, for the words that name any.
     ///
+    /// Every word of the pattern, not only its heads: `export Bool (false
+    /// true)` drops the namespace wherever the printer meets the constant, and
+    /// `List.count false l` is copied back with `false` an argument of an
+    /// argument. Counted as heads all the same, because that is the count the
+    /// index keeps cheaply, and the constant a word names somewhere inside a
+    /// statement is the one it names at the top of others.
+    ///
     /// Asked only of a search that found nothing: a word that answered as
     /// written is a word that meant what it said, and resolving it anyway
     /// would be two scans of the index to change nothing.
     fn resolve(&self, query: &Query) -> Result<Vec<(String, Vec<DeclName>)>> {
         let mut out = Vec::new();
-        for head in query.shape.heads() {
+        for word in query.shape.heads().chain(&query.pattern_uses) {
             // A word written twice -- `exp _ ≤ exp _` -- is one word to
             // resolve and one line to report.
-            if head.as_str().contains('.') || out.iter().any(|(w, _)| w == head.as_str()) {
+            if word.as_str().contains('.') || out.iter().any(|(w, _)| w == word.as_str()) {
                 continue;
             }
-            let called = self.repo.heads_called(head.as_str())?;
+            let called = self.repo.heads_called(word.as_str())?;
             // A word that is itself a head symbol means what it says. `Eq` is
             // spelled `Eq` in the index, and a query that failed with it in
             // the pattern failed for some other reason.
-            if called.iter().any(|c| c.as_str() == head.as_str()) {
+            if called.iter().any(|c| c.as_str() == word.as_str()) {
                 continue;
             }
             if !called.is_empty() {
-                out.push((head.as_str().to_owned(), called));
+                out.push((word.as_str().to_owned(), called));
             }
         }
         Ok(out)

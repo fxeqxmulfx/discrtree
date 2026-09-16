@@ -2114,3 +2114,56 @@ patterns of the regression sweep find what they found before.
 Not fixed: two instances in Mathlib's `CategoryTheory.Abelian` are declared in
 two modules each, and both rows of each have one line range, because the dump
 takes the constant from its module and looks the range up by name.
+
+## `false` and `true` in a pattern match nothing; `Bool.false` does
+
+Looking for `count false l + count true l = l.length` on `List Bool`:
+
+    $ dt find 'List.count false _ + List.count true _ = _'
+    no match: `false` in the pattern, `true` in the pattern match nothing on their own
+    $ dt find 'List.count Bool.false _ + List.count Bool.true _ = _'
+    List.count_false_add_count_true  theorem  Mathlib.Data.Bool.Count
+      ∀ (l : List Bool), List.count false l + List.count true l = l.length
+
+The row itself prints the constants as `false` and `true`, so the spelling the
+result shows is the one the pattern rejects.  Same family as `inner` having to
+be spelled `Inner.inner`: resolve `false`/`true` (and other constructors that
+Lean opens by default) the way the elaborator does, or name the qualified
+spelling in the failure message.
+
+Seen with dt 0.39.0, 2026-09-16, transformer session.
+
+Fixed in 0.40.0, by the first repair: a bare word is resolved wherever it
+stands in the pattern, not only where it heads something.  0.21.0 resolved
+`inner` because it headed a side; `false` here is an argument of an argument,
+so it became `--uses false`, and the resolver never looked at those.  Now it
+does, by the same rule -- the commonest head symbol whose last component is the
+word -- and says so on stderr:
+
+    $ dt find 'List.count false _ + List.count true _ = _'
+    dt: `false` read as `Bool.false`
+    dt: `true` read as `Bool.true`
+    List.count_false_add_count_true  theorem  Mathlib.Data.Bool.Count
+      ∀ (l : List Bool), List.count false l + List.count true l = l.length
+    List.count_true_add_count_false  theorem  Mathlib.Data.Bool.Count
+      ∀ (l : List Bool), List.count true l + List.count false l = l.length
+
+The rest of what the Prelude exports comes with it, with no table to keep:
+`Option.getD none _ = _` reads `none` as `Option.none`, and `max`, `min`,
+`some`, `default` and `decide` are found the same way.  A word inside a side is
+counted over heads too, because heads are what the index counts without a scan
+of `uses`, and the constant a word names one argument down is the one it names
+at the top of other statements: `Bool.false` is a head in 297 rows.
+
+The second repair was already there once the first reached these words.  When
+the resolved pattern fails as well, the failure names the spelling:
+
+    $ dt find 'List.count false _ * List.count true _ = _'
+    no match: `false` is `Bool.false` in the index — Lean prints an exported
+    name without its namespace — and that matches nothing either; also
+    `Std.Do.ExceptConds.false`, `Std.Sat.AIG.Decl.false`
+
+The lookup still runs only after the search as written found nothing, so a
+pattern that answers costs what it did, and one that fails pays one scan of
+`decl` per bare word, 0.16 s on the probe's index.  The 104 patterns of the
+sweep answer exactly as before.
