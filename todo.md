@@ -1907,3 +1907,52 @@ line is read as written first.  Only if that fails is an argument of `find`
 that no flag is spelled like -- a `-` and then anything but letters -- read
 again from behind a `--`.  A misspelt flag still gets the error, and the
 suggestion, it got before.
+
+---
+
+## An argument of a prefix pattern is read a token at a time
+
+Found while checking 0.35.0.  The arguments of a prefix pattern were every
+name, literal and `_` after its head, so a group in parentheses was as many
+arguments as it had names in it, and its notation was lost:
+
+    $ dt find -v 'HasDerivAt (fun x => x ^ 2) (2 * x) x'
+    dt: `HasDerivAt (fun x => x ^ 2) (2 * x) x` read as conclusion HasDerivAt, 4 argument(s), `x` as `_`, --uses HMul.hMul
+    no match: the shape matches, but nothing of that shape mentions `HMul.hMul`; …
+
+    $ dt find 'Filter.Tendsto _ Filter.atTop (nhds 0)'
+    no match: nothing has that shape
+
+The second is as plain a `Tendsto` as there is.  A side had the same fault
+the other way: its head was the loosest notation on it, and a `⁻¹` on an
+argument was looser than nothing, so `Real.log x⁻¹` was read as an inverse:
+
+    $ dt find 'Real.log x⁻¹ = -Real.log x'
+    no match: the shape matches, but nothing of that shape mentions `Real.log`; …
+
+Seen with dt 0.35.0, 2026-09-16.
+
+Fixed in 0.36.0.  An argument is a term: a name, a `_`, a literal, or a
+bracket and what it encloses, with a postfix operator after it.  Each is
+read by its head the way a side is, so `(2 * x)` is `HMul.hMul`, `(nhds 0)`
+is `nhds` and `l[i]` is `GetElem.getElem`.  A name that heads an argument
+is not also a condition, as the name that heads a side is not.
+
+An application binds its arguments as tightly as a postfix operator binds
+(Lean's `max`), and the operator binds to the term before it.  So a `⁻¹`
+heads a term only if nothing is applied there: `(Real.log x)⁻¹` is an
+inverse and `Real.log x⁻¹` a logarithm.
+
+    $ dt find 'Real.log x⁻¹ = -Real.log x'
+    Real.log_inv  theorem  Mathlib.Analysis.SpecialFunctions.Log.Basic
+      ∀ (x : ℝ), Real.log x⁻¹ = -Real.log x
+    1 result(s)
+
+    $ dt find 'HasDerivAt f (-Real.sin x) x'
+    Real.hasDerivAt_cos  theorem  Mathlib.Analysis.SpecialFunctions.Trigonometric.Deriv
+
+`Filter.Tendsto _ Filter.atTop (nhds 0)` has 365 rows, `nhds ⊤` and
+`nhds 1` among them: the `0` is below the shape, and a literal is never a
+condition.  `HasDerivAt (fun x => x ^ 2) (2 * x) x` has 62, with
+`hasDerivAt_pow` 26th; the `^` is inside a lambda, which is read as `_`
+(0.27.0), and given as `--uses HPow.hPow` it makes the lemma 8th of 21.

@@ -58,7 +58,7 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("•", "HSMul.hSMul", 73, false),
     ("^", "HPow.hPow", 75, false),
     ("∘", "Function.comp", 90, false),
-    ("⁻¹", "Inv.inv", 1024, false),
+    ("⁻¹", "Inv.inv", MAX, false),
 ];
 
 /// The notation a head symbol is written with, where it has one: `↔` for
@@ -71,6 +71,11 @@ pub fn symbol(head: &str) -> Option<&'static str> {
 /// is what a statement is *about* -- `a ≤ b ∧ c ≤ d` is a conjunction -- and
 /// the pattern is split there; anything tighter is inside one of the sides.
 const RELATION: u16 = 50;
+
+/// Lean's `max`: how tightly an application binds its arguments. Only a
+/// postfix operator binds as tightly, and it binds to the term before it, so
+/// `Real.log x⁻¹` is `Real.log (x⁻¹)` and not the inverse of a logarithm.
+const MAX: u16 = 1024;
 
 /// Symbols written with more than one character, longest first so that `<+:`
 /// is not read as `<+` and a stray `:`. Without these `++` tokenized as two
@@ -169,7 +174,8 @@ pub struct Parsed {
 /// left is split on the top-level notation symbol, that symbol becomes the conclusion head, and the
 /// head identifier of each side becomes an argument. Identifiers and notation
 /// elsewhere become `uses` conditions. With no notation symbol, the leading identifier
-/// becomes the conclusion head and the rest become arguments.
+/// becomes the conclusion head and each term it is applied to an argument,
+/// read by its head the way a side is.
 pub fn parse(pattern: &str) -> Parsed {
     let mut p = read(pattern);
     p.query.pattern_uses = p.query.uses.clone();
@@ -213,15 +219,20 @@ fn read(pattern: &str) -> Parsed {
         }
         None => match constants(&tokens).split_first() {
             Some((head, rest)) => {
-                let args = tokens
-                    .iter()
-                    .skip_while(|t| t.as_str() != head.as_str())
-                    .skip(1)
-                    .filter(|t| is_ident(t) || is_numeral(t) || *t == "_")
-                    .map(|t| arg_head(t))
-                    .collect();
+                let args: Vec<ArgHead> =
+                    arguments(&tokens, head).into_iter().map(|a| side(a).0).collect();
+                // A name an argument is headed by is said by the shape, as the
+                // name a side is headed by is. See [`side`].
+                let mut rest = rest.to_vec();
+                for a in &args {
+                    if let ArgHead::Named(n) = a
+                        && let Some(i) = rest.iter().position(|c| c == n)
+                    {
+                        rest.remove(i);
+                    }
+                }
                 query.shape = Shape::new(Some(head.clone()), args);
-                query.uses = rest.iter().cloned().chain(assumed).collect();
+                query.uses = rest.into_iter().chain(assumed).collect();
             }
             // No name to key on, but notation is a name: `⟪x, y⟫_ℝ` says
             // `Inner.inner` as plainly as `Real.exp x` says `Real.exp`. Which
@@ -695,12 +706,77 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
         .filter_map(|i| notation_at(tokens, &depth, i))
         .collect();
     let loosest = top.iter().map(|(.., prec, _)| *prec).min()?;
+    // A postfix operator heads the one term it follows, and not an
+    // application it is written at the end of: `(Real.log x)⁻¹` is an
+    // inverse, and `Real.log x⁻¹` is headed by the function applied.
+    if loosest >= MAX && terms(tokens).len() > 1 {
+        return None;
+    }
     let mut at = top.into_iter().filter(|(.., prec, _)| *prec == loosest);
     // `a - b + c` is `(a - b) + c`: of operators that associate to the left,
     // the last one is applied outermost.
     let first = at.next()?;
     let outer = if first.3 { at.next_back().unwrap_or(first) } else { first };
     Some(DeclName::new(outer.1))
+}
+
+/// The arguments the head of a prefix pattern is applied to, each as the
+/// tokens it is written with: the terms after it in the group it is in.
+///
+/// A token apiece is what they were, and a group came apart into as many
+/// arguments as it had names in it, its notation dropped: `HasDerivAt _ (_ *
+/// _) _` was four wildcards, and `Filter.Tendsto _ Filter.atTop (nhds 0)`
+/// asked for a fourth argument no `Tendsto` has.
+fn arguments<'a>(tokens: &'a [String], head: &DeclName) -> Vec<&'a [String]> {
+    let Some(at) = tokens.iter().position(|t| t.as_str() == head.as_str()) else {
+        return Vec::new();
+    };
+    let depth = depths(tokens);
+    let end = (at + 1..tokens.len()).find(|k| depth[*k] < depth[at]).unwrap_or(tokens.len());
+    terms(&tokens[at + 1..end])
+}
+
+/// The terms at the top level of these tokens that an application would take
+/// one by one: `Real.log x⁻¹` is two, and `(2 * x)` is one.
+///
+/// A term is a name, a `_`, a literal, or a bracket and what it encloses, with
+/// a postfix operator written after it. Notation between terms is not an
+/// argument of anything here and is not counted.
+fn terms(tokens: &[String]) -> Vec<&[String]> {
+    let depth = depths(tokens);
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i].as_str();
+        let opens = BRACKETS.iter().any(|(o, ..)| *o == t)
+            && depth.get(i + 1).is_some_and(|d| *d > depth[i]);
+        let end = match () {
+            // Where a binder prefix ranges, up to its comma.
+            _ if depth[i] > 0 => None,
+            _ if opens => Some(
+                (i + 1..tokens.len())
+                    .find(|k| depth[*k] <= depth[i])
+                    .map_or(tokens.len(), |k| k + 1),
+            ),
+            _ if t == "_" || is_ident(t) || is_numeral(t) => Some(i + 1),
+            _ => None,
+        };
+        match end {
+            Some(end) => {
+                out.push(i..end);
+                i = end;
+            }
+            None => {
+                if t.starts_with('⁻')
+                    && let Some(last) = out.last_mut().filter(|r| r.end == i)
+                {
+                    last.end = i + 1;
+                }
+                i += 1;
+            }
+        }
+    }
+    out.into_iter().map(|r| &tokens[r]).collect()
 }
 
 /// How deeply each token is bracketed. An opening delimiter and its closer are
@@ -790,15 +866,6 @@ fn constants(tokens: &[String]) -> Vec<DeclName> {
         .filter(|t| is_ident(t) && !is_variable(t))
         .map(|t| DeclName::new(t.clone()))
         .collect()
-}
-
-/// One argument of a prefix pattern. A variable is a wildcard, not a name.
-fn arg_head(token: &str) -> ArgHead {
-    match token {
-        t if is_numeral(t) => ArgHead::Named(of_nat()),
-        t if is_variable(t) => ArgHead::Any,
-        t => ArgHead::parse(t),
-    }
 }
 
 fn dedup(mut v: Vec<DeclName>) -> Vec<DeclName> {
@@ -938,6 +1005,54 @@ mod tests {
         assert_eq!(p.operator, None);
         assert_eq!(p.query.shape.concl, Some(DeclName::new("Continuous")));
         assert_eq!(p.query.shape.args, vec![arg("Real.exp")]);
+    }
+
+    /// The report: `HasDerivAt (fun x => x ^ 2) (2 * x) x` read as four
+    /// arguments, a token apiece, and the product among them as two
+    /// wildcards. An argument is a term, and is read by its head as a side is.
+    #[test]
+    fn an_argument_is_a_whole_term() {
+        let p = parse("HasDerivAt (fun x => x ^ 2) (2 * x) x");
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("HasDerivAt")));
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("HMul.hMul"), arg("_")]);
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+        let p = parse("Filter.Tendsto _ Filter.atTop (nhds 0)");
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("Filter.atTop"), arg("nhds")]);
+        assert!(
+            p.query.uses.is_empty(),
+            "what the shape says is not said again: {:?}",
+            p.query.uses
+        );
+        // What is below an argument's head is still a condition.
+        let p = parse("HasDerivAt f (-Real.sin x) x");
+        assert_eq!(p.query.shape.args, vec![arg("_"), arg("Neg.neg"), arg("_")]);
+        assert_eq!(p.query.uses, vec![DeclName::new("Real.sin")]);
+        for (pattern, args) in [
+            (
+                "HasDerivAt Real.sin (Real.cos x) x",
+                vec![arg("Real.sin"), arg("Real.cos"), arg("_")],
+            ),
+            ("Nat.succ l[i]", vec![arg("GetElem.getElem")]),
+            ("Real.sqrt |x - y|", vec![arg("abs")]),
+            ("Nat.succ n⁻¹", vec![arg("Inv.inv")]),
+            ("(Continuous f)", vec![arg("_")]),
+            ("@Continuous _ _ _ _ f", vec![arg("_"); 5]),
+        ] {
+            assert_eq!(parse(pattern).query.shape.args, args, "{pattern}");
+        }
+    }
+
+    /// An application binds its arguments as tightly as a postfix operator
+    /// binds, and the operator binds to the term before it: `Real.log x⁻¹` is
+    /// a logarithm, and `Real.log_inv`, which says so, was `no match`.
+    #[test]
+    fn a_postfix_operator_heads_only_the_term_it_follows() {
+        let p = parse("Real.log x⁻¹ = -Real.log x");
+        assert_eq!(p.query.shape.args, vec![arg("Real.log"), arg("Neg.neg")]);
+        assert!(p.query.uses.contains(&DeclName::new("Inv.inv")), "{:?}", p.query.uses);
+        assert_eq!(parse("(Real.log x)⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
+        assert_eq!(parse("x⁻¹⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
+        assert_eq!(parse("Real.exp x⁻¹ * y ≤ _").query.shape.args[0], arg("HMul.hMul"));
     }
 
     #[test]
