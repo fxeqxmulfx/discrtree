@@ -794,3 +794,25 @@ fn what_mentions_a_name_is_read_from_proofs_and_statements() {
         db.find(&named).unwrap().into_iter().map(|d| d.name.to_string()).collect();
     assert_eq!(found, vec!["Or.elim".to_string()]);
 }
+
+/// `dt refresh` records the revision a source had when its read began, and
+/// names the sources a build moved before the refresh ended.
+#[test]
+fn a_source_that_moved_during_its_read_is_named() {
+    let before: std::collections::BTreeMap<SourceId, Option<String>> = [
+        (SourceId::new("project"), Some("aaaa".to_string())),
+        (SourceId::new("mathlib"), Some("bbbb".to_string())),
+        (SourceId::new("core"), None),
+    ]
+    .into();
+    let now = FakeRevisions::at(&[("project", "cccc"), ("mathlib", "bbbb"), ("core", "v4")]);
+    let moved = status::moved_while_read(&now, &before).unwrap();
+    assert_eq!(
+        moved,
+        vec![status::Stale {
+            id: SourceId::new("project"),
+            why: status::Why::Moved { indexed: "aaaa".into(), current: "cccc".into() },
+        }],
+        "an unknown revision is not a move"
+    );
+}

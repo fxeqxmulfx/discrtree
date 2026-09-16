@@ -664,6 +664,24 @@ pub fn stale(s: &Stale, kind: Option<SourceKind>) -> String {
     format!("dt: `{id}` {what}; rows may be missing — `dt refresh {id}`\n")
 }
 
+/// A source that moved while `dt refresh` read it. The index holds the build
+/// the read started from, so it is behind already, and the repair is the same
+/// refresh once whatever was building has finished.
+pub fn moved_while_read(s: &Stale, kind: Option<SourceKind>) -> String {
+    let id = &s.id;
+    let what = match (&s.why, kind) {
+        (Why::Moved { .. }, Some(SourceKind::Local)) => "was rebuilt".to_string(),
+        (Why::Moved { indexed, current }, _) => {
+            format!("went from {} to {}", short_rev(indexed), short_rev(current))
+        }
+        (Why::Written { .. }, _) => "changed".to_string(),
+    };
+    format!(
+        "dt: `{id}` {what} while it was being read, so the index is already behind it — \
+         `dt refresh {id}` once the build has finished\n"
+    )
+}
+
 /// The `dt` that wrote a source's rows. A version too old to have recorded its
 /// own is named by what is known about it rather than by a guess: it is every
 /// version before the one that started recording, and "an older dt" is the
@@ -1273,6 +1291,28 @@ mod tests {
         let line = stale(&s, Some(SourceKind::Local));
         assert!(line.contains("`project` was rebuilt since it was indexed"), "{line}");
         assert!(!line.contains("b57d6d7"), "a build fingerprint is not worth reading: {line}");
+    }
+
+    #[test]
+    fn a_build_that_lands_during_a_refresh_is_named_at_the_end_of_it() {
+        let moved = |id: &str| Stale {
+            id: crate::domain::source::SourceId::new(id),
+            why: Why::Moved {
+                indexed: "b57d6d7986c61d4a".into(),
+                current: "04e1042c1f0b2e55".into(),
+            },
+        };
+        let line = moved_while_read(&moved("project"), Some(SourceKind::Local));
+        assert!(line.contains("`project` was rebuilt while it was being read"), "{line}");
+        assert!(line.contains("`dt refresh project` once the build has finished"), "{line}");
+        assert!(!line.contains("b57d6d7"), "{line}");
+        let mut sha = moved("mathlib");
+        sha.why = Why::Moved {
+            indexed: "5ed2965256430c3649e86755f9576b54eca72435".into(),
+            current: "4f8b12c56430c3649e86755f9576b54eca724359".into(),
+        };
+        let line = moved_while_read(&sha, Some(SourceKind::Lake));
+        assert!(line.contains("went from 5ed2965 to 4f8b12c"), "{line}");
     }
 
     /// A toolchain is not a hash and must not be cut to seven characters:

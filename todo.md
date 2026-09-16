@@ -1626,3 +1626,38 @@ would mean a row kind that is not a declaration; that is left out of scope.
 build moved is let off when the `.olean` of every module `show` printed is
 older than the index. A search still warns: what it did not find may be in a
 module that was rebuilt.
+
+**`--kind` takes one kind, and a list is blamed as matching nothing.**
+Looking for the definitions `Transformer.CRASP.Depth` rests on:
+
+    $ dt find --source project --name CRASP.Affix --kind def,structure,abbrev
+    no match: --kind def,structure,abbrev matches nothing on its own
+
+`--uses` takes a comma list, so `--kind` reads as if it does too; here the
+whole string is taken as one kind, which no row has, and the answer is the
+same line an empty search gives. An unknown kind should be an error naming the
+kinds there are (as an unknown `--source` already is), or `--kind` should take
+a list like `--uses`. `abbrev` is not among the kinds either: an `abbrev` is
+indexed as `def`, which `--help` could say.
+
+Fixed in 0.30.0.
+
+**`dt refresh` records the build it read, and says when a build landed while
+it read.** The revision was already taken after the dump, when `dt index`
+started, and neither the dump (`lake env lean`, which builds nothing) nor the
+load writes under `.lake/build/lib`. So the change came from outside. The
+likely one here: a session working on dt ran `touch` on
+`Transformer/CRASP/Basic.olean` through a probe directory whose `.lake` turned
+out to be a symlink to this project's. That changed the build fingerprint
+(path, size and mtime of every `.olean`) with no build at all. A `lake build`
+still running, or the editor compiling an import, does the same.
+
+What changed in `dt refresh`: the revision of each compiled source it dumps is
+taken before the dump and recorded as the index's revision, since those are
+the rows it holds. When the refresh ends, the revision is read again, and a
+source that moved in between is named then rather than by the next search:
+
+    dt: `project` was rebuilt while it was being read, so the index is already
+    behind it — `dt refresh project` once the build has finished
+
+`dt index` on its own still records the revision it finds when it starts.

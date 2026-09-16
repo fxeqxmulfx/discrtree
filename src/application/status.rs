@@ -127,6 +127,32 @@ pub fn stale_among(
     Ok(out)
 }
 
+/// The sources whose revision moved while they were being read.
+///
+/// `before` is each source's revision as the read began; the index records
+/// that one, since it is the build the read started from. A build that
+/// finishes in the minutes a dump takes -- a `lake build` still running, the
+/// editor compiling an import -- leaves the index behind the moment the refresh
+/// ends, and the next search saying "rebuilt since it was indexed" about a
+/// refresh that just finished reads as a bug in the refresh. Said here, at the
+/// end of the refresh, it is the explanation instead.
+pub fn moved_while_read(
+    revisions: &dyn Revisions,
+    before: &BTreeMap<SourceId, Option<String>>,
+) -> Result<Vec<Stale>> {
+    let mut out = Vec::new();
+    for (id, was) in before {
+        let now = revisions.current(id)?;
+        if let (true, Some(indexed), Some(current)) = (moved(was, &now), was, now) {
+            out.push(Stale {
+                id: id.clone(),
+                why: Why::Moved { indexed: indexed.clone(), current },
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// [`stale_among`], for a command that printed these rows and nothing else.
 ///
 /// A rebuilt project is stale as a source, and "rows may be missing" is true

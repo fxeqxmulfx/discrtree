@@ -66,7 +66,7 @@ impl App {
             }
             Command::Index { source, source_flag, rebuild, force } => {
                 let only = self.only(named(source, source_flag).as_deref())?;
-                self.index(only.as_deref(), rebuild, force)
+                self.index(only.as_deref(), rebuild, force, &BTreeMap::new())
             }
             Command::Refresh { source, source_flag } => {
                 self.refresh(named(source, source_flag).as_deref())
@@ -491,7 +491,16 @@ impl App {
         }
     }
 
-    fn index(&self, only: Option<&[String]>, rebuild: bool, force: bool) -> Result<()> {
+    /// `read_at` is the revision each compiled source had when `dt refresh`
+    /// began to dump it; a source missing from it is recorded at whatever it
+    /// is at now, which for a dump made some other time is all there is.
+    fn index(
+        &self,
+        only: Option<&[String]>,
+        rebuild: bool,
+        force: bool,
+        read_at: &BTreeMap<SourceId, Option<String>>,
+    ) -> Result<()> {
         let wanted = |s: &Source| only.is_none_or(|only| only.contains(&s.name));
         let db = self.cfg.db_path();
         if rebuild && db.exists() {
@@ -518,8 +527,12 @@ impl App {
             // library: a Mathlib bump that has not been dumped again changes
             // nothing here, and re-reading 700 MB to discover that is the work
             // this avoids.
+            let revision = match read_at.get(&id) {
+                Some(r) => r.clone(),
+                None => revs.current(&id)?,
+            };
             let was = Provenance {
-                revision: revs.current(&id)?,
+                revision,
                 stamp: revision::file_stamp(&path),
                 indexed_at: now(),
                 decls: 0,
@@ -607,6 +620,17 @@ impl App {
         // project failed before Mathlib has finished dumping.
         let many = targets.len() > 1;
         let names: Vec<String> = targets.iter().map(|(n, _)| n.clone()).collect();
+        // Taken before the dump, not after it: the rows are the build the dump
+        // started from, and a build that lands while it runs is one they do
+        // not have.
+        let revs = OnDisk::read(&self.cfg);
+        let mut read_at = BTreeMap::new();
+        for (name, reread) in &targets {
+            if *reread && self.cfg.source(name)?.elaborated() {
+                let id = SourceId::new(name.clone());
+                read_at.insert(id.clone(), revs.current(&id)?);
+            }
+        }
         let (read, failed) = read_each(&names, |name| {
             let reread = targets.iter().any(|(n, reread)| n == name && *reread);
             if !reread {
@@ -626,7 +650,13 @@ impl App {
             // fingerprint check has already been answered, and answering it
             // again from a file this command just rewrote is how a refresh
             // does nothing.
-            self.index(Some(&read), false, true)?;
+            self.index(Some(&read), false, true, &read_at)?;
+            read_at.retain(|id, _| read.iter().any(|n| n == id.as_str()));
+            let moved = status::moved_while_read(&OnDisk::read(&self.cfg), &read_at)?;
+            for s in moved {
+                let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
+                eprint!("{}", render::moved_while_read(&s, kind));
+            }
         }
         outcome(targets.len(), failed)
     }
