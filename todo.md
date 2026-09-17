@@ -2505,3 +2505,19 @@ project:
 
     Section1_Antipodal.olean touched     no line (printed with 0.49.0)
     CRASP/Frame.olean touched            line printed
+
+## `dt show` wants the full name of a namespaced declaration, and drops the rest
+
+    dt show "countP_range'_eq_countP" "countP_range'_add" Term.val Term.countSubs
+
+prints only
+
+    dt: countP_range'_eq_countP is not in the index; try `dt find --name countP_range'_eq_countP`
+
+and nothing for the other three names, although `Transformer.CRASP.countP_range'_add`
+and the rest are indexed.  Inside `namespace Transformer.CRASP` the short name is
+what the source writes, and `dt find --name` finds it at once: `show` could resolve
+a unique suffix match (or list the candidates), and go on to the next name after a
+miss instead of stopping.
+
+Seen with dt 0.50.0, 2026-09-17.
