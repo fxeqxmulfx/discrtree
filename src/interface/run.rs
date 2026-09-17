@@ -185,11 +185,21 @@ impl App {
         if shown.is_empty() {
             // Every name missed, which is the case the warning is for: check
             // every source it was looked for in before handing back "not in
-            // the index".
+            // the index". Each miss is its own answer, so all of them are said.
             self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
-            return Err(missed.into_iter().next().expect("a batch has at least one name"));
+            let last = missed.pop().expect("a batch has at least one name");
+            for e in &missed {
+                eprintln!("dt: {e}");
+            }
+            return Err(last);
         }
         print!("{}", render::show_all(&shown, import_only));
+        // Without `--import-only` the full name is printed under the import.
+        for s in shown.iter().filter(|_| import_only) {
+            if let Some(asked) = &s.asked {
+                eprintln!("dt: {asked} read as {}", s.decl.name);
+            }
+        }
         for e in &missed {
             eprintln!("dt: {e}");
         }

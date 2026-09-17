@@ -1265,6 +1265,7 @@ mod tests {
             decl: decl(true),
             import: Some("import Mathlib.Analysis.Complex.Exponential".into()),
             source: Source::Text("theorem exp_le_exp : True := trivial".into()),
+            asked: None,
         };
         let out = show(&s, false);
         assert!(out.starts_with("import Mathlib.Analysis.Complex.Exponential\n"));
@@ -1278,6 +1279,7 @@ mod tests {
             decl: decl(true),
             import: Some("import Mathlib.Analysis.Complex.Exponential".into()),
             source: Source::Missing("no range".into()),
+            asked: None,
         };
         let two = Shown { decl: decl(true), ..one.clone() };
         let r = show_all(&[one, two], true);
@@ -1286,8 +1288,12 @@ mod tests {
 
     #[test]
     fn show_says_so_when_a_source_cannot_be_imported() {
-        let s =
-            Shown { decl: decl(false), import: None, source: Source::Missing("no range".into()) };
+        let s = Shown {
+            decl: decl(false),
+            import: None,
+            source: Source::Missing("no range".into()),
+            asked: None,
+        };
         assert!(show(&s, true).contains("not importable"));
     }
 

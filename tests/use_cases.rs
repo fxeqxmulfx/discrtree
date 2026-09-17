@@ -72,6 +72,36 @@ fn show_gives_the_import_that_actually_provides_the_declaration() {
     assert_eq!(shown.source, Source::Text("theorem exp_le_exp : True :=\n  trivial".into()));
 }
 
+/// Inside `namespace Transformer.CRASP` a theorem is written without its
+/// namespace, and that is the name a reader copies out of the file.
+#[test]
+fn show_reads_a_name_as_the_end_of_the_one_declaration_it_ends() {
+    let (mut repo, files, ws) = (repo(), files(), workspace());
+    let show = |repo: &FakeRepo| {
+        Show { repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
+            .run(&DeclName::new("exp_le_exp"))
+    };
+    let shown = show(&repo).unwrap();
+    assert_eq!(shown.decl.name.as_str(), "Real.exp_le_exp");
+    assert_eq!(shown.asked.as_ref().map(DeclName::as_str), Some("exp_le_exp"));
+
+    let mut ours =
+        theorem("Transformer.CRASP.exp_le_exp", "project", "Transformer.CRASP", "Eq", &[]);
+    ours.span = Some(Span::new(1, 2));
+    repo.decls.push(ours);
+    assert_eq!(
+        show(&repo).unwrap().decl.name.as_str(),
+        "Transformer.CRASP.exp_le_exp",
+        "the project's own"
+    );
+
+    let mut theirs = theorem("Transformer.ALM.exp_le_exp", "project", "Transformer.ALM", "Eq", &[]);
+    theirs.span = Some(Span::new(1, 2));
+    repo.decls.push(theirs);
+    let e = show(&repo).unwrap_err().to_string();
+    assert!(e.starts_with("3 declarations end in exp_le_exp; name one: Transformer."), "{e}");
+}
+
 /// `Finset.sum_image` in miniature: Lean points a `to_additive` twin at the
 /// attribute block inside the theorem that generated it, so the range holds an
 /// attribute and no declaration at all.

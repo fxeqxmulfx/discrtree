@@ -133,7 +133,10 @@ reason `dt find` prints the module on the same line as the name: the module
 *is* the import, so a hit is actionable without a second call. For the same
 reason `dt show` takes any number of names, prints each import line once, and
 reports a name it could not find on stderr rather than failing the batch — a
-misremembered name costs one line, not the other four lookups.
+misremembered name costs one line, not the other four lookups.  A name as the
+source writes it inside its namespace, `countP_range'_add` for
+`Transformer.CRASP.countP_range'_add`, is shown when it ends one declaration,
+or one of the project's own.
 
 `dt skill` prints the whole interface in 32 lines — the rules that are not
 guessable, and nothing else. It is meant to be read once by an agent instead of

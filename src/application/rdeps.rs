@@ -75,4 +75,4 @@ impl Rdeps<'_> {
 }
 
 /// How many of the declarations an ambiguous field names the error lists.
-const SHOWN: usize = 10;
+pub const SHOWN: usize = 10;

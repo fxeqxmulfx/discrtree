@@ -2521,3 +2521,15 @@ a unique suffix match (or list the candidates), and go on to the next name after
 miss instead of stopping.
 
 Seen with dt 0.50.0, 2026-09-17.
+
+Fixed in 0.51.0.  A name that is not in the index is read as the end of one:
+`dt show` takes the one declaration whose name ends in it, or the one of those
+in the project's namespace, and otherwise lists them.  When every name misses,
+each miss is printed, not only the first.  With `--import-only`, where the
+full name is not printed, stderr says which declaration a name was read as.
+On the transformer project:
+
+    dt show "countP_range'_eq_countP" "countP_range'_add" Term.val Term.countSubs
+                                   all four shown, 0.18 s
+    dt show val                    dt: 90 declarations end in val; name one:
+                                   Transformer.CRASP.Term.val, …, and 80 more
