@@ -277,6 +277,24 @@ exists for and the case where checking is free. `no match` from a stale index is
 worse than a wrong hit — it reads as "upstream has no such lemma, write it
 yourself" when the lemma was in the project all along.
 
+For the project that is not the end of it. A rebuild leaves its `.ilean` files
+behind, so a name or text search that finds no rows is answered from the build
+instead:
+
+```
+dt: `project` was rebuilt since it was indexed: Transformer.CRASP.MajTwoCount, ...; rows may be missing — `dt refresh project`
+dt: compiled since the index was written, so not a row yet:
+dt:   Transformer.CRASP.Maj2.mass_append [Transformer.CRASP.MajTwoCount]
+dt:     theorem mass_append (w : List s) (l1 l2 : List (Maj2 s)) : mass w u (l1 ++ l2) = mass w u l1 + mass w u l2
+```
+
+The statement is the one the source spells, so the lemma is usable before a
+refresh has run, and `dt show` of such a name says it is compiled but not
+indexed rather than absent. A rebuild that declares nothing the index lacks is
+not reported at all. A shape or `--uses` search cannot be answered this way —
+an `.ilean` records where a declaration is, not what it elaborated to — so those
+get the warning alone, with the rebuilt modules named.
+
 `dt index` leaves alone any source whose input has not changed since it was
 indexed. The input is the dump for a compiled source and the checkout for a
 text one, fingerprinted by size and mtime in the first case and by revision in

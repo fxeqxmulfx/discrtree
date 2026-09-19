@@ -15,6 +15,7 @@ use crate::application::ports::{
     Build, DeclRepo, Located, Package, Provenance, Revisions, Toolchain, Workspace,
 };
 use crate::domain::name::{DeclName, ModuleName};
+use crate::domain::query::Query;
 use crate::domain::source::{SourceId, SourceKind};
 use crate::error::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -167,50 +168,129 @@ pub fn stale_for_search(
     repo: &dyn DeclRepo,
     revisions: &dyn Revisions,
     among: impl IntoIterator<Item = SourceId>,
-) -> Result<Vec<Stale>> {
+) -> Result<Vec<(Stale, Vec<Behind>)>> {
     let mut kept = Vec::new();
     for s in stale_among(repo, revisions, among)? {
-        if !indexed_as_built(repo, revisions, &s)? {
-            kept.push(s);
+        match behind(repo, revisions, &s)? {
+            // Nothing the build declares is missing: the rows are the build's.
+            Some(b) if b.is_empty() => {}
+            behind => kept.push((s, behind.unwrap_or_default())),
         }
     }
     Ok(kept)
 }
 
-/// Whether a source that moved only rebuilt what the index already holds.
-fn indexed_as_built(repo: &dyn DeclRepo, revisions: &dyn Revisions, s: &Stale) -> Result<bool> {
+/// A module the build has compiled since the index was written, and the
+/// declarations in it the index does not hold as the build has them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Behind {
+    pub module: ModuleName,
+    /// Name → where the build puts it and how the source spells it, for the
+    /// declarations that are new, moved or restated. From the `.ilean`, so
+    /// there is no type and no kind: this is what is known without a dump.
+    pub decls: BTreeMap<DeclName, Located>,
+}
+
+/// What a source that moved has rebuilt and the index does not hold, or `None`
+/// when that cannot be read -- which is every reason to rebuild an index that
+/// the modules cannot show.
+fn behind(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    s: &Stale,
+) -> Result<Option<Vec<Behind>>> {
     if !matches!(s.why, Why::Moved { .. }) {
-        return Ok(false);
+        return Ok(None);
     }
-    let Some(was) = repo.provenance(&s.id)? else { return Ok(false) };
+    let Some(was) = repo.provenance(&s.id)? else { return Ok(None) };
     let Some(declared) = revisions.declared_since(&s.id, was.indexed_at) else {
-        return Ok(false);
+        return Ok(None);
     };
     // A build that moved and compiled nothing since has changed in a way the
     // modules cannot show -- a file deleted, or compiled while it was dumped.
     if declared.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
-    // Read only when a module differs: a module the root does not import
-    // differs from an index that never held it, and no refresh would change
-    // that.
+    // The imports are read only when a module differs: a module the root does
+    // not import differs from an index that never held it, and no refresh
+    // would change that.
     let mut imported = None;
-    for (module, decls) in &declared {
-        let Some(rows) = repo.located_in(&s.id, module)? else { return Ok(false) };
-        let indexed = |(name, built): (&DeclName, &Located)| {
-            built.span.is_some() && built.statement.is_some() && rows.get(name) == Some(built)
-        };
-        if decls.iter().all(indexed) {
+    let mut out = Vec::new();
+    for (module, decls) in declared {
+        let Some(rows) = repo.located_in(&s.id, &module)? else { return Ok(None) };
+        let missing: BTreeMap<DeclName, Located> = decls
+            .into_iter()
+            .filter(|(name, built)| {
+                built.span.is_none() || built.statement.is_none() || rows.get(name) != Some(built)
+            })
+            .collect();
+        if missing.is_empty() {
             continue;
         }
         let Some(imported) = imported.get_or_insert_with(|| revisions.imported(&s.id)) else {
-            return Ok(false);
+            return Ok(None);
         };
-        if imported.contains(module) {
-            return Ok(false);
+        if !imported.contains(&module) {
+            continue;
+        }
+        out.push(Behind { module, decls: missing });
+    }
+    Ok(Some(out))
+}
+
+/// The declarations a rebuilt module has and the index does not, as far as the
+/// query the search just missed can be asked of them.
+///
+/// Only a name and free text can be: an `.ilean` gives the name, the lines and
+/// the statement as the source spells it, and no elaborated type at all, so a
+/// shape or a `--uses` condition has nothing to match. A query carrying one is
+/// not answered from here rather than answered loosely.
+pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Declaration> {
+    if !q.shape.is_empty() || !q.uses.is_empty() || (q.name.is_none() && q.text.is_empty()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (s, behind) in stale {
+        if q.source.as_ref().is_some_and(|id| id != &s.id) {
+            continue;
+        }
+        for b in behind {
+            if !q.module.as_ref().is_none_or(|m| b.module.is_under(m)) {
+                continue;
+            }
+            for (name, at) in &b.decls {
+                let named = q
+                    .name
+                    .as_ref()
+                    .is_none_or(|n| name.as_str().to_lowercase().contains(&n.to_lowercase()));
+                let statement = at.statement.clone().unwrap_or_default();
+                let spelled = q.text.iter().all(|t| {
+                    statement.to_lowercase().contains(&t.to_lowercase())
+                        || name.as_str().to_lowercase().contains(&t.to_lowercase())
+                });
+                if named && spelled {
+                    out.push(Declaration {
+                        source: s.id.clone(),
+                        module: b.module.clone(),
+                        name: name.clone(),
+                        statement: at.statement.clone(),
+                    });
+                }
+            }
         }
     }
-    Ok(true)
+    out
+}
+
+/// A declaration the build has and the index does not. See
+/// [`declared_matching`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub source: SourceId,
+    pub module: ModuleName,
+    pub name: DeclName,
+    /// How the source spells it, when its file could be read.
+    pub statement: Option<String>,
 }
 
 /// [`stale_among`], for a command that printed these rows and nothing else.
@@ -239,7 +319,7 @@ pub fn stale_for_rows(
                     .all(|m| revisions.rebuilt_since(&s.id, m, was.indexed_at) == Some(false)),
                 None => false,
             };
-        if !untouched && !indexed_as_built(repo, revisions, &s)? {
+        if !untouched && behind(repo, revisions, &s)?.is_none_or(|b| !b.is_empty()) {
             kept.push(s);
         }
     }

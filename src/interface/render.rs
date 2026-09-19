@@ -10,9 +10,10 @@ use crate::application::find::{Asked, Duplicate, Empty, Hits};
 use crate::application::ports::Missing;
 use crate::application::rdeps::Users;
 use crate::application::show::{Shown, Source};
-use crate::application::status::{Report, SourceStatus, Stale, Why};
+use crate::application::status::{Behind, Declaration, Report, SourceStatus, Stale, Why};
 use crate::domain::decl::{ArgHead, Decl};
 use crate::domain::lean_core;
+use crate::domain::lean_text;
 use crate::domain::pattern;
 use crate::domain::source::SourceKind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -648,7 +649,11 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
 /// The project is the one source whose revision is not a name: it is a
 /// fingerprint of the build tree, which nobody can read and nobody pastes into
 /// `git show`. So it gets the fact instead of the values.
-pub fn stale(s: &Stale, kind: Option<SourceKind>) -> String {
+/// The modules whose declarations the index does not hold are named when they
+/// are known: "rows may be missing" over a project of three hundred modules
+/// names none of them, and the four that were just compiled are the answer to
+/// the question the line raises.
+pub fn stale(s: &Stale, kind: Option<SourceKind>, behind: &[Behind]) -> String {
     let id = &s.id;
     let what = match (&s.why, kind) {
         // The rows are as old as the dt that wrote them, and that dt is the
@@ -656,14 +661,61 @@ pub fn stale(s: &Stale, kind: Option<SourceKind>) -> String {
         (Why::Written { by }, _) => {
             format!("was indexed by {}, and this is dt {}", wrote(by.as_deref()), version())
         }
-        (Why::Moved { .. }, Some(SourceKind::Local)) => {
+        (Why::Moved { .. }, Some(SourceKind::Local)) if behind.is_empty() => {
             "was rebuilt since it was indexed".to_string()
+        }
+        (Why::Moved { .. }, Some(SourceKind::Local)) => {
+            let shown: Vec<&str> = behind.iter().take(BEHIND).map(|b| b.module.as_str()).collect();
+            let more = match behind.len().saturating_sub(BEHIND) {
+                0 => String::new(),
+                n => format!(", and {n} more"),
+            };
+            format!("was rebuilt since it was indexed: {}{more}", shown.join(", "))
         }
         (Why::Moved { indexed, current }, _) => {
             format!("is at {}, the index at {}", short_rev(current), short_rev(indexed))
         }
     };
     format!("dt: `{id}` {what}; rows may be missing — `dt refresh {id}`\n")
+}
+
+/// How many rebuilt modules the staleness line names.
+const BEHIND: usize = 4;
+
+/// How much of a statement the line carries. A statement this long is one
+/// whose binders are most of it, and the name and the module are already
+/// enough to go and read it.
+const CLIP: usize = 240;
+
+fn clipped(s: &str) -> String {
+    match s.chars().count() > CLIP {
+        true => s.chars().take(CLIP).collect::<String>() + " …",
+        false => s.to_string(),
+    }
+}
+
+/// The declarations a search would have matched if the index held them, from
+/// the `.ilean` of a module compiled since it was written.
+///
+/// This is the answer `no match` could not give: the name is in the project,
+/// it was compiled, and nothing but a refresh is missing. The statement is
+/// printed as the source spells it, which is what the reader would have got
+/// from a row -- minus the elaborated type, which no `.ilean` holds.
+pub fn declared_behind(found: &[Declaration]) -> String {
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("dt: compiled since the index was written, so not a row yet:\n");
+    for d in found.iter().take(BEHIND) {
+        out.push_str(&format!("dt:   {} [{}]\n", d.name, d.module));
+        if let Some(statement) = &d.statement {
+            out.push_str(&format!("dt:     {}\n", clipped(lean_text::statement_only(statement))));
+        }
+    }
+    if let Some(n) = found.len().checked_sub(BEHIND).filter(|n| *n > 0) {
+        out.push_str(&format!("dt:   and {n} more\n"));
+    }
+    out
 }
 
 /// A source that moved while `dt refresh` read it. The index holds the build
@@ -1327,7 +1379,7 @@ mod tests {
                 current: "4f8b12c56430c3649e86755f9576b54eca724359".into(),
             },
         };
-        let line = stale(&s, Some(SourceKind::Lake));
+        let line = stale(&s, Some(SourceKind::Lake), &[]);
         assert!(line.contains("is at 4f8b12c, the index at 5ed2965"), "{line}");
         assert!(line.contains("`dt refresh mathlib`"), "{line}");
         assert!(!line.contains("moved"), "a revision is not a path: {line}");
@@ -1345,7 +1397,7 @@ mod tests {
                 current: "04e1042c1f0b2e55".into(),
             },
         };
-        let line = stale(&s, Some(SourceKind::Local));
+        let line = stale(&s, Some(SourceKind::Local), &[]);
         assert!(line.contains("`project` was rebuilt since it was indexed"), "{line}");
         assert!(!line.contains("b57d6d7"), "a build fingerprint is not worth reading: {line}");
     }
@@ -1392,7 +1444,9 @@ mod tests {
                 current: "leanprover/lean4:v4.34.0".into(),
             },
         };
-        assert!(stale(&s, Some(SourceKind::Core)).contains("v4.34.0, the index at leanprover"));
+        assert!(
+            stale(&s, Some(SourceKind::Core), &[]).contains("v4.34.0, the index at leanprover")
+        );
     }
 
     /// The other way an index falls behind, and the one no revision can show:
@@ -1406,13 +1460,13 @@ mod tests {
             id: crate::domain::source::SourceId::new("mathlib"),
             why: Why::Written { by: v.map(str::to_string) },
         };
-        let line = stale(&by(Some("0.22.0")), Some(SourceKind::Lake));
+        let line = stale(&by(Some("0.22.0")), Some(SourceKind::Lake), &[]);
         assert!(line.contains("was indexed by dt 0.22.0"), "{line}");
         assert!(line.contains(&format!("this is dt {}", env!("CARGO_PKG_VERSION"))), "{line}");
         assert!(line.contains("`dt refresh mathlib`"), "{line}");
         // A dt too old to have recorded which it was says that much and no
         // more: a version it never wrote down cannot be guessed at.
-        assert!(stale(&by(None), Some(SourceKind::Lake)).contains("an older dt"));
+        assert!(stale(&by(None), Some(SourceKind::Lake), &[]).contains("an older dt"));
     }
 
     /// `behind:` is the only place the status table can report this, because

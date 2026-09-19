@@ -179,19 +179,32 @@ impl App {
         for n in names {
             match decl_name(n).and_then(|name| show.run(&name)) {
                 Ok(s) => shown.push(s),
-                Err(e) => missed.push(e),
+                Err(e) => missed.push((n.clone(), e)),
             }
         }
         if shown.is_empty() {
             // Every name missed, which is the case the warning is for: check
             // every source it was looked for in before handing back "not in
             // the index". Each miss is its own answer, so all of them are said.
-            self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
-            let last = missed.pop().expect("a batch has at least one name");
-            for e in &missed {
+            let stale = self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
+            let (name, last) = missed.pop().expect("a batch has at least one name");
+            for (_, e) in &missed {
                 eprintln!("dt: {e}");
             }
-            return Err(last);
+            let asked: Vec<String> =
+                missed.iter().map(|(n, _)| n.clone()).chain([name.clone()]).collect();
+            eprint!("{}", render::declared_behind(&self.behind_named(&stale, &asked)));
+            // When the name is one the build has compiled, "not in the index"
+            // is true and useless: `dt find` would miss it the same way, and
+            // the repair is the refresh.
+            let mine = self.behind_named(&stale, std::slice::from_ref(&name));
+            return Err(match mine.first() {
+                Some(d) => Error::new(format!(
+                    "{} is compiled but not indexed — `dt refresh {}`",
+                    d.name, d.source
+                )),
+                None => last,
+            });
         }
         print!("{}", render::show_all(&shown, import_only));
         // Without `--import-only` the full name is printed under the import.
@@ -200,11 +213,13 @@ impl App {
                 eprintln!("dt: {asked} read as {}", s.decl.name);
             }
         }
-        for e in &missed {
+        for (_, e) in &missed {
             eprintln!("dt: {e}");
         }
         if !missed.is_empty() {
-            self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
+            let stale = self.warn_stale(repo.as_ref(), only_in.into_iter().cloned().collect());
+            let asked: Vec<String> = missed.iter().map(|(n, _)| n.clone()).collect();
+            eprint!("{}", render::declared_behind(&self.behind_named(&stale, &asked)));
             return Ok(());
         }
         let mut rows: BTreeMap<SourceId, BTreeSet<ModuleName>> = BTreeMap::new();
@@ -348,7 +363,10 @@ impl App {
             false => hits.rows.iter().map(|d| d.source.clone()).collect(),
             true => find::sources_of(repo.as_ref(), &query),
         };
-        self.warn_stale(repo.as_ref(), from);
+        let stale = self.warn_stale(repo.as_ref(), from);
+        if hits.rows.is_empty() {
+            eprint!("{}", render::declared_behind(&status::declared_matching(&stale, &query)));
+        }
         Ok(())
     }
 
@@ -365,7 +383,14 @@ impl App {
     /// result with no rows names no sources, and it is exactly the result the
     /// warning exists for. It is also the one where checking costs nothing,
     /// because there were no rows to read in the first place.
-    fn warn_stale(&self, repo: &dyn DeclRepo, from: BTreeSet<SourceId>) {
+    /// The modules each stale source has rebuilt come back, for a search that
+    /// found nothing: the `.ilean` files that answered "may be missing" also
+    /// say what is missing. See [`status::declared_matching`].
+    fn warn_stale(
+        &self,
+        repo: &dyn DeclRepo,
+        from: BTreeSet<SourceId>,
+    ) -> Vec<(status::Stale, Vec<status::Behind>)> {
         let among: Vec<SourceId> = match from.is_empty() {
             true => self.workspace.sources.iter().map(|s| s.id.clone()).collect(),
             false => from.into_iter().collect(),
@@ -373,14 +398,35 @@ impl App {
         let revs = OnDisk::read(&self.cfg);
         // A search that failed because its warning failed would be a worse
         // outcome than the staleness the warning was about to report.
-        let Ok(stale) = status::stale_for_search(repo, &revs, among) else { return };
-        self.print_stale(stale);
+        let Ok(stale) = status::stale_for_search(repo, &revs, among) else { return Vec::new() };
+        for (s, behind) in &stale {
+            let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
+            eprint!("{}", render::stale(s, kind, behind));
+        }
+        stale
+    }
+
+    /// Each name a command could not find, looked for among the declarations
+    /// the build has compiled since the index was written. A name is a whole
+    /// name here, not a search: `dt show` was given one.
+    fn behind_named(
+        &self,
+        stale: &[(status::Stale, Vec<status::Behind>)],
+        names: &[String],
+    ) -> Vec<status::Declaration> {
+        names
+            .iter()
+            .flat_map(|n| {
+                let asked = Query { name: Some(n.clone()), ..Query::new() };
+                status::declared_matching(stale, &asked)
+            })
+            .collect()
     }
 
     fn print_stale(&self, stale: Vec<status::Stale>) {
         for s in stale {
             let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
-            eprint!("{}", render::stale(&s, kind));
+            eprint!("{}", render::stale(&s, kind, &[]));
         }
     }
 

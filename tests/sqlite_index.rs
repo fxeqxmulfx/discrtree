@@ -11,8 +11,10 @@ use discrtree::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
+use discrtree::domain::source::SourceKind;
 use discrtree::infrastructure::revision;
 use discrtree::infrastructure::sqlite::SqliteIndex;
+use discrtree::interface::render;
 use support::{FakeRevisions, TempDir, theorem};
 
 fn loaded() -> SqliteIndex {
@@ -554,6 +556,11 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
     let proved = "namespace T\n\ntheorem depth_le (f : Form) :\n    f.depth ≤ 1 := by\n  simp\n";
     save(proved, ago(300));
     std::fs::write(pkg.join("Basic.olean"), "compiled").unwrap();
+    std::fs::write(
+        lib.join("lean/Transformer.ilean"),
+        r#"{"version":5,"directImports":[["Transformer.CRASP.Basic",false,false,false]],"decls":{}}"#,
+    )
+    .unwrap();
     let dumped = revision::build_stamp(&lib).unwrap();
     let indexed_at = ago(100).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
@@ -581,8 +588,8 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
 
     std::fs::write(pkg.join("Basic.olean"), "compiled again").unwrap();
     let declaring = |decls: &str| {
-        std::fs::write(pkg.join("Basic.ilean"), format!(r#"{{"version":5,"decls":{{{decls}}}}}"#))
-            .unwrap();
+        let json = format!(r#"{{"version":5,"directImports":[],"decls":{{{decls}}}}}"#);
+        std::fs::write(pkg.join("Basic.ilean"), json).unwrap();
         status::stale_for_search(&db, &disk, [id.clone()]).unwrap().len()
     };
     assert_eq!(status::stale_among(&db, &disk, [id.clone()]).unwrap().len(), 1);
@@ -591,6 +598,29 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
     let private = r#""_private.Transformer.CRASP.Basic.0.T.aux":[1,0,2,7,1,4,1,7]"#;
     assert_eq!(declaring(&format!("{same},{private}")), 0, "a private name has no row");
     assert_eq!(declaring(&format!("{same},\"T.depth_or\":[0,0,1,5,0,8,0,16]")), 1, "new");
+    // The line names the module, and the declaration the index lacks is the
+    // answer a search for it could not give.
+    let stale = status::stale_for_search(&db, &disk, [id.clone()]).unwrap();
+    let behind = &stale[0].1;
+    assert_eq!(behind.len(), 1);
+    assert_eq!(behind[0].module, module);
+    assert_eq!(behind[0].decls.keys().collect::<Vec<_>>(), [&DeclName::new("T.depth_or")]);
+    assert!(
+        render::stale(&stale[0].0, Some(SourceKind::Local), behind)
+            .contains("rebuilt since it was indexed: Transformer.CRASP.Basic;"),
+        "{}",
+        render::stale(&stale[0].0, Some(SourceKind::Local), behind)
+    );
+    let asked = Query { name: Some("depth_o".into()), ..Query::new() };
+    let found = status::declared_matching(&stale, &asked);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, DeclName::new("T.depth_or"));
+    assert_eq!(found[0].statement.as_deref(), Some("namespace T"), "line 1 of the file");
+    let shaped = Query {
+        shape: Shape { concl: Some(DeclName::new("LE.le")), args: Vec::new() },
+        ..asked.clone()
+    };
+    assert!(status::declared_matching(&stale, &shaped).is_empty(), "no .ilean answers a shape");
     assert_eq!(declaring(r#""T.depth_le":[3,0,5,6,3,8,3,16]"#), 1, "it moved");
 
     save("namespace T\n\ntheorem depth_le (f : Form) :\n    f.depth ≤ 1 := by\n  omega\n", now);

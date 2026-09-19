@@ -2533,3 +2533,28 @@ On the transformer project:
                                    all four shown, 0.18 s
     dt show val                    dt: 90 declarations end in val; name one:
                                    Transformer.CRASP.Term.val, …, and 80 more
+
+## A `lake build` makes the project index stale, and a search then silently misses
+
+After every `lake build` of the transformer project, `dt find --name …` answers
+`no match` together with
+
+    dt: `project` was rebuilt since it was indexed; rows may be missing — `dt refresh project`
+
+so a miss cannot be told from a real absence without a refresh (which took
+minutes here).  Since the project is rebuilt after nearly every edit, the note is
+on almost every search.  `dt find` could refresh only the changed modules on
+demand (the `.olean` mtimes are known), or at least search the old rows and say
+which modules are stale instead of a blanket "rows may be missing".
+
+Seen with dt 0.51.0, 2026-09-17.
+
+Fixed in 0.52.0. The warning now names the rebuilt modules the root imports —
+up to four, then "and N more" — and a rebuild that declares nothing the index
+lacks is no longer reported at all. When a `--name` or `--text` search finds no
+rows, or a `dt show` name misses, those modules' `.ilean` files and sources are
+read and the matching declarations are printed with the statement as the source
+spells it, so the answer is usable before a refresh; `dt show` then says the
+name is compiled but not indexed instead of absent. A shape or `--uses` search
+still gets the warning alone. The incremental refresh is left for a later
+version.

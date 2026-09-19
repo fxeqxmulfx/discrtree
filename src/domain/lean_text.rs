@@ -483,6 +483,27 @@ pub fn spelled_statement(text: &str, span: Span) -> Option<String> {
     Some(body[..cut].split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// A spelled statement with the docstring and the attributes in front of it
+/// dropped: what a reader asked for the statement means by it.
+///
+/// Kept out of [`spelled_statement`], which the index stores to compare builds
+/// against: narrowing what is stored would make every row written by an older
+/// `dt` differ from the same declaration read again.
+pub fn statement_only(statement: &str) -> &str {
+    let mut rest = statement.trim();
+    loop {
+        let cut = match rest {
+            r if r.starts_with("/--") || r.starts_with("/-") => r.find("-/").map(|i| i + 2),
+            r if r.starts_with("@[") => r.find(']').map(|i| i + 1),
+            _ => None,
+        };
+        match cut {
+            Some(i) => rest = rest[i..].trim_start(),
+            None => return rest,
+        }
+    }
+}
+
 /// Where the body of a declaration starts, by the rule [`spelled_statement`]
 /// gives.
 fn body_start(s: &str) -> Option<usize> {
@@ -551,6 +572,13 @@ fn body_start(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_statement_read_by_a_reader_starts_at_the_declaration() {
+        let s = "/-- The count over `[1, a + b]`. -/ @[simp] theorem countP_add (a b : N) : True";
+        assert_eq!(statement_only(s), "theorem countP_add (a b : N) : True");
+        assert_eq!(statement_only("def f : N := 0"), "def f : N := 0", "nothing in front");
+    }
 
     #[test]
     fn a_spelled_statement_ends_where_the_body_begins() {
