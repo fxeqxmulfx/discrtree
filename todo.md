@@ -2,6 +2,49 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A `--in` miss blames `--in`, when the module it names is populated and it is `--name` that matches nothing
+
+Found 2026-09-19, dt 0.53.0, on a Lean project of my own beside Mathlib,
+Batteries and core. I was looking for a declaration about addresses in my own
+`Transformer.ALM`:
+
+    $ dt find --name addr --in Transformer.ALM
+    no match: drop --in — without it the rest matches in Std.Net.Addr (90),
+    Mathlib.Algebra.Regular.SMul (26), Mathlib.Algebra.Regular.Basic (22),
+    Mathlib.Algebra.Order.Group.Synonym (18), and 105 more
+
+The advice is literally true — dropping `--in` does produce matches — but it
+points at the one condition that was right. `Transformer.ALM` exists, is
+indexed, and is exactly the module I meant:
+
+    $ dt find --in Transformer.ALM --limit 5
+    Transformer.ALM.NNIndex  structure  Transformer.ALM.LookupIndex
+    ...
+    5 shown, more match; refine or --limit
+
+So the fact I needed was "that module has declarations, none of them named
+`addr`" — i.e. my *name* guess was wrong and my *module* guess was right. The
+message told me the opposite, and the 105 unrelated modules it listed are
+noise: I had already said I did not want them.
+
+The blame heuristic seems to pick the condition whose removal yields the most
+rows. That maximises rows, not information. A condition the user narrowed
+deliberately (`--in`, `--source`) is a statement of intent; a condition that is
+a guess (`--name`, `--text`) is the likelier culprit, and when the narrowing
+condition on its own has a non-empty result that is the fact worth reporting.
+
+What the right output would be:
+
+    no match: Transformer.ALM has 2578 declarations, none named `addr`
+      (drop --in and `addr` matches in Std.Net.Addr (90), and 108 more modules)
+
+That is, when a scope condition alone is non-empty, name it and its size first
+and say which of the remaining conditions emptied it; keep the current message
+for the case where the scope itself is the empty one — which is also the case
+where "drop --in" is genuinely the right advice, and where it would be worth
+distinguishing a module prefix that is indexed but unmatched from one that is
+not in the index at all.
+
 ## Re-indexing after one edit costs 37 s, and 36 of them are spent on work that was already done
 
 Found 2026-09-15, dt 0.8.1, on a Lean project of my own (1864 declarations,
