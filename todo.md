@@ -2558,3 +2558,25 @@ spells it, so the answer is usable before a refresh; `dt show` then says the
 name is compiled but not indexed instead of absent. A shape or `--uses` search
 still gets the warning alone. The incremental refresh is left for a later
 version.
+
+## A miss on a rebuilt project cannot read the project
+
+0.52.0 answers a miss from the `.ilean` files of the rebuilt modules, which
+gives the name, the module and the statement as the source spells it -- but no
+type, no kind, no shape and no dependencies, because nothing has elaborated
+them. The rows would say all of that, and measuring what they cost says the
+refusal to read them was never justified:
+
+    import Lean + import Transformer, nothing dumped     3.0 s
+    one module dumped (19 declarations)                  3.2 s
+    the whole project dumped (2578 declarations)         4.3 s
+    dt index project --force                             1.0 s
+    dt refresh project, end to end                       5.2 s
+    the same import on a cold page cache                  24 s
+
+So a project refresh is seconds, and the incremental dump this entry was
+written for would save 1.3 s of 5.2 s: the import is the cost, and it is the
+same whether one module is dumped or all of them. What is missing is not a
+faster refresh but a refresh a search may run at all.
+
+Seen with dt 0.52.0, 2026-09-19.
