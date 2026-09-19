@@ -11,7 +11,7 @@ use discrtree::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
-use discrtree::domain::source::SourceKind;
+use discrtree::domain::source::{SourceKind, SourceMeta, Sources};
 use discrtree::infrastructure::revision;
 use discrtree::infrastructure::sqlite::SqliteIndex;
 use discrtree::interface::render;
@@ -690,6 +690,73 @@ fn a_rebuilt_module_the_root_does_not_import_is_not_stale_for_a_search() {
     std::fs::write(src.join("Transformer/Other.lean"), "theorem side : True := trivial\n").unwrap();
     imports(&["Init", "Transformer.Other"]);
     assert_eq!(stale(), 1, "once imported, its declarations belong in the index");
+}
+
+/// A search that misses may read the project again, and must never read a
+/// dependency again: the project is seconds and the repair a reader wants,
+/// Mathlib is minutes and a surprise nobody asked a search for.
+#[test]
+fn only_a_stale_local_source_is_read_again_for_a_miss() {
+    let dir = TempDir::new("dt-refreshable");
+    let lib = dir.path().join(".lake/build/lib");
+    let pkg = lib.join("lean/Transformer");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::create_dir_all(src.join("Transformer")).unwrap();
+    std::fs::write(src.join("Transformer/Other.lean"), "theorem side : True := trivial\n").unwrap();
+    std::fs::write(
+        lib.join("lean/Transformer.ilean"),
+        r#"{"version":5,"directImports":[["Transformer.Other",false,false,false]],"decls":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(pkg.join("Other.olean"), "compiled").unwrap();
+    let dumped = revision::build_stamp(&lib).unwrap();
+    let ago = std::time::SystemTime::now() - std::time::Duration::from_secs(100);
+    let indexed_at = ago.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    let project = SourceId::new("project");
+    let mathlib = SourceId::new("mathlib");
+    let mut db = SqliteIndex::in_memory().unwrap();
+    db.put(&[theorem("T.root", "project", "Transformer", "True", &[])]).unwrap();
+    db.finish().unwrap();
+    let was = Provenance {
+        revision: Some(dumped.clone()),
+        indexed_at,
+        decls: 1,
+        ..Provenance::by_this_build()
+    };
+    db.record(&project, &was).unwrap();
+    db.record(&mathlib, &Provenance { revision: Some("v4.34.0".into()), ..was.clone() }).unwrap();
+    let disk = revision::OnDisk {
+        checkouts: Default::default(),
+        builds: [(project.clone(), lib.clone()), (mathlib.clone(), lib.clone())].into(),
+        manifest: Default::default(),
+        toolchains: Default::default(),
+        texts: [(project.clone(), src.clone())].into(),
+        roots: [(project.clone(), ModuleName::new("Transformer"))].into(),
+    };
+    let sources = Sources::new(vec![
+        SourceMeta::derived(project.clone(), SourceKind::Local),
+        SourceMeta::derived(mathlib.clone(), SourceKind::Lake),
+    ]);
+
+    // Both sources are at a build that has moved and declares a row the index
+    // does not hold, so both are stale for a search.
+    std::fs::write(pkg.join("Other.olean"), "compiled again").unwrap();
+    std::fs::write(
+        pkg.join("Other.ilean"),
+        r#"{"version":5,"directImports":[],"decls":{"T.side":[0,0,0,30,0,8,0,12]}}"#,
+    )
+    .unwrap();
+    let stale = status::stale_for_search(&db, &disk, [project.clone(), mathlib.clone()]).unwrap();
+    assert_eq!(stale.len(), 2, "both are behind their build");
+
+    let all = status::refreshable(&db, &disk, &sources, &Query::new()).unwrap();
+    assert_eq!(all, std::slice::from_ref(&project), "only the local source is read again");
+
+    // A search narrowed to a source reads that source and no other.
+    let narrowed = Query { source: Some(mathlib), ..Query::new() };
+    assert!(status::refreshable(&db, &disk, &sources, &narrowed).unwrap().is_empty());
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,

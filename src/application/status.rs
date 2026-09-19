@@ -16,7 +16,7 @@ use crate::application::ports::{
 };
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
-use crate::domain::source::{SourceId, SourceKind};
+use crate::domain::source::{SourceId, SourceKind, Sources};
 use crate::error::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -178,6 +178,30 @@ pub fn stale_for_search(
         }
     }
     Ok(kept)
+}
+
+/// The sources a miss may read again before it answers: the local ones in the
+/// query's reach that a build has left behind.
+///
+/// Local only, and that is the whole point. A local source is rebuilt on
+/// almost every edit and costs seconds to read again, so reading it is a
+/// repair. A pinned dependency is rebuilt when somebody bumps it and costs
+/// minutes, so reading it is a surprise -- and a Mathlib dump nobody asked
+/// for is not an answer to a search.
+pub fn refreshable(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    sources: &Sources,
+    query: &Query,
+) -> Result<Vec<SourceId>> {
+    let among: Vec<SourceId> = sources
+        .iter()
+        .filter(|s| s.kind == SourceKind::Local)
+        .filter(|s| query.source.as_ref().is_none_or(|asked| *asked == s.id))
+        .map(|s| s.id.clone())
+        .collect();
+    let stale = stale_for_search(repo, revisions, among)?;
+    Ok(stale.into_iter().map(|(s, _)| s.id).collect())
 }
 
 /// A module the build has compiled since the index was written, and the

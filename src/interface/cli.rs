@@ -211,6 +211,10 @@ pub enum Command {
         /// A name in two sources is shown from the compiled one otherwise.
         #[arg(long, value_name = "SOURCE")]
         source: Option<String>,
+        /// Read a rebuilt local source again when a name is not in the index.
+        /// Costs a dump and an index of that source, seconds for a project.
+        #[arg(long)]
+        refresh: bool,
         /// Accepted and ignored. `--long` is a `find` flag, and `show` is
         /// already long: it prints the declaration's own source, docstring and
         /// proof included. Taken rather than refused because refusing it costs
@@ -374,6 +378,11 @@ pub struct FindArgs {
     #[arg(long, value_name = "N", default_value_t = crate::domain::query::DEFAULT_LIMIT)]
     pub limit: usize,
 
+    /// Read a rebuilt local source again when the search finds nothing.
+    /// Costs a dump and an index of that source, seconds for a project.
+    #[arg(long)]
+    pub refresh: bool,
+
     /// The untruncated type of every hit, and its docstring. Measured at
     /// about a third more output.
     #[arg(long)]
@@ -405,6 +414,24 @@ mod tests {
         assert!(err.contains("'--elaborted'"), "{err}");
         assert!(read(&["dt", "find", "-vx"]).is_err(), "letters after a `-` are flags");
         assert!(read(&["dt", "find", "--limit", "-1"]).is_err(), "and a value is not a pattern");
+    }
+
+    /// Reading the build again is asked for, never assumed: a search that
+    /// runs the elaborator without being told to is a search nobody can time.
+    #[test]
+    fn reading_a_rebuilt_source_again_is_off_unless_asked() {
+        let Command::Find(a) = read(&["dt", "find", "--name", "exp"]).unwrap().command else {
+            panic!()
+        };
+        assert!(!a.refresh);
+        let Command::Find(a) = read(&["dt", "find", "--name", "exp", "--refresh"]).unwrap().command
+        else {
+            panic!()
+        };
+        assert!(a.refresh);
+        let argv = ["dt", "show", "--refresh", "T.exp_le"];
+        let Command::Show { refresh, .. } = read(&argv).unwrap().command else { panic!() };
+        assert!(refresh);
     }
 
     /// `find --source` is followed by a `show` of what it found, and the flag

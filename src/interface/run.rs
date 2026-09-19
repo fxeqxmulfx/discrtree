@@ -11,7 +11,7 @@ use crate::application::index;
 use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
 use crate::application::rdeps::Rdeps;
 use crate::application::ship::Fetch;
-use crate::application::show::Show;
+use crate::application::show::{Show, Shown};
 use crate::application::status::{self, Status};
 use crate::domain::decl::{self, DeclKind};
 use crate::domain::name::{DeclName, ModuleName};
@@ -73,14 +73,14 @@ impl App {
                 self.refresh(named(source, source_flag).as_deref())
             }
             Command::Status => self.status(),
-            Command::Show { names, import_only, source, long } => {
+            Command::Show { names, import_only, source, refresh, long } => {
                 if long {
                     eprintln!(
                         "dt: `--long` belongs to `dt find`; `show` prints the whole declaration \
                          anyway, source and all"
                     );
                 }
-                self.show(&names, import_only, source.map(SourceId::new).as_ref())
+                self.show(&names, import_only, source.map(SourceId::new).as_ref(), refresh)
             }
             Command::Deps { name, depth, source } => {
                 self.deps(&name, &depth, source.map(SourceId::new).as_ref())
@@ -161,25 +161,27 @@ impl App {
     /// name was misremembered would hand back three round trips again. Misses go
     /// to stderr, so `--import-only` still redirects into a file cleanly, and an
     /// empty batch is still an error.
-    fn show(&self, names: &[String], import_only: bool, only_in: Option<&SourceId>) -> Result<()> {
+    fn show(
+        &self,
+        names: &[String],
+        import_only: bool,
+        only_in: Option<&SourceId>,
+        refresh: bool,
+    ) -> Result<()> {
         if let Some(s) = only_in {
             self.known_source(s)?;
         }
-        let repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
-        let show = Show {
-            repo: repo.as_ref(),
-            files: &self.files,
-            workspace: &self.workspace,
-            build: &build,
-            only_in,
-        };
-        let mut shown = Vec::new();
-        let mut missed = Vec::new();
-        for n in names {
-            match decl_name(n).and_then(|name| show.run(&name)) {
-                Ok(s) => shown.push(s),
-                Err(e) => missed.push((n.clone(), e)),
+        let mut repo = self.repo()?;
+        let (mut shown, mut missed) = self.look_up(repo.as_ref(), &build, names, only_in);
+        // A name that misses may be one a rebuild compiled and no dump has
+        // handed over yet. The whole batch is looked up again afterwards, not
+        // only the names that missed, so the answers stay in the asked order.
+        if !missed.is_empty() && self.refresh_on_miss(refresh) {
+            let reach = Query { source: only_in.cloned(), ..Query::new() };
+            if self.refresh_for_search(repo.as_ref(), &reach) {
+                repo = self.repo()?;
+                (shown, missed) = self.look_up(repo.as_ref(), &build, names, only_in);
             }
         }
         if shown.is_empty() {
@@ -337,9 +339,19 @@ impl App {
                 );
             }
         }
-        let repo = self.repo()?;
+        let mut repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
-        let hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
+        let mut hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
+        // Asked before anything is printed, because the answer changes: the
+        // rows a rebuilt source has not handed over yet are rows all the same,
+        // and `no match` next to them would be the wrong one.
+        if hits.rows.is_empty()
+            && self.refresh_on_miss(args.refresh)
+            && self.refresh_for_search(repo.as_ref(), &query)
+        {
+            repo = self.repo()?;
+            hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
+        }
         // On stderr, and before the rows: the answer below is to a question
         // spelled differently from the one that was asked, and a reader who
         // is piping the rows somewhere should still be told.
@@ -421,6 +433,96 @@ impl App {
                 status::declared_matching(stale, &asked)
             })
             .collect()
+    }
+
+    /// Each name a `dt show` batch asked for, resolved or missed. A batch is
+    /// not all-or-nothing, so both halves come back.
+    fn look_up(
+        &self,
+        repo: &dyn DeclRepo,
+        build: &LakeBuild,
+        names: &[String],
+        only_in: Option<&SourceId>,
+    ) -> (Vec<Shown>, Vec<(String, Error)>) {
+        let show = Show { repo, files: &self.files, workspace: &self.workspace, build, only_in };
+        let mut shown = Vec::new();
+        let mut missed = Vec::new();
+        for n in names {
+            match decl_name(n).and_then(|name| show.run(&name)) {
+                Ok(s) => shown.push(s),
+                Err(e) => missed.push((n.clone(), e)),
+            }
+        }
+        (shown, missed)
+    }
+
+    /// Whether a miss may read the build again: asked for on the command
+    /// line, or configured once for every search.
+    fn refresh_on_miss(&self, flag: bool) -> bool {
+        flag || self.cfg.index.refresh_on_miss
+    }
+
+    /// Every rebuilt local source in the query's reach, read again and
+    /// indexed, for a search that would otherwise report a miss. `true` when
+    /// one of them was, so the caller knows to ask its question again.
+    ///
+    /// Everything this says goes to stderr. The rows on stdout are the answer;
+    /// a refresh that happened on the way to them is not part of it. A refresh
+    /// that fails is reported and swallowed: the search still has the old rows
+    /// and the hint from the build, and both beat an error.
+    fn refresh_for_search(&self, repo: &dyn DeclRepo, query: &Query) -> bool {
+        let revs = OnDisk::read(&self.cfg);
+        let Ok(among) = status::refreshable(repo, &revs, &self.workspace.sources, query) else {
+            return false;
+        };
+        let mut read = false;
+        for id in among {
+            eprintln!("dt: `{id}` was rebuilt since it was indexed; reading it again");
+            match self.reread_into_index(&id) {
+                Ok(stored) => {
+                    eprintln!("dt: `{id}` refreshed: {stored} declarations indexed");
+                    read = true;
+                }
+                Err(e) => eprintln!("dt: `{id}` could not be read again: {e}"),
+            }
+        }
+        read
+    }
+
+    /// One source dumped and indexed in place, quietly. The revision is taken
+    /// before the dump for the same reason `dt refresh` takes it there: a
+    /// build that lands while the dump runs is not in these rows.
+    fn reread_into_index(&self, id: &SourceId) -> Result<usize> {
+        let s = self.cfg.source(id.as_str())?;
+        let Some(root_module) = s.root_module() else {
+            bail!("source `{id}` has no root module to import")
+        };
+        let revs = OnDisk::read(&self.cfg);
+        let read_at = revs.current(id)?;
+        let lean = LakeElaborator {
+            project_root: self.cfg.root(),
+            work_dir: self.cfg.raw_dir().join("scripts"),
+            verbose: self.verbose,
+        };
+        let path = index::dump_source(
+            &s.meta(),
+            &root_module,
+            &s.module_prefixes(),
+            self.cfg.jsonl_path(s),
+            true,
+            &lean,
+        )?;
+        let mut sqlite = SqliteIndex::open(&self.cfg.db_path())?;
+        let was = Provenance {
+            revision: read_at,
+            stamp: revision::file_stamp(&path),
+            indexed_at: now(),
+            decls: 0,
+            ..Provenance::by_this_build()
+        };
+        let (_, stored) = load_dump(&mut sqlite, id, &path, was, &revs)?;
+        sqlite.finish()?;
+        Ok(stored)
     }
 
     fn print_stale(&self, stale: Vec<status::Stale>) {
@@ -646,13 +748,7 @@ impl App {
             if self.up_to_date(&sqlite, &id, &was, force)? {
                 continue;
             }
-            sqlite.clear_source(&id)?;
-            let read = jsonl::stream(&path, |chunk| sqlite.put(chunk))?;
-            let modules = sqlite.modules_of(&id)?;
-            let statements = revs.spelled_statements(&sqlite, &id, &modules)?;
-            sqlite.record_statements(&id, &statements)?;
-            let stored = sqlite.count_source(&id)?;
-            sqlite.record(&id, &Provenance { decls: stored, ..was })?;
+            let (read, stored) = load_dump(&mut sqlite, &id, &path, was, &revs)?;
             changed = true;
             report(&s.name, read, stored, "");
         }
@@ -1009,6 +1105,26 @@ fn now() -> u64 {
 /// What was left out for having no name, said once rather than per file.
 fn anonymous_note(n: usize) -> String {
     if n == 0 { String::new() } else { format!(", {n} anonymous") }
+}
+
+/// One compiled source's dump read into the index, replacing whatever rows it
+/// had, with the statements its own sources spell. The counts are what the
+/// dump handed over and what landed.
+fn load_dump(
+    sqlite: &mut SqliteIndex,
+    id: &SourceId,
+    path: &std::path::Path,
+    was: Provenance,
+    revs: &OnDisk,
+) -> Result<(usize, usize)> {
+    sqlite.clear_source(id)?;
+    let read = jsonl::stream(path, |chunk| sqlite.put(chunk))?;
+    let modules = sqlite.modules_of(id)?;
+    let statements = revs.spelled_statements(sqlite, id, &modules)?;
+    sqlite.record_statements(id, &statements)?;
+    let stored = sqlite.count_source(id)?;
+    sqlite.record(id, &Provenance { decls: stored, ..was })?;
+    Ok((read, stored))
 }
 
 /// What a source contributed, and what became of it. `handed` and `stored`

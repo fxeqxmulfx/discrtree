@@ -45,11 +45,16 @@ pub struct Index {
     pub db: PathBuf,
     #[serde(default = "default_raw")]
     pub raw: PathBuf,
+    /// Whether a search that finds nothing may read a rebuilt local source
+    /// again before answering. Off by default: it runs the elaborator and
+    /// writes the index, and neither should happen because somebody searched.
+    #[serde(default)]
+    pub refresh_on_miss: bool,
 }
 
 impl Default for Index {
     fn default() -> Self {
-        Index { db: default_db(), raw: default_raw() }
+        Index { db: default_db(), raw: default_raw(), refresh_on_miss: false }
     }
 }
 
@@ -350,6 +355,9 @@ vendor    = "src/Transformer/Vendor"    # where materialized declarations land
 [index]
 db  = ".discrtree/index.db"
 raw = ".discrtree/jsonl"
+# refresh_on_miss = true   # a search that finds nothing reads a rebuilt
+                           # local source again first: seconds, and the rows
+                           # are then the build's. `--refresh` asks for it once.
 
 [[source]]
 name = "project"
@@ -437,6 +445,17 @@ license = "Apache-2.0"
         let text = SAMPLE.to_string() + "elaborated = true\n";
         let err = Config::parse(&text, Path::new("/p")).unwrap_err().to_string();
         assert!(err.contains("needs `root"), "got: {err}");
+    }
+
+    /// The sample has no `[index]` at all, and the default is the one that
+    /// surprises nobody: a search reads the index and nothing else.
+    #[test]
+    fn a_search_reads_a_rebuilt_source_again_only_where_it_is_configured_to() {
+        assert!(!cfg().index.refresh_on_miss);
+        let text = SAMPLE.to_string() + "\n[index]\nrefresh_on_miss = true\n";
+        let c = Config::parse(&text, Path::new("/p")).unwrap();
+        assert!(c.index.refresh_on_miss);
+        assert_eq!(c.db_path(), Path::new("/p/./.discrtree/index.db"), "the paths still default");
     }
 
     #[test]

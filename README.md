@@ -295,6 +295,39 @@ not reported at all. A shape or `--uses` search cannot be answered this way —
 an `.ilean` records where a declaration is, not what it elaborated to — so those
 get the warning alone, with the rebuilt modules named.
 
+The hint has no type, no kind and no shape, because nothing elaborated it. The
+rows would have all three, and reading the project again is cheaper than it
+looks:
+
+| | |
+| --- | ---: |
+| `import Lean` + `import Transformer`, nothing dumped | 3.0 s |
+| one module dumped (19 declarations) | 3.2 s |
+| the whole project dumped (2578 declarations) | 4.3 s |
+| `dt index project --force` | 1.0 s |
+| `dt refresh project`, end to end | 5.2 s |
+| the same import on a cold page cache | 24 s |
+
+The import is the cost, and it is the same whether one module is dumped or all
+of them — which is why there is no incremental dump: it would save 1.3 s of
+5.2 s and pay for it in machinery. So `dt find --refresh` and `dt show
+--refresh` read a rebuilt local source again before answering a miss, and
+`refresh_on_miss = true` under `[index]` makes that every search:
+
+```
+dt: `project` was rebuilt since it was indexed; reading it again
+dt: `project` refreshed: 2578 declarations indexed
+Transformer.CRASP.Maj2.mass_append  theorem  Transformer.CRASP.MajTwoCount
+```
+
+Off by default, because a search that runs the elaborator without being asked
+is a search nobody can time. Local sources only: a project is rebuilt on almost
+every edit and costs seconds, a pinned dependency is rebuilt when somebody
+bumps it and costs minutes, and a Mathlib dump nobody asked for is not an
+answer to a search. Everything the refresh says goes to stderr, so the rows on
+stdout are still only the answer, and a refresh that fails is reported and
+swallowed: the old rows and the hint from the build both beat an error.
+
 `dt index` leaves alone any source whose input has not changed since it was
 indexed. The input is the dump for a compiled source and the checkout for a
 text one, fingerprinted by size and mtime in the first case and by revision in

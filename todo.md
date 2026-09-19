@@ -2580,3 +2580,13 @@ same whether one module is dumped or all of them. What is missing is not a
 faster refresh but a refresh a search may run at all.
 
 Seen with dt 0.52.0, 2026-09-19.
+
+Fixed in 0.53.0, by refreshing rather than by dumping less. `dt find --refresh`
+and `dt show --refresh` read a rebuilt local source again before they answer a
+miss, and `refresh_on_miss = true` under `[index]` makes that every search. Off
+by default: a search that runs the elaborator without being asked is a search
+nobody can time. Local sources only, so a pinned dependency is never dumped
+because somebody searched. Everything it says goes to stderr, and a refresh
+that fails is reported and swallowed -- the old rows and the 0.52.0 hint both
+beat an error. No incremental dump: the measurements above say it would save
+1.3 s of 5.2 s.
