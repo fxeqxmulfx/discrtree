@@ -488,16 +488,35 @@ fn an_empty_search_over_conditions_that_each_match_blames_none_of_them() {
     // `Other.top` exists and `Mathlib.Analysis.Exp` exists; nothing is both.
     q.name = Some("top".into());
     q.module = Some("Mathlib.Analysis.Exp".into());
-    let Some(Empty::Combination { elsewhere }) =
+    let Some(Empty::InScope { module, held, failing, elsewhere, .. }) =
         Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty
     else {
         panic!("both conditions match on their own")
     };
-    // "Drop one" on its own leaves the reader to guess which; the module the
-    // name does live in is the answer they were after.
+    // The module the reader named is populated, and what it does not hold is
+    // the name -- which is the guess, where the module was the intent.
+    assert_eq!(module.as_deref(), Some("Mathlib.Analysis.Exp"));
+    assert!(held > 0, "the scope is not empty, or it would be a condition to correct");
+    assert_eq!(failing, vec!["--name top".to_string()]);
+    // And the module the name does live in is still offered, for the reader
+    // who guessed the place wrong after all.
     assert_eq!(
         elsewhere.iter().map(|(m, n)| (m.to_string(), *n)).collect::<Vec<_>>(),
         vec![("Other.Main".to_string(), 1)]
+    );
+}
+
+/// A scope that holds nothing is a condition to correct, not a fact to
+/// report: `Barren` says so, and it says so before this diagnosis is reached.
+#[test]
+fn an_empty_scope_is_still_blamed() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("top".into());
+    q.module = Some("Nowhere".into());
+    assert_eq!(
+        Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
+        Some(Empty::Barren(vec!["--in Nowhere".to_string()]))
     );
 }
 
@@ -769,7 +788,7 @@ fn a_pattern_that_matches_on_its_own_is_still_blamed_on_the_combination() {
     q.shape = discrtree::domain::decl::Shape::new(Some(DeclName::new("LE.le")), Vec::new());
     q.module = Some("Other".into());
     let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
-    assert!(matches!(found, Some(Empty::Combination { .. })), "got {found:?}");
+    assert!(matches!(found, Some(Empty::InScope { .. })), "got {found:?}");
 }
 
 /// Lean has no `instance` constant: an instance is a `def` with an attribute,
@@ -799,7 +818,7 @@ fn an_index_that_has_instances_diagnoses_them_like_any_other_kind() {
     q.module = Some("Other.Main".into());
     assert!(matches!(
         Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty,
-        Some(Empty::Combination { .. })
+        Some(Empty::InScope { .. })
     ));
 }
 

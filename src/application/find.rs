@@ -32,19 +32,39 @@ pub enum Empty {
     /// These conditions match nothing in the index even on their own — a
     /// misspelled constant, a module prefix that is not a prefix. Edit them.
     Barren(Vec<String>),
-    /// Every condition matches something; no row satisfies all of them. Drop
-    /// one rather than correcting any.
-    Combination {
-        /// Where the rows that satisfy every condition *but* `--in` live,
-        /// commonest module first. Empty when the query named no module, or
-        /// when dropping it still matches nothing.
+    /// Every condition matches something; no row satisfies all of them, and
+    /// the query narrowed nothing. Drop one rather than correcting any.
+    Combination,
+    /// The query narrowed where it looked -- `--in`, `--source` -- and that
+    /// scope holds declarations: `held` of them. What emptied the search is
+    /// one of the conditions asked inside it, and the scope is the one thing
+    /// not to touch.
+    ///
+    /// Told apart from `Combination` because "drop one" picks the condition
+    /// whose removal yields the most rows, and that is the narrowing one
+    /// nearly every time -- which maximises rows and blames intent. A reader
+    /// who writes `--in Transformer.ALM` is saying where the answer belongs;
+    /// `--name addr` is the guess. Naming the scope and its size says which
+    /// half was right.
+    InScope {
+        /// The module prefix as it was written, not resolved to a module: it
+        /// is a prefix, and what it stands for is a scope rather than a name.
+        module: Option<String>,
+        source: Option<SourceId>,
+        /// Declarations in the scope, counted rather than listed.
+        held: usize,
+        /// The conditions that match nothing inside the scope, in the words
+        /// they were written. Empty when each of them matches there and only
+        /// their combination does not.
+        failing: Vec<String>,
+        /// Where the rows that satisfy every condition *but* the scope live,
+        /// commonest module first. Empty when dropping it still matches
+        /// nothing.
         ///
-        /// "Drop one" is right and useless when the one to drop is the module
-        /// prefix: the reader knows the lemma exists and guessed wrong about
-        /// where it is kept. `div_le_div_iff` is not in
-        /// `Mathlib.Algebra.Order.Field`; it is in
-        /// `Mathlib.Algebra.Order.GroupWithZero.Basic`, and that is the whole
-        /// of what the reader needed.
+        /// The reader may have guessed wrong after all, and this is the whole
+        /// of what they would need then: `div_le_div_iff` is not in
+        /// `Mathlib.Algebra.Order.Field`, it is in
+        /// `Mathlib.Algebra.Order.GroupWithZero.Basic`.
         elsewhere: Vec<(ModuleName, usize)>,
     },
     /// The search was asked about a corpus the build can import and no source
@@ -447,7 +467,67 @@ impl Find<'_> {
         if let Some(empty) = self.named_elsewise(query)? {
             return Ok(empty);
         }
-        Ok(Empty::Combination { elsewhere: self.elsewhere(query)? })
+        if let Some(empty) = self.inside_scope(query)? {
+            return Ok(empty);
+        }
+        Ok(Empty::Combination)
+    }
+
+    /// What a search that said where to look reports when the place it named
+    /// is populated: the scope, its size, and which of the other conditions
+    /// found nothing in it.
+    ///
+    /// `None` when the query narrowed nothing, or when the scope is empty --
+    /// and an empty scope is already `Barren`, which says to correct it.
+    fn inside_scope(&self, query: &Query) -> Result<Option<Empty>> {
+        if query.module.is_none() && query.source.is_none() {
+            return Ok(None);
+        }
+        // The scope as the search would see it, generated names included or
+        // not as the query asks: a count the reader cannot reproduce is worse
+        // than no count.
+        let scope = Query {
+            module: query.module.clone(),
+            source: query.source.clone(),
+            generated: query.generated,
+            ..Query::new()
+        };
+        let held = self.repo.count(&scope)?;
+        if held == 0 {
+            return Ok(None);
+        }
+        let rest: Vec<(String, Query)> = query
+            .conditions()
+            .into_iter()
+            .filter(|(label, _)| !(label.starts_with("--in ") || label.starts_with("--source ")))
+            .collect();
+        // One condition beside the scope is the one that emptied it: the
+        // search just ran it inside the scope and it found nothing. Probing
+        // it again would repeat the whole query to learn what is known.
+        let mut failing: Vec<String> = rest.iter().map(|(l, _)| l.clone()).collect();
+        if rest.len() > 1 {
+            failing.clear();
+            for (label, probe) in rest {
+                let inside = Query {
+                    module: scope.module.clone(),
+                    source: scope.source.clone(),
+                    generated: query.generated,
+                    // The probe asks whether anything matches, not what does.
+                    limit: 1,
+                    ..probe
+                };
+                if self.repo.find(&inside)?.is_empty() {
+                    failing.push(label);
+                }
+            }
+        }
+        Ok(Some(Empty::InScope {
+            module: query.module.clone(),
+            source: query.source.clone(),
+            held,
+            failing,
+            elsewhere: self.elsewhere(query)?,
+        }))
     }
 
     /// The declaration `--name` names outright, when it is there and the
@@ -575,16 +655,18 @@ impl Find<'_> {
         Ok(out)
     }
 
-    /// The modules the query matches once its `--in` is dropped, commonest
-    /// first. One search, and only for a query that named a module at all.
+    /// The modules the query matches once the scope it narrowed to is
+    /// dropped, commonest first. One search, and only for a query that
+    /// narrowed at all.
     fn elsewhere(&self, query: &Query) -> Result<Vec<(ModuleName, usize)>> {
-        if query.module.is_none() {
+        if query.module.is_none() && query.source.is_none() {
             return Ok(Vec::new());
         }
         // Wider than `limit`, because what is wanted here is the spread over
         // modules rather than the ten best rows, and narrow enough that a
         // condition matching half the corpus does not pay for a full scan.
-        let rows = self.repo.find(&Query { module: None, limit: SPREAD, ..query.clone() })?;
+        let wider = Query { module: None, source: None, limit: SPREAD, ..query.clone() };
+        let rows = self.repo.find(&wider)?;
         let mut counts: BTreeMap<ModuleName, usize> = BTreeMap::new();
         for d in rows {
             *counts.entry(d.module).or_default() += 1;

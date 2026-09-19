@@ -148,15 +148,20 @@ the shipped one cannot drift apart.
 ## An empty answer says which repair it needs
 
 `no match` is the most expensive line `dt` can print, because on its own it
-does not say what to do next. Four situations produce it and they need
+does not say what to do next. Five situations produce it and they need
 different repairs:
 
 ```
 $ dt find --name exp --in Analysis
 no match: --in Analysis matches nothing on its own
 
-$ dt find --name exp --uses Finset.sum --in Mathlib.Order
+$ dt find --name exp --uses Finset.sum
 no match: every condition matches on its own; drop one
+
+$ dt find --name addr --in Transformer.ALM
+no match: Transformer.ALM has 877 declarations, none matching --name addr
+  (drop --in and the rest matches in Std.Net.Addr (90), Mathlib.Algebra.Regular.SMul
+  (26), and 107 more module(s))
 
 $ dt find --name Balanced --in Batteries
 no match: `Batteries` is in the lake package `batteries`, which is not a source
@@ -169,7 +174,16 @@ The first is a condition to edit — Mathlib's modules begin `Mathlib.`, so
 Guessing between them costs a search either way; asking each condition on its
 own costs one row each, and only when the search has already failed.
 
-The third is neither, and that is why it is told apart: `Batteries` is spelled
+The third is the second with the scope said out loud. `--in` and `--source` are
+not guesses like `--name` and `--text` are: a reader who names a module has
+usually named the right one, and telling them to drop it points at the one
+condition that was right. So when the scope holds something, the answer leads
+with what it holds and which condition found nothing inside it, and the modules
+where the rest of the query does match go on an indented line, for the reader
+who guessed the place wrong after all. A scope that holds nothing is the first
+case again, and is still reported as the condition to edit.
+
+The fourth is neither, and that is why it is told apart: `Batteries` is spelled
 correctly and there is nothing to drop. It is the index that is smaller than
 the build, and the repair is a source, not a flag. `dt show` answers a missing
 name the same way rather than with `try dt find --name`, which from an unindexed

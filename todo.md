@@ -45,6 +45,23 @@ where "drop --in" is genuinely the right advice, and where it would be worth
 distinguishing a module prefix that is indexed but unmatched from one that is
 not in the index at all.
 
+Fixed in 0.54.0. `--in` and `--source` are now read as the scope of a search
+and not as conditions of it. When the scope holds anything, the answer leads
+with its size and with which of the remaining conditions found nothing inside
+it:
+
+    $ dt find --name addr --in Transformer.ALM
+    no match: Transformer.ALM has 877 declarations, none matching --name addr
+      (drop --in and the rest matches in Std.Net.Addr (90), ..., and 105 more module(s))
+
+The modules the rest of the query matches in are kept, indented and second, for
+the reader whose module guess was wrong after all. A scope that holds nothing
+still reads `--in X matches nothing on its own`, which is the case where the
+scope is the condition to correct. The count is a `count(*)` over the same
+filter the search uses, so it costs one row, not a page; with one condition
+beside the scope no probe runs at all, because the search that just missed is
+that probe. A miss on the probe project went from 0.96 s to 1.15 s.
+
 ## Re-indexing after one edit costs 37 s, and 36 of them are spent on work that was already done
 
 Found 2026-09-15, dt 0.8.1, on a Lean project of my own (1864 declarations,

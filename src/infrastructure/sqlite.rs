@@ -559,6 +559,21 @@ impl DeclRepo for SqliteIndex {
         self.with_lists(rows)
     }
 
+    /// Counted in SQL, without reading a row. A shape is matched in the
+    /// domain, so a query that asks for one is counted by matching it: the
+    /// rows have to be read either way, and a count that ignored the shape
+    /// would be a different query's answer.
+    fn count(&self, query: &Query) -> Result<usize> {
+        if !query.shape.is_empty() {
+            return Ok(self.find(query)?.len());
+        }
+        let (filter, binds) = build_filter(query, self.has_fts());
+        let mut stmt = self.conn.prepare(&format!("SELECT count(*) FROM decl d{filter}"))?;
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        Ok(stmt.query_row(bind.as_slice(), |r| r.get::<_, i64>(0))? as usize)
+    }
+
     fn provenance(&self, source: &SourceId) -> Result<Option<Provenance>> {
         self.provenance_of(source)
     }
@@ -667,7 +682,10 @@ const NOT_GENERATED: &str = "NOT (d.name LIKE '%.ctorIdx' OR d.name LIKE '%.ctor
      OR d.name LIKE '%.ofNat!_ctorIdx' ESCAPE '!' OR d.name LIKE '%.brecOn.%' \
      OR (d.name LIKE '%.elim' AND instr(d.type, ?) > 0))";
 
-fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
+/// The `WHERE` a query becomes, and what to bind into it. Separate from the
+/// statement around it because a count wants the same filter with no window
+/// and no ordering: the rows are not read, only tallied.
+fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
@@ -757,11 +775,15 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         }
     }
 
-    let filter = if where_clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", where_clauses.join(" AND "))
+    let filter = match where_clauses.is_empty() {
+        true => String::new(),
+        false => format!(" WHERE {}", where_clauses.join(" AND ")),
     };
+    (filter, binds)
+}
+
+fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
+    let (filter, mut binds) = build_filter(q, has_fts);
     // Over-fetch, because the ranking and the positional argument match happen
     // in the domain: cutting to `limit` here would drop better answers. The cap
     // is wider when the domain still has a shape to check, since an unknown

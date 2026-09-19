@@ -23,6 +23,15 @@ pub trait DeclRepo {
         Ok(self.named(name)?.into_iter().next())
     }
     fn find(&self, query: &Query) -> Result<Vec<Decl>>;
+    /// How many rows match, which is not the same question as which rows do:
+    /// a diagnosis asks how big the scope a search narrowed to is, and the
+    /// rows themselves are not wanted. The default answers by listing them,
+    /// which is what a store with nothing better can do.
+    fn count(&self, query: &Query) -> Result<usize> {
+        // Not `usize::MAX`: a store is free to compute a window from the
+        // limit, and one that multiplies it would overflow.
+        Ok(self.find(&Query { limit: 1 << 24, ..query.clone() })?.len())
+    }
     /// Resolve many names at once. Separate from `get` because the closure walk
     /// asks for thousands and a per-name round trip dominates the run.
     fn get_many(&self, names: &[DeclName]) -> Result<Vec<Decl>>;

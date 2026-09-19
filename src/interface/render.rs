@@ -14,8 +14,9 @@ use crate::application::status::{Behind, Declaration, Report, SourceStatus, Stal
 use crate::domain::decl::{ArgHead, Decl};
 use crate::domain::lean_core;
 use crate::domain::lean_text;
+use crate::domain::name::ModuleName;
 use crate::domain::pattern;
-use crate::domain::source::SourceKind;
+use crate::domain::source::{SourceId, SourceKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The marker every text row carries.
@@ -70,6 +71,42 @@ fn scope_notes(labels: &[String]) -> String {
     out
 }
 
+/// The scope a search narrowed to, as a reader would say it back.
+fn scope_of(module: Option<&str>, source: Option<&SourceId>) -> String {
+    match (module, source) {
+        (Some(m), Some(s)) => format!("{m} in `{s}`"),
+        (Some(m), None) => m.to_string(),
+        (None, Some(s)) => format!("source `{s}`"),
+        (None, None) => "the index".to_string(),
+    }
+}
+
+/// Where the rest of the query matches once the scope is dropped, on a second
+/// line: it is the repair for a reader who narrowed to the wrong place, and
+/// the wrong place is the less likely of the two mistakes.
+///
+/// Four modules, because a name that spreads wider than that is a name to
+/// narrow rather than a place to look.
+fn dropping_the_scope(by_module: bool, elsewhere: &[(ModuleName, usize)]) -> String {
+    if elsewhere.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<String> = elsewhere
+        .iter()
+        .take(4)
+        .map(|(m, n)| match n {
+            1 => m.to_string(),
+            n => format!("{m} ({n})"),
+        })
+        .collect();
+    let more = match elsewhere.len().saturating_sub(4) {
+        0 => String::new(),
+        n => format!(", and {n} more module(s)"),
+    };
+    let flag = if by_module { "--in" } else { "--source" };
+    format!("\n  (drop {flag} and the rest matches in {}{})", shown.join(", "), more)
+}
+
 /// A hit is two lines: what it is called, followed by what it says.
 ///
 /// Nothing here is padded or separated by blank lines. This output is read far
@@ -89,30 +126,30 @@ pub fn find(hits: &Hits, long: bool) -> String {
             Some(Empty::Barren(c)) => {
                 format!("no match: {} match nothing on their own{}\n", c.join(", "), scope_notes(c))
             }
-            Some(Empty::Combination { elsewhere }) if elsewhere.is_empty() => {
+            Some(Empty::Combination) => {
                 "no match: every condition matches on its own; drop one\n".into()
             }
-            // The module prefix is the condition to drop, and saying so is only
-            // half of it: what the reader wanted was the prefix that would have
-            // worked. Four, because a name that spreads wider than that is a
-            // name to narrow rather than a place to look.
-            Some(Empty::Combination { elsewhere }) => {
-                let shown: Vec<String> = elsewhere
-                    .iter()
-                    .take(4)
-                    .map(|(m, n)| match n {
-                        1 => m.to_string(),
-                        n => format!("{m} ({n})"),
-                    })
-                    .collect();
-                let more = match elsewhere.len().saturating_sub(4) {
-                    0 => String::new(),
-                    n => format!(", and {n} more"),
+            // The scope is the one condition not to correct: it says where the
+            // answer belongs, and it is populated. What it holds is said
+            // first, because "that module has declarations, none of them
+            // named that" is the fact the reader came for -- and where the
+            // rest matches is still offered, indented, for the reader who
+            // guessed the place wrong after all.
+            Some(Empty::InScope { module, source, held, failing, elsewhere }) => {
+                let count = match held {
+                    1 => "1 declaration".to_string(),
+                    n => format!("{n} declarations"),
+                };
+                let rest = match failing.is_empty() {
+                    // Each condition matches inside the scope; only together
+                    // do they not. There is nothing to correct here either.
+                    true => "; each condition matches some of them, none matches all".to_string(),
+                    false => format!(", none matching {}", failing.join(" or ")),
                 };
                 format!(
-                    "no match: drop --in — without it the rest matches in {}{}\n",
-                    shown.join(", "),
-                    more
+                    "no match: {} has {count}{rest}{}\n",
+                    scope_of(module.as_deref(), source.as_ref()),
+                    dropping_the_scope(module.is_some(), elsewhere)
                 )
             }
             // Not "matches nothing on its own", which would be true and would
@@ -1037,11 +1074,11 @@ mod tests {
         assert!(!r.contains("drop"), "there is no condition to drop: {r}");
     }
 
-    /// "Drop one" is right and unhelpful when the one to drop is `--in`: the
-    /// reader already knows the lemma exists and guessed wrong about where it
-    /// is kept, and the modules it really lives in are one search away.
+    /// A populated scope is a condition that was right, so it is reported and
+    /// not blamed: what it holds comes first, and where the rest of the query
+    /// does match follows, for the reader who guessed the place wrong.
     #[test]
-    fn an_empty_result_says_where_the_rest_of_the_query_does_match() {
+    fn an_empty_result_says_what_the_scope_holds_before_where_the_rest_matches() {
         let empty = |e: Empty| Hits {
             rows: Vec::new(),
             truncated: false,
@@ -1051,25 +1088,49 @@ mod tests {
             text_as_uses: Vec::new(),
         };
         let r = find(
-            &empty(Empty::Combination {
+            &empty(Empty::InScope {
+                module: Some("Mathlib.Algebra.Order.Field".into()),
+                source: None,
+                held: 412,
+                failing: vec!["--name div_le_div_iff".into()],
                 elsewhere: vec![
-                    (crate::domain::name::ModuleName::new("Mathlib.Data.Int.Init"), 4),
-                    (
-                        crate::domain::name::ModuleName::new(
-                            "Mathlib.Algebra.Order.GroupWithZero.Basic",
-                        ),
-                        3,
-                    ),
+                    (ModuleName::new("Mathlib.Data.Int.Init"), 4),
+                    (ModuleName::new("Mathlib.Algebra.Order.GroupWithZero.Basic"), 3),
                 ],
             }),
             false,
         );
+        assert!(
+            r.starts_with(
+                "no match: Mathlib.Algebra.Order.Field has 412 declarations, \
+                 none matching --name div_le_div_iff"
+            ),
+            "the scope is reported, not blamed: {r}"
+        );
         assert!(r.contains("drop --in"), "{r}");
         assert!(r.contains("Mathlib.Algebra.Order.GroupWithZero.Basic (3)"), "{r}");
 
-        // With no module in the query there is nothing to name, and the line
-        // goes back to saying the only thing it can.
-        let plain = find(&empty(Empty::Combination { elsewhere: Vec::new() }), false);
+        // Nothing matches outside the scope either, so there is nothing to
+        // drop and no second line to print.
+        let alone = find(
+            &empty(Empty::InScope {
+                module: None,
+                source: Some(SourceId::new("project")),
+                held: 1,
+                failing: Vec::new(),
+                elsewhere: Vec::new(),
+            }),
+            false,
+        );
+        assert_eq!(
+            alone,
+            "no match: source `project` has 1 declaration; each condition matches some of \
+             them, none matches all\n"
+        );
+
+        // With nothing narrowed there is no scope to name, and the line goes
+        // back to saying the only thing it can.
+        let plain = find(&empty(Empty::Combination), false);
         assert!(plain.contains("every condition matches on its own; drop one"), "{plain}");
         assert!(!plain.contains("--in"), "{plain}");
     }
