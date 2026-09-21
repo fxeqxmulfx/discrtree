@@ -891,6 +891,7 @@ mod tests {
             read_as: Vec::new(),
             variables: Vec::new(),
             text_as_uses: Vec::new(),
+            swapped: false,
         }
     }
 
@@ -937,6 +938,7 @@ mod tests {
                 read_as: Vec::new(),
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
+                swapped: false,
             },
             false,
         );
@@ -1031,6 +1033,7 @@ mod tests {
                 read_as: Vec::new(),
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
+                swapped: false,
             },
             false,
         );
@@ -1066,6 +1069,7 @@ mod tests {
                 read_as: Vec::new(),
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
+                swapped: false,
             },
             false,
         );
@@ -1086,6 +1090,7 @@ mod tests {
             read_as: Vec::new(),
             variables: Vec::new(),
             text_as_uses: Vec::new(),
+            swapped: false,
         };
         let r = find(
             &empty(Empty::InScope {
@@ -1146,6 +1151,7 @@ mod tests {
             read_as: Vec::new(),
             variables: Vec::new(),
             text_as_uses: Vec::new(),
+            swapped: false,
         };
         let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
             find(
@@ -1190,6 +1196,7 @@ mod tests {
                     read_as: Vec::new(),
                     variables: Vec::new(),
                     text_as_uses: Vec::new(),
+                    swapped: false,
                 },
                 false,
             )
@@ -1265,6 +1272,7 @@ mod tests {
             read_as: Vec::new(),
             variables: Vec::new(),
             text_as_uses: Vec::new(),
+            swapped: false,
         };
         let r = find(
             &empty(Empty::NotIndexed {
@@ -1317,6 +1325,7 @@ mod tests {
                 read_as: Vec::new(),
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
+                swapped: false,
             },
             false,
         );
@@ -1340,6 +1349,7 @@ mod tests {
                 read_as: Vec::new(),
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
+                swapped: false,
             },
             false,
         );

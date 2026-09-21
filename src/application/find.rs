@@ -188,6 +188,28 @@ pub struct Hits {
     /// is `∑ i ∈ s, f i` in every statement about it, and only a docstring
     /// spells it out.
     pub text_as_uses: Vec<String>,
+    /// Whether the rows state the pattern's relation with its two sides the
+    /// other way round, for the same reason. Only a relation that reads the
+    /// same both ways is turned: a lemma stating `b = a` answers `a = b` with
+    /// one `.symm`, and one stating `b ≤ a` answers nothing about `a ≤ b`.
+    pub swapped: bool,
+}
+
+/// The relations whose two sides can trade places without changing what a
+/// lemma says, as a reader uses it.
+const SYMMETRIC: &[&str] = &["Eq", "Iff", "Ne"];
+
+/// The query with the two sides of its relation traded, where the relation
+/// is one of [`SYMMETRIC`] and trading them changes the question.
+fn turned(query: &Query) -> Option<Query> {
+    let shape = &query.shape;
+    let symmetric = shape.concl.as_ref().is_some_and(|c| SYMMETRIC.contains(&c.as_str()));
+    if !symmetric || shape.args.len() != 2 || shape.args[0] == shape.args[1] {
+        return None;
+    }
+    let mut out = query.clone();
+    out.shape.args.reverse();
+    Some(out)
 }
 
 /// What the words of a pattern that found nothing were read as, the second
@@ -311,6 +333,15 @@ impl Find<'_> {
                 }
             }
         }
+        let mut swapped = false;
+        if rows.is_empty()
+            && let Some(retry) = turned(&asked)
+        {
+            let found = self.repo.find(&retry)?;
+            if !found.is_empty() {
+                (rows, asked, swapped) = (found, retry, true);
+            }
+        }
         rows.sort_by_key(|d| query::rank(&asked, d));
         let truncated = rows.len() > asked.limit;
         rows.truncate(asked.limit);
@@ -318,7 +349,7 @@ impl Find<'_> {
             true => Some(self.diagnose(&asked, &reading.called)?),
             false => None,
         };
-        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses })
+        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses, swapped })
     }
 
     /// The constants each bare word in the pattern could be naming, commonest

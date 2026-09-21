@@ -57,6 +57,11 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("\\", "SDiff.sdiff", 70, true),
     ("•", "HSMul.hSMul", 73, false),
     ("^", "HPow.hPow", 75, false),
+    // Mathlib's set notation. `×ˢ` is the class `SProd`, not `Set.prod`, and
+    // is the same symbol for `Finset` and `Filter`: see [`lex`].
+    ("⁻¹'", "Set.preimage", 80, false),
+    ("''", "Set.image", 80, false),
+    ("×ˢ", "SProd.sprod", 82, false),
     ("∘", "Function.comp", 90, false),
     ("⁻¹", "Inv.inv", MAX, false),
 ];
@@ -343,6 +348,13 @@ fn lex(s: &str) -> Vec<String> {
         // wildcard, and not before `=`, so that `a!=b` is the `≠` it is typed
         // for.
         let in_name = (c == '?' || (c == '!' && cs.peek() != Some(&'='))) && is_ident(&cur);
+        // `f '' s`, an image. Only where no name is being written, since
+        // `x''` is a name, as it is in Lean.
+        if c == '\'' && cur.is_empty() && cs.peek() == Some(&'\'') {
+            cs.next();
+            out.push("''".to_string());
+            continue;
+        }
         if c.is_alphanumeric() || c == '.' || c == '_' || c == '\'' || in_name {
             cur.push(c);
             continue;
@@ -380,12 +392,23 @@ fn lex(s: &str) -> Vec<String> {
                 }
                 out.push(sym);
             }
+            // `⁻¹'` is a preimage and not an inverse: the prime makes it
+            // infix, and left to itself it lexed as an identifier `'` that
+            // named nothing.
             '⁻' => {
                 let mut sym = String::from(c);
                 while cs.peek().is_some_and(|n| SUPERSCRIPTS.contains(*n)) {
                     sym.push(cs.next().unwrap_or_default());
                 }
+                if sym == "⁻¹" && cs.peek() == Some(&'\'') {
+                    sym.push(cs.next().unwrap_or_default());
+                }
                 out.push(sym);
+            }
+            // `ˢ` is a letter to Rust, and `×ˢ` was a `×` beside a variable.
+            '×' if cs.peek() == Some(&'ˢ') => {
+                cs.next();
+                out.push("×ˢ".to_string());
             }
             // What follows the bracket of an index says which index it is --
             // `l[i]?` is another constant from `l[i]` -- and belongs to the
@@ -681,6 +704,12 @@ fn notation_at(
     }
 }
 
+/// Whether this token is the postfix `⁻¹` (or a power of it), which binds to
+/// the term before it, rather than the infix `⁻¹'`.
+fn is_postfix(t: &str) -> bool {
+    t.starts_with('⁻') && !t.ends_with('\'')
+}
+
 /// Whether a term can end with this token: a name, a `_`, a literal, a postfix
 /// operator or something that closes. An opening `|` is excluded by the caller,
 /// which can see it opened.
@@ -688,7 +717,7 @@ fn ends_term(t: &str) -> bool {
     t == "_"
         || is_ident(t)
         || is_numeral(t)
-        || t.starts_with('⁻')
+        || is_postfix(t)
         || ["]", "}", "⟩", "⦄"].contains(&t)
         || BRACKETS.iter().any(|(_, close, _)| t.starts_with(close))
 }
@@ -882,7 +911,7 @@ fn terms(tokens: &[String]) -> Vec<&[String]> {
                 i = end;
             }
             None => {
-                if t.starts_with('⁻')
+                if is_postfix(t)
                     && let Some(last) = out.last_mut().filter(|r| r.end == i)
                 {
                     last.end = i + 1;
@@ -1168,6 +1197,26 @@ mod tests {
         assert_eq!(parse("(Real.log x)⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
         assert_eq!(parse("x⁻¹⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
         assert_eq!(parse("Real.exp x⁻¹ * y ≤ _").query.shape.args[0], arg("HMul.hMul"));
+    }
+
+    /// Mathlib's set notation, as `Set.prod_univ` prints: `s ×ˢ Set.univ =
+    /// Prod.fst ⁻¹' s`. Read as nothing, `⁻¹'` and `×ˢ` left an equation
+    /// between two unknowns, and the search refused rather than widen.
+    #[test]
+    fn set_notation_is_read_as_the_constants_it_stands_for() {
+        let p = parse("Prod.fst ⁻¹' _ = _ ×ˢ Set.univ");
+        assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+        assert_eq!(p.query.shape.args, vec![arg("Set.preimage"), arg("SProd.sprod")]);
+        assert!(!p.variables.contains(&"ˢ".to_string()), "{:?}", p.variables);
+        assert_eq!(parse("f '' s ⊆ _").query.shape.args[0], arg("Set.image"));
+        // Tighter than a union and looser than an application: `f ⁻¹' s ∪ t`
+        // is a union of a preimage, and `f ⁻¹' g x` a preimage of `g x`.
+        assert_eq!(parse("f ⁻¹' s ∪ t = _").query.shape.args[0], arg("Union.union"));
+        assert_eq!(parse("f ⁻¹' g x = _").query.shape.args[0], arg("Set.preimage"));
+        // The inverse it is spelled like is still postfix, and still an
+        // inverse; a name with two primes is still a name.
+        assert_eq!(parse("x⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
+        assert_eq!(parse("Foo.x'' = _").query.shape.args[0], arg("Foo.x''"));
     }
 
     #[test]

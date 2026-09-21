@@ -199,6 +199,21 @@ dt: Int.add_one_le_iff is not in the index, and `Int` is a namespace Lean core
     so `--name` cannot reach it either
 ```
 
+One miss is not reported but answered. An equation, an `↔` or a `≠` states
+the same lemma whichever way round it is written, so a pattern that finds
+nothing is asked again with its two sides traded, and the rows that come back
+are marked as turned:
+
+```
+$ dt find "Prod.fst ⁻¹' _ = _ ×ˢ Set.univ"
+dt: nothing states it that way round; these state it with the two sides swapped
+Set.prod_univ  theorem  Mathlib.Data.Set.Prod
+  ∀ {α : Type u_1} {β : Type u_2} {s : Set α}, s ×ˢ Set.univ = Prod.fst ⁻¹' s
+```
+
+An order is not turned: `b ≤ a` is no answer to `a ≤ b`, and there the miss
+still says that the other way round would match.
+
 Two asks are refused outright rather than answered with an empty result, because
 a closed set can name what was meant and a contradiction is not an absence:
 

@@ -779,6 +779,48 @@ fn a_pattern_that_matches_nothing_is_answered_about_the_pattern() {
     assert!(matches!(found, Some(Empty::NoSuchShape { swapped: true, .. })), "got {found:?}");
 }
 
+/// An equation is one lemma whichever way round it is stated: `Set.prod_univ`
+/// says `s ×ˢ Set.univ = Prod.fst ⁻¹' s`, and a reader who wrote the sides the
+/// other way wants it, not a note that it exists. An order is another matter:
+/// `b ≤ a` is not an answer to `a ≤ b`, and there the note stays the answer.
+#[test]
+fn an_equation_found_only_the_other_way_round_is_answered_with_it() {
+    use discrtree::domain::decl::{ArgHead, Shape};
+    let repo = FakeRepo {
+        decls: vec![
+            shaped_as("Set.prod_univ", "M", "Eq", &["_", "SProd.sprod", "Set.preimage"], &[]),
+            shaped_as("Real.sqrt_le_log", "M", "LE.le", &["_", "_", "Real.sqrt", "Real.log"], &[]),
+        ],
+    };
+    let pattern = |concl: &str, l: &str, r: &str| {
+        let mut q = Query::new();
+        q.shape =
+            Shape::new(Some(DeclName::new(concl)), vec![ArgHead::parse(l), ArgHead::parse(r)]);
+        q
+    };
+    let hits = Find { repo: &repo, build: &NoBuild }
+        .run(&pattern("Eq", "Set.preimage", "SProd.sprod"))
+        .unwrap();
+    assert_eq!(hits.rows.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["Set.prod_univ"]);
+    assert!(hits.swapped, "the reader is told the rows are turned");
+
+    // Stated as asked, nothing is turned and nothing is said.
+    let hits = Find { repo: &repo, build: &NoBuild }
+        .run(&pattern("Eq", "SProd.sprod", "Set.preimage"))
+        .unwrap();
+    assert!(!hits.swapped && hits.rows.len() == 1);
+
+    let hits = Find { repo: &repo, build: &NoBuild }
+        .run(&pattern("LE.le", "Real.log", "Real.sqrt"))
+        .unwrap();
+    assert!(hits.rows.is_empty() && !hits.swapped);
+    assert!(
+        matches!(hits.empty, Some(Empty::NoSuchShape { swapped: true, .. })),
+        "{:?}",
+        hits.empty
+    );
+}
+
 /// A pattern that fails *with* a flag is still a combination: the flag is
 /// there to be dropped, and the shape is not what is wrong.
 #[test]

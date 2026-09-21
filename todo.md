@@ -26,6 +26,28 @@ and should elaborate in a pattern; and the spelled-out form missed because
 notation stands for, or at least accept `SProd.sprod`. The right output for
 the first command is `Set.prod_univ` (the equation up to symmetry).
 
+Fixed in 0.55.0. `⁻¹'`, `''` and `×ˢ` are notation to the pattern parser, for
+`Set.preimage`, `Set.image` and `SProd.sprod`, at Mathlib's own strengths (80,
+80, 82, all to the right). The lexer had cut them into a postfix `⁻¹` and a
+name `'`, an identifier `''`, and a `×` beside a one-letter variable `ˢ`.
+
+And an `=`, `↔` or `≠` pattern that matches nothing is searched again with its
+two sides traded, the rows marked on stderr as turned, since a lemma stating
+the other side first is the same lemma with one `.symm`. So the first command
+now answers `Set.prod_univ`. An order is not turned; its miss still says the
+other way round matches.
+
+The second command is still `no match`, and correctly: `Set.prod` is a
+constant of its own and `Set.prod_univ` does not mention it. Written with
+`SProd.sprod` it answers. Telling a reader that the definition they named is
+what a notation class unfolds to would need the instances, which the index
+does not keep.
+
+Found on the way, not fixed here: `⊆` on sets is `HasSubset.Subset` to the
+parser and `LE.le` in the index, because Mathlib's `Set` subset is its order.
+`f '' (s ∩ t) ≤ _` finds `Set.image_inter_subset`; `f '' (s ∩ t) ⊆ _` names
+`LE.le` among the relations those arguments go together under.
+
 ## A `--in` miss blames `--in`, when the module it names is populated and it is `--name` that matches nothing
 
 Found 2026-09-19, dt 0.53.0, on a Lean project of my own beside Mathlib,

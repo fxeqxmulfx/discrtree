@@ -370,6 +370,11 @@ impl App {
                  and only a docstring spells the name"
             );
         }
+        if hits.swapped {
+            eprintln!(
+                "dt: nothing states it that way round; these state it with the two sides swapped"
+            );
+        }
         print!("{}", render::find(&hits, args.long));
         let from = match hits.rows.is_empty() {
             false => hits.rows.iter().map(|d| d.source.clone()).collect(),
