@@ -2,6 +2,28 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A `⊆` pattern misses every `Set` and `Finset` lemma, which the index keys by `≤`
+
+Found 2026-09-21, dt 0.55.0, checking the 0.55.0 fix on the same project:
+
+    $ dt find "f '' (s ∩ t) ⊆ _"
+    no match: nothing has that shape; those arguments go together under `Eq`
+    (881), `LE.le` (134), `Membership.mem` (23)
+
+    $ dt find "f '' (s ∩ t) ≤ _"
+    Set.image_inter_subset  theorem  Mathlib.Data.Set.Image
+      ... f '' (s ∩ t) ⊆ f '' s ∩ f '' t
+
+Mathlib's `⊆` on `Set` and `Finset` elaborates to `LE.le` and only prints as
+`⊆`: of the unhypothesised statements printed with a `⊆`, 1043 have the
+conclusion `LE.le` and 69 -- lists, multisets -- `HasSubset.Subset`. `⊂` is
+`LT.lt` the same way. The parser reads `⊆` as `HasSubset.Subset` only, so a
+pattern copied from a `Set` goal misses exactly the lemmas it was copied from.
+And a `⊆` nested in a pattern becomes `--uses HasSubset.Subset`, which rules
+those lemmas out even where the conclusion is something else.
+
+Seen with dt 0.55.0, 2026-09-21.
+
 ## Patterns reject the set notations `⁻¹'` and `×ˢ`
 
 Found 2026-09-21, dt 0.54.0, on a Lean project beside Mathlib. I wanted the
