@@ -34,6 +34,7 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     // Elaborated as `¬ (a ∈ s)`: see [`parse`], which says so.
     ("∉", "Membership.mem", 50, false),
     ("⊆", "HasSubset.Subset", 50, false),
+    ("⊂", "HasSSubset.SSubset", 50, false),
     ("∣", "Dvd.dvd", 50, false),
     ("<+", "List.Sublist", 50, false),
     ("<+:", "List.IsPrefix", 50, false),
@@ -657,7 +658,17 @@ fn conditions_of(hypotheses: &[Vec<String>]) -> Vec<DeclName> {
             .into_iter()
             .chain(rest)
         })
+        .filter(is_condition)
         .collect()
+}
+
+/// Whether a constant the pattern's notation names can be a `--uses`
+/// condition. `⊆` is `LE.le` in a `Set` lemma and `HasSubset.Subset` in a
+/// `List` one, and a condition can name only one of them: as a head it is
+/// searched under both, and anywhere else it rules out nothing rather than
+/// half of what it means. See [`crate::domain::decl::keyed_as`].
+fn is_condition(n: &DeclName) -> bool {
+    crate::domain::decl::keyed_as(n).len() == 1
 }
 
 /// The loosest top-level notation that is a relation or looser, with the
@@ -755,6 +766,9 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
                 return (opens && closed).then(|| DeclName::new(*head));
             }
             let (_, head, prec, _) = notation_at(tokens, &depth, i)?;
+            if !is_condition(&DeclName::new(head)) {
+                return None;
+            }
             let ranges = prec <= RELATION
                 && opener(i).is_some_and(|j| BINDER_PREFIXES.contains(&tokens[j].as_str()));
             (!ranges).then(|| DeclName::new(head))
@@ -1217,6 +1231,17 @@ mod tests {
         // inverse; a name with two primes is still a name.
         assert_eq!(parse("x⁻¹ = _").query.shape.args[0], arg("Inv.inv"));
         assert_eq!(parse("Foo.x'' = _").query.shape.args[0], arg("Foo.x''"));
+    }
+
+    /// A `⊆` inside a pattern is `LE.le` or `HasSubset.Subset` by the type it
+    /// is about, which a pattern does not say: a condition naming either rules
+    /// out half the lemmas the other names. See `decl::keyed_as`.
+    #[test]
+    fn a_nested_subset_is_no_condition() {
+        let p = parse("s ⊆ t → f '' s ⊆ f '' t");
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+        assert_eq!(p.query.shape.concl, Some(DeclName::new("HasSubset.Subset")));
+        assert_eq!(parse("s ⊂ t").query.shape.concl, Some(DeclName::new("HasSSubset.SSubset")));
     }
 
     #[test]

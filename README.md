@@ -214,6 +214,13 @@ Set.prod_univ  theorem  Mathlib.Data.Set.Prod
 An order is not turned: `b ≤ a` is no answer to `a ≤ b`, and there the miss
 still says that the other way round would match.
 
+`⊆` and `⊂` are searched under two heads. Mathlib elaborates them to `LE.le`
+and `LT.lt` on `Set` and `Finset`, which only print as `⊆` and `⊂`, and to
+`HasSubset.Subset` and `HasSSubset.SSubset` on lists and multisets. A pattern
+does not say which type it is about, so it matches either, and a `⊆` anywhere
+but the head is no `--uses` condition. `≤` is not widened the other way: on a
+list it is an order, not a sublist.
+
 Two asks are refused outright rather than answered with an empty result, because
 a closed set can name what was meant and a contradiction is not an absence:
 

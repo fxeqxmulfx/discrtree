@@ -700,8 +700,10 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
                 binds.push(format!("*{}", glob_escaped(c.as_str())));
             }
             false => {
-                where_clauses.push("d.concl = ?".into());
-                binds.push(c.to_string());
+                let heads = decl::keyed_as(c);
+                let marks = vec!["?"; heads.len()].join(", ");
+                where_clauses.push(format!("d.concl IN ({marks})"));
+                binds.extend(heads.iter().map(ToString::to_string));
             }
         }
     }

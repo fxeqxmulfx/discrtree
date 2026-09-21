@@ -177,7 +177,7 @@ impl Shape {
     /// writes. A pattern with *more* arguments cannot match.
     pub fn matches(&self, other: &Shape) -> bool {
         if let Some(c) = &self.concl
-            && !other.concl.as_ref().is_some_and(|o| c.names(o))
+            && !other.concl.as_ref().is_some_and(|o| keyed_as(c).iter().any(|k| k.names(o)))
         {
             return false;
         }
@@ -190,6 +190,27 @@ impl Shape {
         (0..=other.args.len() - self.args.len())
             .any(|off| self.args.iter().zip(&other.args[off..]).all(|(p, a)| p.matches(a)))
     }
+}
+
+/// Relations written with one symbol that Mathlib elaborates, for some types,
+/// as another. `⊆` on `Set` and `Finset` is `LE.le` and only prints as `⊆`,
+/// and of the statements printed with one, 1043 were keyed `LE.le` and 69 --
+/// lists, multisets -- `HasSubset.Subset`. One way only: `≤` on a list is not
+/// a sublist, and a pattern written with it asks for an order.
+const ALSO_KEYED: &[(&str, &str)] =
+    &[("HasSubset.Subset", "LE.le"), ("HasSSubset.SSubset", "LT.lt")];
+
+/// The conclusion heads a statement written with `head` can be keyed by in the
+/// index: `head`, and what the same symbol elaborates to elsewhere.
+pub fn keyed_as(head: &DeclName) -> Vec<DeclName> {
+    std::iter::once(head.clone())
+        .chain(
+            ALSO_KEYED
+                .iter()
+                .filter(|(written, _)| *written == head.as_str())
+                .map(|(_, keyed)| DeclName::new(*keyed)),
+        )
+        .collect()
 }
 
 /// What the type of a constructor's generated `elim` says, and a handwritten

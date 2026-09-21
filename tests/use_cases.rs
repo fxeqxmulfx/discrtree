@@ -779,6 +779,41 @@ fn a_pattern_that_matches_nothing_is_answered_about_the_pattern() {
     assert!(matches!(found, Some(Empty::NoSuchShape { swapped: true, .. })), "got {found:?}");
 }
 
+/// `⊆` is written one way and keyed two: a `Set` lemma elaborates it to
+/// `LE.le`, a `List` one to `HasSubset.Subset`. A pattern copied from a `Set`
+/// goal has to find the lemma it was copied from, and the list lemma beside
+/// it; a pattern written with `≤` still asks for an order and nothing else.
+#[test]
+fn a_subset_pattern_finds_the_lemmas_that_elaborate_it_to_an_order() {
+    use discrtree::domain::pattern::parse;
+    let repo = FakeRepo {
+        decls: vec![
+            shaped_as(
+                "Set.image_inter_subset",
+                "M",
+                "LE.le",
+                &["Set", "Set.instLE", "Set.image", "Inter.inter"],
+                &["Set.image", "Inter.inter"],
+            ),
+            shaped_as(
+                "List.image_inter_subset",
+                "M",
+                "HasSubset.Subset",
+                &["List", "_", "Set.image", "Inter.inter"],
+                &["Set.image", "Inter.inter"],
+            ),
+        ],
+    };
+    let names = |pattern: &str| {
+        let hits = Find { repo: &repo, build: &NoBuild }.run(&parse(pattern).query).unwrap();
+        let mut n: Vec<String> = hits.rows.iter().map(|d| d.name.to_string()).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names("f '' (s ∩ t) ⊆ _"), ["List.image_inter_subset", "Set.image_inter_subset"]);
+    assert_eq!(names("f '' (s ∩ t) ≤ _"), ["Set.image_inter_subset"]);
+}
+
 /// An equation is one lemma whichever way round it is stated: `Set.prod_univ`
 /// says `s ×ˢ Set.univ = Prod.fst ⁻¹' s`, and a reader who wrote the sides the
 /// other way wants it, not a note that it exists. An order is another matter:

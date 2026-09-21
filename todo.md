@@ -24,6 +24,18 @@ those lemmas out even where the conclusion is something else.
 
 Seen with dt 0.55.0, 2026-09-21.
 
+Fixed in 0.56.0. A conclusion written `⊆` is matched under `HasSubset.Subset`
+and under `LE.le`, and one written `⊂` under `HasSSubset.SSubset` and `LT.lt`
+-- in the SQL filter, in the domain's shape match and in the ranking alike, so
+the probes that diagnose a miss ask what the search asked. One way only: `≤`
+still asks for an order. `⊂` is notation to the parser now; it was read as
+nothing. A `⊆` or `⊂` anywhere but the head, a hypothesis included, is no
+`--uses` condition, since it could name only one of its two constants.
+
+    $ dt find "f '' (s ∩ t) ⊆ _"          -> Set.image_inter_subset, ...
+    $ dt find "s ⊆ t → f '' s ⊆ f '' t"    -> Set.image_mono, ...
+    $ dt find "_ ⊂ insert _ _"             -> Set.ssubset_insert, ...
+
 ## Patterns reject the set notations `⁻¹'` and `×ˢ`
 
 Found 2026-09-21, dt 0.54.0, on a Lean project beside Mathlib. I wanted the

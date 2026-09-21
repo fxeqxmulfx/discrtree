@@ -213,7 +213,7 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
         score += name_score(n, d);
     }
     if let (Some(asked), Some(concl)) = (&q.shape.concl, &d.shape.concl)
-        && asked.names(concl)
+        && crate::domain::decl::keyed_as(asked).iter().any(|k| k.names(concl))
     {
         score += 4;
     }
