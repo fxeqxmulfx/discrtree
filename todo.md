@@ -2,6 +2,30 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## Patterns reject the set notations `⁻¹'` and `×ˢ`
+
+Found 2026-09-21, dt 0.54.0, on a Lean project beside Mathlib. I wanted the
+lemma rewriting a product with `univ` into a preimage under `Prod.fst`:
+
+    $ dt find "Prod.fst ⁻¹' _ = _ ×ˢ Set.univ"
+    No match: `'`, `×` in the pattern read as nothing here; searching without
+    them would answer a wider question — write the constant it stands for
+    instead, or drop that part of the pattern and give it as --uses
+
+Spelling the constants out did not help either:
+
+    $ dt find "Set.preimage Prod.fst _ = Set.prod _ Set.univ"
+    No match: nothing has that shape; each of `Set.preimage`, `Set.prod`
+    matches without the others
+
+The lemma exists: `Set.prod_univ : s ×ˢ Set.univ = Prod.fst ⁻¹' s`, which
+`dt find --name prod_univ --in Mathlib.Data.Set` found at once. Two gaps:
+`⁻¹'` and `×ˢ` are ordinary Mathlib notation (`Set.preimage`, `SProd.sprod`)
+and should elaborate in a pattern; and the spelled-out form missed because
+`×ˢ` is `SProd.sprod`, not `Set.prod`. The error could name the constant a
+notation stands for, or at least accept `SProd.sprod`. The right output for
+the first command is `Set.prod_univ` (the equation up to symmetry).
+
 ## A `--in` miss blames `--in`, when the module it names is populated and it is `--name` that matches nothing
 
 Found 2026-09-19, dt 0.53.0, on a Lean project of my own beside Mathlib,
