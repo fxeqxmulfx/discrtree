@@ -2,6 +2,34 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A square written `x ^ 2` misses the lemma Mathlib states with `x * x`
+
+Found 2026-09-22, dt 0.56.0, looking for Cauchy-Schwarz against a unit vector,
+`⟪x, w⟫² ≤ ‖w‖²`, in the form a proof goal carries it:
+
+    $ dt find 'inner ℝ _ _ ^ 2 ≤ _'
+    No match: `inner` is `Inner.inner` in the index — Lean prints an exported
+    name without its namespace — and that matches nothing either
+    $ dt find '⟪_, _⟫_ℝ ^ 2 ≤ _'
+    no match: the shape matches, but nothing of that shape mentions
+    `Inner.inner`; ...
+
+The lemma is there, written as a product:
+
+    $ dt find 'inner ℝ _ _ * inner ℝ _ _ ≤ _'
+    real_inner_mul_inner_self_le  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+      ... ⟪x, y⟫_ℝ * ⟪x, y⟫_ℝ ≤ ⟪x, x⟫_ℝ * ⟪y, y⟫_ℝ
+
+Both answers are literally true, but a square is spelled both ways across
+Mathlib (`sq_nonneg` vs `mul_self_nonneg`, `sq_abs` vs `abs_mul_abs_self`), and
+a user writing either spelling means both.  The first message also puts the
+blame on the resolution of `inner`, which worked; what failed is the `^ 2`.
+
+The right output: match `e ^ 2` against `e * e` as well (and the reverse),
+announced on stderr the way the `inner` rewrite is; or at least, on a miss,
+retry with the other spelling and name it -- "no match for `_ ^ 2`; as
+`_ * _`: real_inner_mul_inner_self_le, ...".
+
 ## A `⊆` pattern misses every `Set` and `Finset` lemma, which the index keys by `≤`
 
 Found 2026-09-21, dt 0.55.0, checking the 0.55.0 fix on the same project:
