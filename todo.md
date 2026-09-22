@@ -2,6 +2,52 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A power in a pattern ranks nothing, so `0 ≤ a * a` puts every product before the square
+
+Found 2026-09-22, dt 0.57.0, checking the 0.57.0 fix on the same project. A
+square written as a product is matched by its head, `HMul.hMul`, which every
+product has, and the rows that write the square are ranked among the rest by
+the length of their type:
+
+    $ dt find '0 ≤ a * a'
+    Real.sign_mul_nonneg  theorem  Mathlib.Basic.Real.Sign
+      ∀ (r : ℝ), 0 ≤ r.sign * r
+    Lean.Omega.Int.ofNat_mul_nonneg  theorem  Init.Omega.Int
+      ∀ {a b : Nat}, 0 ≤ ↑a * ↑b
+    Real.mul_log_nonneg  theorem  Mathlib.Analysis.SpecialFunctions.Log.NegMulLog
+      ∀ {x : ℝ}, 1 ≤ x → 0 ≤ x * Real.log x
+    ...
+    10 shown, more match; refine or --limit
+
+`mul_self_nonneg` is 24th of 45. `0 ≤ a ^ 2` the same way puts `0 ≤ 0 ^ x`
+and `1 ≤ 2 ^ n` first and `sq_nonneg` 25th of 42.
+
+And the other way round and the other spelling are second looks, taken only
+when nothing matches, so a product that matches by heads never gets them:
+
+    $ dt find '‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ'
+    InnerProductGeometry.cos_angle_mul_norm_mul_norm  theorem  Mathlib.Geometry.Euclidean.Angle.Unoriented.Basic
+      ∀ {V : Type u_1} [inst : NormedAddCommGroup V] [inst_1 : InnerProductSpace ℝ V] (x y : V),
+    1 result(s)
+
+    $ dt find 'x * x * x = _'
+    EReal.top_mul_bot  theorem  Mathlib.Data.EReal.Operations
+      ⊤ * ⊥ = ⊥
+    ...
+
+The product in `cos_angle_mul_norm_mul_norm` is `Real.cos (angle x y) * (‖x‖ *
+‖y‖)`; `real_inner_self_eq_norm_mul_norm` states the square with its sides
+swapped, and `real_inner_self_eq_norm_sq` as `‖x‖ ^ 2`. The cube answers 2700
+products and not `pow_three'`, `a ^ 3 = a * a * a`, which states it the other
+way round.
+
+The right output: a row whose statement writes the pattern's power ranks above
+one that only shares its head; and a look whose rows all only share it is a
+miss to the second looks, which answer when they find the power, with those
+rows kept as the answer when they do not.
+
+Seen with dt 0.57.0, 2026-09-22.
+
 ## A square written `x ^ 2` misses the lemma Mathlib states with `x * x`
 
 Found 2026-09-22, dt 0.56.0, looking for Cauchy-Schwarz against a unit vector,
