@@ -16,7 +16,7 @@ use crate::application::status::{self, Status};
 use crate::domain::decl::{self, DeclKind};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::pattern;
-use crate::domain::query::Query;
+use crate::domain::query::{Power, Query, Spelling};
 use crate::domain::source::SourceId;
 use crate::error::{Error, Result, bail};
 use crate::infrastructure::config::{self, Config, Source};
@@ -374,6 +374,16 @@ impl App {
             eprintln!(
                 "dt: nothing states it that way round; these state it with the two sides swapped"
             );
+        }
+        // In one grouping of the factors: the rows may group them another
+        // way, and what was traded is how many there are.
+        let spelt = |p: Power| match p.spelling {
+            Spelling::Pow => format!("_ ^ {}", p.exponent),
+            Spelling::Mul => vec!["_"; p.exponent as usize].join(" * "),
+        };
+        for p in &hits.respelled {
+            let (written, stated) = (spelt(*p), spelt(p.respelled()));
+            eprintln!("dt: `{written}` read as `{stated}` — nothing states it as written");
         }
         print!("{}", render::find(&hits, args.long));
         let from = match hits.rows.is_empty() {

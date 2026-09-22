@@ -4,7 +4,8 @@ use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
 use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
-use crate::domain::query::{self, Query};
+use crate::domain::pattern;
+use crate::domain::query::{self, Power, Query};
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -175,10 +176,10 @@ pub struct Hits {
     pub truncated: bool,
     /// `None` when something matched.
     pub empty: Option<Empty>,
-    /// What a bare word in the pattern was read as, when that is the only
-    /// reason there is anything to show. Reported rather than applied
-    /// silently: the rows below answer a question spelled differently from
-    /// the one that was asked.
+    /// What a bare word in the pattern was read as, when the rows answer the
+    /// pattern read that way. Reported rather than applied silently: the rows
+    /// below answer a question spelled differently from the one that was
+    /// asked.
     pub read_as: Vec<(String, DeclName)>,
     /// Words of the pattern read as variables on that second look, for the
     /// same reason. See [`Reading::variables`].
@@ -193,6 +194,11 @@ pub struct Hits {
     /// same both ways is turned: a lemma stating `b = a` answers `a = b` with
     /// one `.symm`, and one stating `b ≤ a` answers nothing about `a ≤ b`.
     pub swapped: bool,
+    /// The powers the pattern wrote, as it wrote them, when the rows write
+    /// them the other way, for the same reason. `sq_nonneg` is about `a ^ 2`
+    /// and `mul_self_nonneg` about `a * a`, and whoever writes either means
+    /// both. See [`Power`].
+    pub respelled: Vec<Power>,
 }
 
 /// The relations whose two sides can trade places without changing what a
@@ -209,7 +215,57 @@ fn turned(query: &Query) -> Option<Query> {
     }
     let mut out = query.clone();
     out.shape.args.reverse();
+    // A power stays with the side it is written on.
+    for (i, _) in &mut out.powers {
+        *i = 1 - *i;
+    }
     Some(out)
+}
+
+/// The query asked with the powers its pattern writes spelled the other way:
+/// all of them first, then each on its own where there are more. Each comes
+/// with the powers as the pattern wrote them, which is what the reader is
+/// told was traded.
+///
+/// A power is traded where the shape has its head, which is where the pattern
+/// wrote it; one further down is a constant of the statement and no argument
+/// of the shape, and is not asked about again.
+fn respellings(query: &Query) -> Vec<(Query, Vec<Power>)> {
+    let traded: Vec<usize> = (0..query.powers.len())
+        .filter(|&j| {
+            let (i, p) = query.powers[j];
+            query.shape.args.get(i) == Some(&ArgHead::Named(p.head()))
+        })
+        .collect();
+    let mut sets = vec![traded.clone()];
+    if traded.len() > 1 {
+        sets.extend(traded.iter().map(|&j| vec![j]));
+    }
+    sets.into_iter()
+        .filter(|set| !set.is_empty())
+        .map(|set| {
+            let mut out = query.clone();
+            let mut written = Vec::new();
+            for j in set {
+                let (i, p) = query.powers[j];
+                out.shape.args[i] = ArgHead::Named(p.respelled().head());
+                out.powers[j] = (i, p.respelled());
+                written.push(p);
+            }
+            written.sort();
+            written.dedup();
+            (out, written)
+        })
+        .collect()
+}
+
+/// Whether the statement writes each power the query does, spelled the way
+/// the query spells it, on the side the query has it. The index keys on heads
+/// and has `HMul.hMul` for `x * x` and for `x * y` alike: without this, a
+/// square asked for as a product would be answered by every product.
+fn writes_powers(query: &Query, d: &Decl) -> bool {
+    let has = pattern::powers_in(&d.ty);
+    query.powers.iter().all(|p| has.contains(p))
 }
 
 /// What the words of a pattern that found nothing were read as, the second
@@ -291,25 +347,17 @@ impl Find<'_> {
         // resolved first.
         let mut asked = query.clone();
         let mut reading = Reading::default();
-        let mut read_as = Vec::new();
-        let mut variables = Vec::new();
+        let mut resolved = false;
         if rows.is_empty() {
             reading = self.resolve(query)?;
+            // Kept when it finds nothing too, so that the looks below are
+            // taken at the words as the index spells them: `inner ℝ _ _ ^ 2 ≤
+            // _` needs `inner` read as `Inner.inner` and its square written as
+            // a product before anything answers.
             if let Some(retry) = qualified(query, &reading) {
-                let found = self.repo.find(&retry)?;
-                // A variable is reported whatever the retry found: with no
-                // constant to blame, the question left to diagnose is the one
-                // without the variables in it.
-                if !found.is_empty() || reading.called.is_empty() {
-                    read_as = reading
-                        .called
-                        .iter()
-                        .filter_map(|(w, c)| c.first().map(|n| (w.clone(), n.clone())))
-                        .collect();
-                    variables = reading.variables.clone();
-                    rows = found;
-                    asked = retry;
-                }
+                rows = self.repo.find(&retry)?;
+                asked = retry;
+                resolved = true;
             }
         }
         let mut text_as_uses = Vec::new();
@@ -342,6 +390,40 @@ impl Find<'_> {
                 (rows, asked, swapped) = (found, retry, true);
             }
         }
+        let mut respelled = Vec::new();
+        if rows.is_empty() {
+            'respelt: for (retry, written) in respellings(&asked) {
+                let turn = turned(&retry).map(|t| (t, true));
+                for (retry, turn) in std::iter::once((retry, false)).chain(turn) {
+                    let mut found = self.repo.find(&retry)?;
+                    found.retain(|d| writes_powers(&retry, d));
+                    if !found.is_empty() {
+                        (rows, asked, swapped, respelled) = (found, retry, turn, written);
+                        break 'respelt;
+                    }
+                }
+            }
+        }
+        // A variable is reported whatever was found: with no constant to
+        // blame, the question left to diagnose is the one without the
+        // variables in it. A constant is reported when the rows answer it, and
+        // otherwise what is diagnosed is the pattern as it was written, whose
+        // word it is that the reader is told about.
+        let stands = resolved && (!rows.is_empty() || reading.called.is_empty());
+        let (read_as, variables) = match stands {
+            true => (
+                reading
+                    .called
+                    .iter()
+                    .filter_map(|(w, c)| c.first().map(|n| (w.clone(), n.clone())))
+                    .collect(),
+                reading.variables.clone(),
+            ),
+            false => (Vec::new(), Vec::new()),
+        };
+        if resolved && !stands {
+            asked = query.clone();
+        }
         rows.sort_by_key(|d| query::rank(&asked, d));
         let truncated = rows.len() > asked.limit;
         rows.truncate(asked.limit);
@@ -349,7 +431,7 @@ impl Find<'_> {
             true => Some(self.diagnose(&asked, &reading.called)?),
             false => None,
         };
-        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses, swapped })
+        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses, swapped, respelled })
     }
 
     /// The constants each bare word in the pattern could be naming, commonest

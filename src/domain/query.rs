@@ -23,6 +23,12 @@ pub struct Query {
     /// that an empty result blames `` `List.range'` in the pattern `` rather
     /// than a flag the reader never typed.
     pub pattern_uses: Vec<DeclName>,
+    /// The arguments of `shape` that the pattern writes as a power of one
+    /// term, by position, and how it writes each. Not a condition either: a
+    /// shape keys on heads, and `x ^ 2` is `HPow.hPow` as `x ^ n` is. It says
+    /// which arguments may be asked again spelled the other way. See
+    /// [`Power`].
+    pub powers: Vec<(usize, Power)>,
     /// Module prefix, e.g. `Mathlib.Analysis`.
     pub module: Option<String>,
     pub source: Option<SourceId>,
@@ -39,6 +45,48 @@ pub struct Query {
     /// Include what the compiler generated. See [`Decl::is_generated`].
     pub generated: bool,
     pub limit: usize,
+}
+
+/// A term multiplied by itself a numeral number of times, and how that is
+/// written. Mathlib spells a power both ways, often for the same fact --
+/// `sq_nonneg` is about `a ^ 2` and `mul_self_nonneg` about `a * a`,
+/// `pow_three'` says `a ^ 3 = a * a * a` -- and the index, which keeps heads
+/// only, has the two as `HPow.hPow` and `HMul.hMul`: as far as a shape can
+/// tell they are different questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Power {
+    /// How many factors of the term there are: 2 for a square, 3 for a cube.
+    pub exponent: u32,
+    pub spelling: Spelling,
+}
+
+/// How a [`Power`] is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Spelling {
+    /// With `^`: `x ^ 3`.
+    Pow,
+    /// As the product of its factors, grouped any way: `x * x * x`, `x * (x *
+    /// x)`, `x ^ 2 * x`.
+    Mul,
+}
+
+impl Power {
+    /// The head symbol a power written this way has.
+    pub fn head(self) -> DeclName {
+        DeclName::new(match self.spelling {
+            Spelling::Pow => "HPow.hPow",
+            Spelling::Mul => "HMul.hMul",
+        })
+    }
+
+    /// The same power, written the other way.
+    pub fn respelled(self) -> Power {
+        let spelling = match self.spelling {
+            Spelling::Pow => Spelling::Mul,
+            Spelling::Mul => Spelling::Pow,
+        };
+        Power { spelling, ..self }
+    }
 }
 
 /// Ten, not forty. A search is read in full by whoever asked it, and the

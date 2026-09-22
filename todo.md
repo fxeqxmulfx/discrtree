@@ -30,6 +30,27 @@ announced on stderr the way the `inner` rewrite is; or at least, on a miss,
 retry with the other spelling and name it -- "no match for `_ ^ 2`; as
 `_ * _`: real_inner_mul_inner_self_le, ...".
 
+Fixed in 0.57.0. A pattern that finds nothing is asked again with the powers
+its sides are written as spelled the other way: `x ^ n`, for any numeral `n`,
+as the product of `n` factors `x` in any grouping, and such a product as
+`x ^ n` -- all of them at once, then each on its own, and each of those turned
+where an equation may be. A row is kept only where its printed statement writes
+that power on that side, because the index has `HMul.hMul` for `x * y` too, and
+stderr says `` `_ ^ 2` read as `_ * _` — nothing states it as written ``. A
+bare word is resolved first and the power respelt in the resolved pattern, so
+both patterns above answer `real_inner_mul_inner_self_le`, with `inner` read
+as `Inner.inner` in the first. Factors are one term only when written alike
+with no `_` in them: `_ * _` and `s.card * t.card` are no squares. A power
+inside a side is not respelt. A pattern that misses both ways is diagnosed as
+before, the `inner` message included.
+
+The second spelling is a second look, as the other way round is, and a pattern
+that finds anything as written gets neither. A product seldom finds nothing,
+since `x * x` matches `x * y` by heads: `‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ` answers
+`cos_angle_mul_norm_mul_norm`, whose product is no square, and not
+`real_inner_self_eq_norm_mul_norm` turned or `real_inner_self_eq_norm_sq`
+respelt.
+
 ## A `⊆` pattern misses every `Set` and `Finset` lemma, which the index keys by `≤`
 
 Found 2026-09-21, dt 0.55.0, checking the 0.55.0 fix on the same project:

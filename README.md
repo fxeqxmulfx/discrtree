@@ -199,7 +199,7 @@ dt: Int.add_one_le_iff is not in the index, and `Int` is a namespace Lean core
     so `--name` cannot reach it either
 ```
 
-One miss is not reported but answered. An equation, an `↔` or a `≠` states
+Two misses are not reported but answered. An equation, an `↔` or a `≠` states
 the same lemma whichever way round it is written, so a pattern that finds
 nothing is asked again with its two sides traded, and the rows that come back
 are marked as turned:
@@ -213,6 +213,29 @@ Set.prod_univ  theorem  Mathlib.Data.Set.Prod
 
 An order is not turned: `b ≤ a` is no answer to `a ≤ b`, and there the miss
 still says that the other way round would match.
+
+The other is a power. Mathlib writes one both ways, often for the same fact —
+`sq_nonneg` is about `a ^ 2` and `mul_self_nonneg` about `a * a`, and `sq_abs`
+and `abs_mul_abs_self` are one lemma twice — and an index of heads has the two
+as `HPow.hPow` and `HMul.hMul`, different questions. So a side written `x ^ n`,
+for a numeral `n`, is asked again as the product of `n` factors `x`, grouped any
+way, and a side written as such a product is asked again as `x ^ n`. What comes
+back is checked against the printed statement, because by heads alone a square
+asked for as a product is answered by every product:
+
+```
+$ dt find '⟪_, _⟫_ℝ ^ 2 ≤ _' --long
+dt: `_ ^ 2` read as `_ * _` — nothing states it as written
+real_inner_mul_inner_self_le  theorem  Mathlib.Analysis.InnerProductSpace.Basic
+  ∀ {F : Type u_3} [inst : SeminormedAddCommGroup F] [inst_1 : InnerProductSpace ℝ F] (x y : F),
+  inner ℝ x y * inner ℝ x y ≤ inner ℝ x x * inner ℝ y y
+  -- Cauchy–Schwarz inequality for real inner products.
+```
+
+Factors are one term when they are written alike with no `_` in them: `x * x`
+is a square and `_ * _` is any product. A power inside a side is not asked
+about again, and a side is asked again only when the pattern found nothing,
+which one written as a product seldom does: `x * x` matches `x * y` by heads.
 
 `⊆` and `⊂` are searched under two heads. Mathlib elaborates them to `LE.le`
 and `LT.lt` on `Set` and `Finset`, which only print as `⊆` and `⊂`, and to

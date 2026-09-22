@@ -856,6 +856,129 @@ fn an_equation_found_only_the_other_way_round_is_answered_with_it() {
     );
 }
 
+/// Lemmas that write a power, and one that writes a product of two different
+/// terms, for a reader who spells the power the other way from the lemma
+/// they want.
+fn powers() -> FakeRepo {
+    let row = |name: &str, concl: &str, args: &[&str], consts: &[&str], ty: &str| {
+        let mut d = shaped_as(name, "M", concl, args, consts);
+        d.ty = ty.into();
+        d
+    };
+    let over = "∀ {F : Type u_3} [inst : SeminormedAddCommGroup F] \
+                [inst_1 : InnerProductSpace ℝ F] (x y : F),\n  ";
+    let order = ["Real", "Real.instLE", "HMul.hMul", "HMul.hMul"];
+    let inner = ["Inner.inner", "HMul.hMul"];
+    FakeRepo {
+        decls: vec![
+            row(
+                "real_inner_mul_inner_self_le",
+                "LE.le",
+                &order,
+                &inner,
+                &format!("{over}inner ℝ x y * inner ℝ x y ≤ inner ℝ x x * inner ℝ y y"),
+            ),
+            // A product of two inner products, and no square: `x * y` has the
+            // head `x * x` has, and only the statement tells them apart.
+            row(
+                "real_inner_mul_inner_le",
+                "LE.le",
+                &order,
+                &inner,
+                &format!("{over}inner ℝ x y * inner ℝ y x ≤ inner ℝ x x * inner ℝ y y"),
+            ),
+            row(
+                "real_inner_self_eq_norm_sq",
+                "Eq",
+                &["Real", "Inner.inner", "HPow.hPow"],
+                &["Inner.inner", "Norm.norm", "HPow.hPow"],
+                &format!("{over}inner ℝ x x = ‖x‖ ^ 2"),
+            ),
+            row(
+                "sq_abs",
+                "Eq",
+                &["_", "HPow.hPow", "HPow.hPow"],
+                &["abs", "HPow.hPow"],
+                "∀ {α : Type u_1} [inst : Ring α] [inst_1 : LinearOrder α] (a : α), |a| ^ 2 = a ^ 2",
+            ),
+            row(
+                "mul_self_mul_self_le",
+                "LE.le",
+                &order,
+                &["HMul.hMul"],
+                "∀ {a b : ℝ}, 0 ≤ a → a ≤ b → a * (a * a) ≤ b * (b * b)",
+            ),
+        ],
+    }
+}
+
+/// The report: `inner ℝ _ _ ^ 2 ≤ _` and `⟪_, _⟫_ℝ ^ 2 ≤ _` missed
+/// `real_inner_mul_inner_self_le`, which states the square as a product.
+/// Mathlib writes a power both ways -- `sq_nonneg` is about `a ^ 2`,
+/// `mul_self_nonneg` about `a * a` -- and whoever writes either means both.
+#[test]
+fn a_power_found_only_written_the_other_way_is_answered_with_it() {
+    use discrtree::domain::pattern::parse;
+    use discrtree::domain::query::{Power, Spelling};
+    let repo = powers();
+    let find = |pattern: &str| Find { repo: &repo, build: &NoBuild }.run(&parse(pattern).query);
+    let names = |hits: &discrtree::application::find::Hits| {
+        hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+    };
+    let (pow, mul) = (Spelling::Pow, Spelling::Mul);
+    let square = |spelling| Power { exponent: 2, spelling };
+
+    let hits = find("⟪_, _⟫_ℝ ^ 2 ≤ _").unwrap();
+    assert_eq!(names(&hits), ["real_inner_mul_inner_self_le"]);
+    assert_eq!(hits.respelled, [square(pow)]);
+    assert!(hits.read_as.is_empty() && !hits.swapped);
+
+    // The word Lean prints for `Inner.inner` is read as that constant, and
+    // then the square is written as a product: neither answers alone.
+    let hits = find("inner ℝ _ _ ^ 2 ≤ _").unwrap();
+    assert_eq!(names(&hits), ["real_inner_mul_inner_self_le"]);
+    assert_eq!(hits.respelled, [square(pow)]);
+    assert_eq!(hits.read_as, [("inner".to_string(), DeclName::new("Inner.inner"))]);
+
+    // And the other way, with each side of an equation traded.
+    let hits = find("a * a = |a| * |a|").unwrap();
+    assert_eq!(names(&hits), ["sq_abs"]);
+    assert_eq!(hits.respelled, [square(mul)]);
+
+    // An equation may need turning too, and says both.
+    let hits = find("‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ").unwrap();
+    assert_eq!(names(&hits), ["real_inner_self_eq_norm_sq"]);
+    assert_eq!(hits.respelled, [square(mul)]);
+    assert!(hits.swapped);
+
+    // A cube is answered by a cube, in whatever grouping, and not by a
+    // square.
+    let hits = find("x ^ 3 ≤ _").unwrap();
+    assert_eq!(names(&hits), ["mul_self_mul_self_le"]);
+    assert_eq!(hits.respelled, [Power { exponent: 3, spelling: pow }]);
+}
+
+/// The second spelling is a second look, taken when the first found nothing.
+/// Where nothing answers either way, what is diagnosed is the pattern as it
+/// was written.
+#[test]
+fn a_power_is_asked_again_only_when_it_answers_nothing_as_written() {
+    use discrtree::domain::pattern::parse;
+    let repo = powers();
+    let find = |pattern: &str| Find { repo: &repo, build: &NoBuild }.run(&parse(pattern).query);
+
+    let hits = find("⟪x, x⟫_ℝ = ‖x‖ ^ 2").unwrap();
+    assert_eq!(hits.rows.len(), 1);
+    assert!(hits.respelled.is_empty() && !hits.swapped);
+
+    // Products of inner products are there, and not one of them is a
+    // fourth power.
+    let hits = find("inner ℝ _ _ ^ 4 ≤ _").unwrap();
+    assert!(hits.rows.is_empty() && hits.respelled.is_empty(), "{:?}", hits.rows);
+    assert!(hits.read_as.is_empty());
+    assert!(matches!(hits.empty, Some(Empty::Unqualified { .. })), "{:?}", hits.empty);
+}
+
 /// A pattern that fails *with* a flag is still a combination: the flag is
 /// there to be dropped, and the shape is not what is wrong.
 #[test]

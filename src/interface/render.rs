@@ -892,6 +892,7 @@ mod tests {
             variables: Vec::new(),
             text_as_uses: Vec::new(),
             swapped: false,
+            respelled: Vec::new(),
         }
     }
 
@@ -939,6 +940,7 @@ mod tests {
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
                 swapped: false,
+                respelled: Vec::new(),
             },
             false,
         );
@@ -1034,6 +1036,7 @@ mod tests {
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
                 swapped: false,
+                respelled: Vec::new(),
             },
             false,
         );
@@ -1070,6 +1073,7 @@ mod tests {
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
                 swapped: false,
+                respelled: Vec::new(),
             },
             false,
         );
@@ -1091,6 +1095,7 @@ mod tests {
             variables: Vec::new(),
             text_as_uses: Vec::new(),
             swapped: false,
+            respelled: Vec::new(),
         };
         let r = find(
             &empty(Empty::InScope {
@@ -1152,6 +1157,7 @@ mod tests {
             variables: Vec::new(),
             text_as_uses: Vec::new(),
             swapped: false,
+            respelled: Vec::new(),
         };
         let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
             find(
@@ -1197,6 +1203,7 @@ mod tests {
                     variables: Vec::new(),
                     text_as_uses: Vec::new(),
                     swapped: false,
+                    respelled: Vec::new(),
                 },
                 false,
             )
@@ -1273,6 +1280,7 @@ mod tests {
             variables: Vec::new(),
             text_as_uses: Vec::new(),
             swapped: false,
+            respelled: Vec::new(),
         };
         let r = find(
             &empty(Empty::NotIndexed {
@@ -1326,6 +1334,7 @@ mod tests {
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
                 swapped: false,
+                respelled: Vec::new(),
             },
             false,
         );
@@ -1350,6 +1359,7 @@ mod tests {
                 variables: Vec::new(),
                 text_as_uses: Vec::new(),
                 swapped: false,
+                respelled: Vec::new(),
             },
             false,
         );

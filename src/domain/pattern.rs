@@ -8,7 +8,7 @@
 
 use crate::domain::decl::{ArgHead, Shape};
 use crate::domain::name::DeclName;
-use crate::domain::query::Query;
+use crate::domain::query::{Power, Query, Spelling};
 
 /// Notation to head symbol, with Lean's own binding strength and whether it
 /// associates to the left: the loosest notation on a side is its outermost
@@ -277,6 +277,7 @@ fn read(pattern: &str) -> Parsed {
             }
         },
     }
+    query.powers = powers_of(&tokens);
     // What the shape does not already say. A head of it is in every type the
     // shape matches, and a condition that repeats it is one more to blame
     // when the search comes back empty, for no row it could rule out.
@@ -463,11 +464,11 @@ const INDEXES: &[(&str, &str)] = &[
 ///
 /// A field, the way dot notation elaborates: `l.length` is `List.length l`,
 /// the namespace taken from the type of `l`. A pattern has no types, so the
-/// head is `.length`, which names a `length` in any namespace, and `l` is
-/// `_`. Read as a name, `l₁.length` named nothing, and `(l₁ ++ l₂)[i]? =
-/// l₂[i - l₁.length]?`, which is `List.getElem?_append_right` as it is
-/// written, was `no match`. A numbered field, the `1` of `p.1`, has no name to
-/// key on and is `_`.
+/// head is `.length`, which names a `length` in any namespace, and `l` is one
+/// of the words returned, which a pattern reads as `_`. Read as a name,
+/// `l₁.length` named nothing, and `(l₁ ++ l₂)[i]? = l₂[i - l₁.length]?`, which
+/// is `List.getElem?_append_right` as it is written, was `no match`. A
+/// numbered field, the `1` of `p.1`, has no name to key on and is `_`.
 ///
 /// Both are written against a term, as in Lean: `l[i]` is an index and `f [i]`
 /// applies `f` to a list. That is why the lexemes keep their spaces until
@@ -517,7 +518,7 @@ fn expand_postfix(lexemes: Vec<String>) -> (Vec<String>, Vec<String>) {
                 receivers.push(word.to_string());
             }
             let start = out.len();
-            out.push("_".to_string());
+            out.push(word.to_string());
             apply_fields(&mut out, start, fields);
         } else {
             out.push(t);
@@ -842,24 +843,126 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
             None => head_of(inside),
         };
     }
+    outermost(tokens).map(|(_, head)| DeclName::new(head))
+}
+
+/// The outermost infix notation written at the top level of these tokens:
+/// where it is, and the constant it stands for.
+fn outermost(tokens: &[String]) -> Option<(usize, &'static str)> {
     let depth = depths(tokens);
     let top: Vec<_> = (0..tokens.len())
         .filter(|i| depth[*i] == 0)
-        .filter_map(|i| notation_at(tokens, &depth, i))
+        .filter_map(|i| {
+            notation_at(tokens, &depth, i).map(|(_, head, prec, left)| (i, head, prec, left))
+        })
         .collect();
-    let loosest = top.iter().map(|(.., prec, _)| *prec).min()?;
+    let loosest = top.iter().map(|(_, _, prec, _)| *prec).min()?;
     // A postfix operator heads the one term it follows, and not an
     // application it is written at the end of: `(Real.log x)⁻¹` is an
     // inverse, and `Real.log x⁻¹` is headed by the function applied.
     if loosest >= MAX && terms(tokens).len() > 1 {
         return None;
     }
-    let mut at = top.into_iter().filter(|(.., prec, _)| *prec == loosest);
+    let mut at = top.into_iter().filter(|(_, _, prec, _)| *prec == loosest);
     // `a - b + c` is `(a - b) + c`: of operators that associate to the left,
     // the last one is applied outermost.
     let first = at.next()?;
     let outer = if first.3 { at.next_back().unwrap_or(first) } else { first };
-    Some(DeclName::new(outer.1))
+    Some((outer.0, outer.1))
+}
+
+/// Where the arguments a shape reads off these tokens are written as a
+/// power, and how: the two sides of a relation, or the terms the head of a
+/// prefix pattern is applied to, numbered as the shape has them.
+fn powers_of(tokens: &[String]) -> Vec<(usize, Power)> {
+    let args: Vec<Vec<String>> = match split_on_operator(tokens) {
+        // A negated membership, whose sides are no arguments of its shape.
+        Some((_, op, _)) if op == "∉" => Vec::new(),
+        Some((lhs, _, rhs)) => vec![lhs, rhs],
+        None => match constants(tokens).first() {
+            Some(head) => arguments(tokens, head).into_iter().map(<[String]>::to_vec).collect(),
+            None => Vec::new(),
+        },
+    };
+    args.iter().enumerate().filter_map(|(i, a)| power(a).map(|p| (i, p))).collect()
+}
+
+/// How these tokens write a power at their top, if they do: `x ^ 3`, or a
+/// product whose factors are all one term, `x * x * x`. The power is the
+/// whole of them: `2 * x * x` is no power, whatever it has in it.
+fn power(tokens: &[String]) -> Option<Power> {
+    let spelling = match outermost(ungrouped(tokens))?.1 {
+        "HPow.hPow" => Spelling::Pow,
+        "HMul.hMul" => Spelling::Mul,
+        _ => return None,
+    };
+    let (_, exponent) = factors(tokens);
+    (exponent >= 2).then_some(Power { exponent, spelling })
+}
+
+/// The term these tokens multiply by itself, and how many times: `x ^ 3`,
+/// `x * x * x`, `x * (x * x)` and `x ^ 2 * x` are each `x` three times, and
+/// anything else is itself once. The exponent has to be a numeral: `x ^ n` is
+/// a power of no size known here, and so is `x ^ 2 ^ 3`, which is not worked
+/// out.
+///
+/// Factors are one term when they are written alike and have no `_` in them.
+/// Two `_` need not be one term -- `_ * _` is any product at all -- and a
+/// pattern has `_` for the word a field is written on, so that `s.card *
+/// t.card` would be a square. `_ ^ 2` is still a square, of anything.
+fn factors(tokens: &[String]) -> (&[String], u32) {
+    let tokens = ungrouped(tokens);
+    let once = (tokens, 1);
+    let Some((at, head)) = outermost(tokens) else { return once };
+    let (left, right) = (&tokens[..at], &tokens[at + 1..]);
+    let power = match head {
+        "HPow.hPow" => match ungrouped(right) {
+            [n] => n.parse().ok().and_then(|n: u32| {
+                let (term, k) = factors(left);
+                k.checked_mul(n).map(|n| (term, n))
+            }),
+            _ => None,
+        },
+        "HMul.hMul" => {
+            let ((a, i), (b, j)) = (factors(left), factors(right));
+            if a == b && !a.iter().any(|t| t == "_") {
+                i.checked_add(j).map(|n| (a, n))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    power.filter(|(term, _)| !term.is_empty()).unwrap_or(once)
+}
+
+/// These tokens without the parentheses around the whole of them, which
+/// group and apply nothing: `((x))` is `x`. A pair keeps its parentheses,
+/// which are what make it one.
+fn ungrouped(mut tokens: &[String]) -> &[String] {
+    while let Some((None, inside)) = enclosing(tokens)
+        && !is_tuple(inside)
+    {
+        tokens = inside;
+    }
+    tokens
+}
+
+/// Where a statement, as Lean prints it, writes a power among the arguments
+/// of its conclusion: what [`Query::powers`] records of a pattern, read off a
+/// declaration's type. The index has `HMul.hMul` for `x * x` and for `x * y`
+/// alike, and only the statement tells them apart.
+///
+/// Its binders are taken off before its arrows are split: a printed type binds
+/// `{f : ℕ → ℝ}` with an arrow of its own, and what follows that one is not
+/// the conclusion. The word a field is written on stays that word, where a
+/// pattern has `_` for it: a statement names its variables, and `s.card *
+/// s.card` is a square in one.
+pub fn powers_in(statement: &str) -> Vec<(usize, Power)> {
+    let (lexemes, _) = strip_lambdas(&lex(statement));
+    let (tokens, _) = expand_postfix(lexemes);
+    let (_, concl) = split_on_arrows(&without_foralls(&tokens));
+    powers_of(&without_foralls(&concl))
 }
 
 /// The arguments the head of a prefix pattern is applied to, each as the
@@ -1648,6 +1751,85 @@ mod tests {
             assert!(!p.query.uses.contains(&DeclName::new(PAIR)), "{pattern}");
             assert!(!p.query.shape.heads().any(|h| h.as_str() == PAIR), "{pattern}");
         }
+    }
+
+    fn pow(exponent: u32) -> Power {
+        Power { exponent, spelling: Spelling::Pow }
+    }
+
+    fn mul(exponent: u32) -> Power {
+        Power { exponent, spelling: Spelling::Mul }
+    }
+
+    /// The report: `inner ℝ _ _ ^ 2 ≤ _` missed `real_inner_mul_inner_self_le`,
+    /// which Mathlib writes with the square as a product. Asked what else, a
+    /// cube is the same question.
+    #[test]
+    fn a_power_is_read_however_it_is_written() {
+        for (pattern, powers) in [
+            ("x ^ 2 ≤ _", vec![(0, pow(2))]),
+            ("_ = x * x", vec![(1, mul(2))]),
+            ("x ^ 3 ≤ _", vec![(0, pow(3))]),
+            ("x * x * x ≤ _", vec![(0, mul(3))]),
+            ("x * (x * x) ≤ _", vec![(0, mul(3))]),
+            ("x ^ 2 * x ≤ _", vec![(0, mul(3))]),
+            ("x ^ 2 * x ^ 2 = _", vec![(0, mul(4))]),
+            ("(x ^ 2) ^ 2 = _", vec![(0, pow(4))]),
+            ("a * b * (a * b) = _", vec![(0, mul(2))]),
+            ("‖x‖ * ‖x‖ = _", vec![(0, mul(2))]),
+            ("(x ^ 2) ≤ ((y * y))", vec![(0, pow(2)), (1, mul(2))]),
+            ("⟪_, _⟫_ℝ ^ 2 ≤ _", vec![(0, pow(2))]),
+            ("inner ℝ _ _ ^ 2 ≤ _", vec![(0, pow(2))]),
+            ("IsSquare (x * x)", vec![(0, mul(2))]),
+        ] {
+            assert_eq!(parse(pattern).query.powers, powers, "{pattern}");
+        }
+    }
+
+    /// A power is a term multiplied by itself a counted number of times, and
+    /// the whole of the argument: `_ * _` is any product, `x ^ n` is of no
+    /// size known here, and `-x ^ 2` is a negation.
+    #[test]
+    fn a_product_of_what_need_not_be_one_term_is_no_power() {
+        for pattern in [
+            "_ * _ ≤ _",
+            "inner ℝ _ _ * inner ℝ _ _ ≤ _",
+            "s.card * t.card ≤ _",
+            "x * y ≤ _",
+            "2 * x * x ≤ _",
+            "x * x * 2 ≤ _",
+            "x ^ n ≤ _",
+            "x ^ 2 ^ 3 ≤ _",
+            "x ^ 1 ≤ _",
+            "-x ^ 2 ≤ _",
+            "‖x * x‖ ≤ _",
+            "x ∉ s * s",
+        ] {
+            assert_eq!(parse(pattern).query.powers, [], "{pattern}");
+        }
+    }
+
+    /// What the statements the report was about print as.
+    #[test]
+    fn a_statement_says_where_its_conclusion_writes_a_power() {
+        let le = "∀ {F : Type u_3} [inst : SeminormedAddCommGroup F] \
+                  [inst_1 : InnerProductSpace ℝ F] (x y : F),\n  \
+                  inner ℝ x y * inner ℝ x y ≤ inner ℝ x x * inner ℝ y y";
+        assert_eq!(powers_in(le), [(0, mul(2))]);
+        let eq =
+            "∀ {α : Type u_1} [inst : Ring α] [inst_1 : LinearOrder α] (a : α), |a| ^ 2 = a ^ 2";
+        assert_eq!(powers_in(eq), [(0, pow(2)), (1, pow(2))]);
+        assert_eq!(
+            powers_in("∀ {a b : ℝ}, 0 ≤ a → a ≤ b → a ^ 3 ≤ b * b * b"),
+            [(0, pow(3)), (1, mul(3))]
+        );
+        assert_eq!(powers_in("∀ {f : ℕ → ℝ} (n : ℕ), f n * f n = 0"), [(0, mul(2))]);
+        // A statement names what a field is written on.
+        assert_eq!(
+            powers_in("∀ (s : Finset ℕ), s.card * s.card ≤ s.card ^ 2"),
+            [(0, mul(2)), (1, pow(2))]
+        );
+        assert_eq!(powers_in("∀ (s t : Finset ℕ), s.card * t.card ≤ 0"), []);
     }
 
     #[test]
