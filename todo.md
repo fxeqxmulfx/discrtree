@@ -2,6 +2,32 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A power that misses as written takes 0.7 s, reading the same rows at every look
+
+Found 2026-09-22, dt 0.58.0, timing the 0.58.0 fix on the same project. A
+pattern whose power no row writes as written now takes every look, and each
+look reads every row under its conclusion again:
+
+    $ time dt find 'x * x * x * x = _'
+    dt: `_ * _ * _ * _` read as `_ ^ 4` — nothing states it as written
+    Complex.I_pow_four  theorem  Mathlib.Basic.Complex.Basic
+    ...
+    real    0m0.727s
+
+`x * x * x = _` takes 0.60 s and `_ = a * a` 0.40 s, against 0.19 s and
+0.29 s with dt 0.57.0. A profile of the first puts half of it in reading rows:
+the index has the conclusion and not the heads of its arguments, so `_ = _ *
+_` reads all 163 000 `Eq` rows to keep the 6564 with a product, and a pattern
+with no power does the same: `a + b = b + a` takes 0.14 s. A quarter goes to
+the lists of the rows kept, two thirds of them the dependencies of their
+proofs, which no search reads. A fifth goes to reading each statement for its
+powers, at every look again, and the turned look asks the index what the
+first one did.
+
+The right output: the same answers, in the time 0.57.0 took or less.
+
+Seen with dt 0.58.0, 2026-09-22.
+
 ## A power in a pattern ranks nothing, so `0 ≤ a * a` puts every product before the square
 
 Found 2026-09-22, dt 0.57.0, checking the 0.57.0 fix on the same project. A
