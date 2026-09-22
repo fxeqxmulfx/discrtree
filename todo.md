@@ -38,6 +38,42 @@ by reducing the pattern's subterms through reducible definitions the way
 `DiscrTree.reduceDT` does before matching (and indexing the rows the same way,
 if they are not already).
 
+Fixed in 0.61.0. The dump records what each reducible definition unfolds to,
+the head of its body -- `PiLp` for `EuclideanSpace`, `WithLp` for `PiLp` --
+and a pattern's argument whose head unfolds or is unfolded to is matched as
+any name that comes to the same head once unfolded. That is `reduceDT` on both
+sides, as far as heads go, so the rows are not keyed again: which names an
+argument is known by is one lookup among the 8801 definitions that unfold,
+under a millisecond. The three queries find the instance and say how:
+
+    $ dt find 'MeasurableSpace (EuclideanSpace _ _)'
+    dt: `EuclideanSpace` matched `WithLp` — the same once reducible definitions are unfolded
+    WithLp.measurableSpace  instance  Mathlib.Analysis.Normed.Lp.MeasurableSpace
+      (p : ENNReal) → (X : Type u_1) → [MeasurableSpace X] → MeasurableSpace (WithLp p X)
+
+`--elaborated 'MeasurableSpace (EuclideanSpace ℝ (Fin 3))'` needed one more
+thing: the instance does not mention `Fin`, and every constant of a pattern
+used to be asked of every row. One written only inside an argument that
+matched through an unfolding is not asked of that row, and still is of a row
+about the name written, which ranks above a row about another name for it.
+
+The miss took 0.084 s to say that nothing had the shape, and the answer takes
+0.020. An argument that can match through an unfolding has a name for each
+definition that unfolds to its head, eight for `HMul.hMul`, and a `GLOB` for
+each made `x * x * x * x = _` 0.26 s. A function the index registers now
+tests a row's heads against all of them at once, and searching costs what it
+did: 0.151 s against 0.159, best of three on the same project, and none of 24
+other patterns is more than 10 ms slower. The answers to the 25 at limits 10
+and 60 are 0.60.0's but in five. `0 ≤ a * a` gains `1 ≤ convexBodyLTFactor K`
+and its primed twin, a product once unfolded, and `0 ≤ a ^ 2` gains
+`UInt8.size ≤ USize.size` and two like it, each after every row 0.60.0
+printed and under a note saying what was unfolded. `_ = _` and `_ ↔ _` trade
+a row for another and `_ < _ * _` orders one differently, and the three print
+the same with unfolding switched off: they read rows in the order the index
+wrote them, and the dump that records unfoldings wrote them again. An index
+from 0.60.0 opens and says its sources are behind; `dt refresh` dumps them
+again.
+
 ## A lemma looked up by name prints its binders and not what it says
 
 Found 2026-09-22, dt 0.59.0, reading the output of the 0.59.0 fix. The line

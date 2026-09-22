@@ -254,6 +254,26 @@ does not say which type it is about, so it matches either, and a `⊆` anywhere
 but the head is no `--uses` condition. `≤` is not widened the other way: on a
 list it is an order, not a sublist.
 
+An argument is matched through the reducible definitions it is written with,
+as Lean's own discrimination tree matches it. `EuclideanSpace` is an `abbrev`
+of `PiLp`, and `PiLp` one of `WithLp`, so instance synthesis finds
+`WithLp.measurableSpace` for `EuclideanSpace ℝ (Fin 3)`, and a pattern written
+at any of the three finds it too:
+
+```
+$ dt find 'MeasurableSpace (EuclideanSpace _ _)'
+dt: `EuclideanSpace` matched `WithLp` — the same once reducible definitions are unfolded
+WithLp.measurableSpace  instance  Mathlib.Analysis.Normed.Lp.MeasurableSpace
+  (p : ENNReal) → (X : Type u_1) → [MeasurableSpace X] → MeasurableSpace (WithLp p X)
+```
+
+A statement about the name written ranks above one about another name for it.
+What is written inside the argument, the `Fin` of `EuclideanSpace ℝ (Fin 3)`,
+is asked only of a statement about the name written: unfolding is free to lose
+it, and this instance does not mention it. What a definition unfolds to is
+recorded when its source is dumped, so an index from before 0.61.0 matches as
+written until `dt refresh` has dumped its sources again.
+
 Two asks are refused outright rather than answered with an empty result, because
 a closed set can name what was meant and a contradiction is not an absence:
 

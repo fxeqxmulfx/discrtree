@@ -208,6 +208,8 @@ fn read(pattern: &str) -> Parsed {
     let assumed = conditions_of(&hypotheses);
     let mut query = Query::new();
     let mut operator = None;
+    // The tokens each argument of the shape was read off.
+    let mut written: Vec<&[String]> = Vec::new();
 
     match split_on_operator(tokens) {
         Some((lhs, op, rhs)) => {
@@ -218,10 +220,7 @@ fn read(pattern: &str) -> Parsed {
                 // `a ∉ s` is `¬ (a ∈ s)` once elaborated: a negation with one
                 // argument, whose sides are a level further down than a shape
                 // reaches. What they name is still in the type.
-                let sides = [left_head, right_head].into_iter().filter_map(|h| match h {
-                    ArgHead::Named(n) => Some(n),
-                    ArgHead::Any => None,
-                });
+                let sides = [left_head, right_head].into_iter().filter_map(|h| h.name().cloned());
                 query.shape = Shape::new(
                     Some(DeclName::new("Not")),
                     vec![ArgHead::Named(DeclName::new("Membership.mem"))],
@@ -231,13 +230,14 @@ fn read(pattern: &str) -> Parsed {
                 let concl = notation(op).map(|(_, head, ..)| DeclName::new(head));
                 query.shape = Shape::new(concl, vec![left_head, right_head]);
                 query.uses = rest.collect();
+                written = vec![lhs, rhs];
             }
             operator = Some(op.to_string());
         }
         None => match constants(tokens).split_first() {
             Some((head, rest)) => {
-                let args: Vec<ArgHead> =
-                    arguments(tokens, head).into_iter().map(|a| side(a).0).collect();
+                written = arguments(tokens, head);
+                let args: Vec<ArgHead> = written.iter().map(|a| side(a).0).collect();
                 // A name an argument is headed by is said by the shape, as the
                 // name a side is headed by is. See [`side`].
                 let mut rest = rest.to_vec();
@@ -284,7 +284,31 @@ fn read(pattern: &str) -> Parsed {
     let nested: Vec<DeclName> =
         notation_in(&all).into_iter().filter(|n| !query.shape.heads().any(|h| h == n)).collect();
     query.uses = dedup(std::mem::take(&mut query.uses).into_iter().chain(nested).collect());
+    query.inside = inside(&all, &written, &query.uses);
     Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown }
+}
+
+/// For each argument, the uses written inside it and nowhere else in the
+/// pattern, hypotheses included. See [`Query::inside`].
+///
+/// Counted by occurrence, because a constant written once inside an argument
+/// and once outside it is asked of the statement by the one outside, however
+/// the argument is matched.
+fn inside(all: &[String], args: &[&[String]], uses: &[DeclName]) -> Vec<Vec<DeclName>> {
+    let said = |ts: &[String]| -> Vec<DeclName> {
+        constants(ts).into_iter().chain(notation_in(ts)).collect()
+    };
+    let count = |said: &[DeclName], c: &DeclName| said.iter().filter(|s| *s == c).count();
+    let everywhere = said(all);
+    let each: Vec<Vec<DeclName>> = args.iter().map(|a| said(a)).collect();
+    let only_inside =
+        |c: &DeclName| count(&everywhere, c) <= each.iter().map(|s| count(s, c)).sum::<usize>();
+    each.iter()
+        .map(|s| {
+            let held = uses.iter().filter(|c| s.contains(c) && only_inside(c));
+            dedup(held.cloned().collect())
+        })
+        .collect()
 }
 
 /// Each lambda replaced by the `_` it can honestly be read as, and the lambdas
@@ -659,12 +683,7 @@ fn conditions_of(hypotheses: &[&[String]]) -> Vec<DeclName> {
         .iter()
         .flat_map(|h| {
             let (head, rest) = side(h);
-            match head {
-                ArgHead::Named(n) => vec![n],
-                ArgHead::Any => Vec::new(),
-            }
-            .into_iter()
-            .chain(rest)
+            head.name().cloned().into_iter().chain(rest)
         })
         .filter(is_condition)
         .collect()
@@ -1849,5 +1868,27 @@ mod tests {
     fn underscores_are_wildcards_not_identifiers() {
         let p = parse("_ ≤ Real.exp _");
         assert_eq!(p.query.shape.args, vec![arg("_"), arg("Real.exp")]);
+    }
+
+    /// The report: `EuclideanSpace` matches the instance only once unfolded,
+    /// to the `WithLp` it is stated for, and the `Fin` is gone by then. So the
+    /// query keeps which argument it was written inside.
+    #[test]
+    fn a_constant_written_inside_an_argument_is_said_to_be_there() {
+        let p = parse("MeasurableSpace (EuclideanSpace ℝ (Fin 3))");
+        assert_eq!(p.query.shape.args, vec![arg("EuclideanSpace")]);
+        assert_eq!(p.query.uses, vec![DeclName::new("Fin")]);
+        assert_eq!(p.query.inside, vec![vec![DeclName::new("Fin")]]);
+        let p = parse("Real.exp (Real.log x) = x");
+        assert_eq!(p.query.inside, vec![vec![DeclName::new("Real.log")], Vec::new()]);
+    }
+
+    /// Written in a hypothesis too, it is asked of every statement, however
+    /// the argument matches.
+    #[test]
+    fn a_constant_written_outside_an_argument_too_is_not_only_inside_it() {
+        let p = parse("Fin 3 → MeasurableSpace (EuclideanSpace ℝ (Fin 3))");
+        assert_eq!(p.query.uses, vec![DeclName::new("Fin")]);
+        assert_eq!(p.query.inside, vec![Vec::<DeclName>::new()]);
     }
 }

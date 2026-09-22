@@ -8,7 +8,9 @@ use crate::application::add::Add;
 use crate::application::deps::{Deps, DepsResult};
 use crate::application::find::{self, Dup, Find};
 use crate::application::index;
-use crate::application::ports::{DeclRepo, DeclSink, FetchSpec, Provenance, Revisions, Workspace};
+use crate::application::ports::{
+    DeclRepo, DeclSink, FetchSpec, Provenance, ROW_FORMAT, Revisions, Workspace,
+};
 use crate::application::rdeps::Rdeps;
 use crate::application::ship::Fetch;
 use crate::application::show::{Show, Shown};
@@ -385,6 +387,13 @@ impl App {
             let (written, stated) = (spelt(*p), spelt(p.respelled()));
             eprintln!("dt: `{written}` read as `{stated}` — nothing states it as written");
         }
+        for (written, stated) in &hits.unfolded {
+            let stated: Vec<&str> = stated.iter().map(DeclName::as_str).collect();
+            eprintln!(
+                "dt: `{written}` matched `{}` — the same once reducible definitions are unfolded",
+                stated.join("`, `")
+            );
+        }
         print!("{}", render::find(&hits, args.long));
         let from = match hits.rows.is_empty() {
             false => hits.rows.iter().map(|d| d.source.clone()).collect(),
@@ -753,11 +762,21 @@ impl App {
                 Some(r) => r.clone(),
                 None => revs.current(&id)?,
             };
+            // Rows are no newer than the dump they are read from, whatever
+            // reads them: what an older dump never wrote, no load can supply.
+            let format = jsonl::dump_format(&path)?;
+            if format < jsonl::DUMP_FORMAT {
+                eprintln!(
+                    "{}: dumped by an older dt — `dt refresh {}` dumps it again",
+                    s.name, s.name
+                );
+            }
             let was = Provenance {
                 revision,
                 stamp: revision::file_stamp(&path),
                 indexed_at: now(),
                 decls: 0,
+                row_format: Some(if format < jsonl::DUMP_FORMAT { format } else { ROW_FORMAT }),
                 ..Provenance::by_this_build()
             };
             if self.up_to_date(&sqlite, &id, &was, force)? {
@@ -816,8 +835,10 @@ impl App {
     fn refresh(&self, source: Option<&str>) -> Result<()> {
         // Each target with what it actually needs: a source that moved has to
         // be read again, one whose rows an older `dt` wrote only has to be
-        // loaded again from the dump already on disk. A source named outright
-        // is read again, because that is what naming it asks for.
+        // loaded again from the dump already on disk — unless an older `dt`
+        // wrote the dump too, and loading it again gives back the same rows. A
+        // source named outright is read again, because that is what naming it
+        // asks for.
         let targets: Vec<(String, bool)> = match source {
             Some(n) => vec![(self.cfg.source(n)?.name.clone(), true)],
             None => {
@@ -826,9 +847,21 @@ impl App {
                 let among = self.workspace.sources.iter().map(|s| s.id.clone());
                 status::stale_among(repo.as_ref(), &revs, among)?
                     .into_iter()
-                    .map(|s| (s.id.as_str().to_owned(), s.why.needs_reread()))
+                    .map(|s| {
+                        let name = s.id.as_str().to_owned();
+                        let reread = s.why.needs_reread() || self.dumped_by_older(&name);
+                        (name, reread)
+                    })
                     .collect()
             }
+        };
+        let redumped: Vec<&str> = match source {
+            Some(_) => Vec::new(),
+            None => targets
+                .iter()
+                .filter(|(n, reread)| *reread && self.dumped_by_older(n))
+                .map(|(n, _)| n.as_str())
+                .collect(),
         };
         if targets.is_empty() {
             println!("nothing has changed since it was indexed");
@@ -857,6 +890,9 @@ impl App {
                 // input, and only the rows it turns into have changed.
                 println!("{name}: indexed by an older dt, loading it again");
                 return Ok(());
+            }
+            if redumped.contains(&name) {
+                println!("{name}: dumped by an older dt, dumping it again");
             }
             self.reread(name).inspect_err(|e| {
                 if many {
@@ -895,6 +931,16 @@ impl App {
         }
     }
 
+    /// Whether a compiled source's dump on disk is older than the rows this
+    /// build writes, so that only dumping it again brings them up to date.
+    fn dumped_by_older(&self, name: &str) -> bool {
+        let Ok(s) = self.cfg.source(name) else { return false };
+        let path = self.cfg.jsonl_path(s);
+        s.elaborated()
+            && path.is_file()
+            && jsonl::dump_format(&path).is_ok_and(|f| f < jsonl::DUMP_FORMAT)
+    }
+
     /// Whether this source can be left alone. Only when its input carries a
     /// fingerprint, that fingerprint is the one already recorded, and the rows
     /// are actually there — a recorded provenance over an empty table would
@@ -913,8 +959,9 @@ impl App {
         // The stamp answers "is the input the same input"; it cannot answer
         // "does this build read that input the way the last one did". A dump
         // that has not moved a byte still has to be loaded again when the rows
-        // it turns into have changed.
-        if was.stamp != now.stamp || was.outdated() || db.count_source(id)? == 0 {
+        // it turns into have changed — and only then: rows as old as the dump
+        // under them are what loading it again would write.
+        if was.stamp != now.stamp || was.row_format < now.row_format || db.count_source(id)? == 0 {
             return Ok(false);
         }
         println!("{id}: unchanged, {} declarations kept", was.decls);
@@ -1081,7 +1128,13 @@ fn query_of(a: &FindArgs) -> Result<Query> {
     if let Some(c) = &a.concl {
         q.shape.concl = Some(DeclName::new(c.clone()));
     }
-    q.uses.extend(a.uses.iter().map(DeclName::new));
+    let given: Vec<DeclName> = a.uses.iter().map(DeclName::new).collect();
+    // Asked of every row, whatever the pattern has it inside: a flag says the
+    // statement has to mention it.
+    for held in &mut q.inside {
+        held.retain(|c| !given.contains(c));
+    }
+    q.uses.extend(given);
     if a.module.is_some() {
         q.module = a.module.clone();
     }

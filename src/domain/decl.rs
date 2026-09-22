@@ -114,6 +114,14 @@ impl fmt::Display for DeclKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgHead {
     Named(DeclName),
+    /// A pattern's head that is one of several names for the same thing once
+    /// reducible definitions are unfolded: `EuclideanSpace`, which is `PiLp`,
+    /// which is `WithLp`. `class` is all of them, `written` among them. Only
+    /// a search builds one; a statement's heads are what it was elaborated to.
+    Reducible {
+        written: DeclName,
+        class: Vec<DeclName>,
+    },
     Any,
 }
 
@@ -122,11 +130,16 @@ impl ArgHead {
         if s == "_" || s.is_empty() { ArgHead::Any } else { ArgHead::Named(DeclName::new(s)) }
     }
 
-    pub fn as_str(&self) -> &str {
+    /// The head as written, `None` for `_`.
+    pub fn name(&self) -> Option<&DeclName> {
         match self {
-            ArgHead::Named(n) => n.as_str(),
-            ArgHead::Any => "_",
+            ArgHead::Named(n) | ArgHead::Reducible { written: n, .. } => Some(n),
+            ArgHead::Any => None,
         }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.name().map_or("_", DeclName::as_str)
     }
 
     /// A pattern argument matches a declaration argument if the pattern is `_`
@@ -135,6 +148,20 @@ impl ArgHead {
         match self {
             ArgHead::Any => true,
             ArgHead::Named(a) => matches!(other, ArgHead::Named(b) if a.names(b)),
+            ArgHead::Reducible { class, .. } => {
+                class.iter().any(|a| matches!(other, ArgHead::Named(b) if a.names(b)))
+            }
+        }
+    }
+
+    /// Whether it matches without unfolding anything: the head written is the
+    /// statement's.
+    pub fn as_written(&self, other: &ArgHead) -> bool {
+        match self {
+            ArgHead::Reducible { written, .. } => {
+                matches!(other, ArgHead::Named(b) if written.names(b))
+            }
+            _ => self.matches(other),
         }
     }
 }
@@ -163,10 +190,7 @@ impl Shape {
     /// Every constant the shape names: the conclusion head, then the argument
     /// heads that are not `_`.
     pub fn heads(&self) -> impl Iterator<Item = &DeclName> {
-        self.concl.iter().chain(self.args.iter().filter_map(|a| match a {
-            ArgHead::Named(n) => Some(n),
-            ArgHead::Any => None,
-        }))
+        self.concl.iter().chain(self.args.iter().filter_map(ArgHead::name))
     }
 
     /// Whether `self`, read as a pattern, matches `other`, read as a statement.
@@ -176,20 +200,80 @@ impl Shape {
     /// the order classes carry leading type and instance arguments a user never
     /// writes. A pattern with *more* arguments cannot match.
     pub fn matches(&self, other: &Shape) -> bool {
-        if let Some(c) = &self.concl
-            && !other.concl.as_ref().is_some_and(|o| keyed_as(c).iter().any(|k| k.names(o)))
-        {
-            return false;
-        }
-        if self.args.len() > other.args.len() {
-            return false;
-        }
-        // Try every alignment of the pattern against the statement's arguments,
-        // so `Real.exp _` matches `@LE.le ℝ inst (Real.exp x) y` without the
-        // user having to write the instance arguments out.
-        (0..=other.args.len() - self.args.len())
+        self.offsets(other)
             .any(|off| self.args.iter().zip(&other.args[off..]).all(|(p, a)| p.matches(a)))
     }
+
+    /// The alignments at which `self` matches `other`, each as what every
+    /// argument of the pattern matched only once unfolded: the statement's
+    /// head where it is another name for the one written, `None` where it is
+    /// the one written.
+    pub fn alignments<'a>(
+        &'a self,
+        other: &'a Shape,
+    ) -> impl Iterator<Item = Vec<Option<&'a DeclName>>> + 'a {
+        self.offsets(other).filter_map(move |off| {
+            let args = self.args.iter().zip(&other.args[off..]);
+            args.clone()
+                .all(|(p, a)| p.matches(a))
+                .then(|| args.map(|(p, a)| if p.as_written(a) { None } else { a.name() }).collect())
+        })
+    }
+
+    /// Where the pattern's arguments can start among the statement's, once
+    /// the conclusion fits. Every alignment is tried, so `Real.exp _` matches
+    /// `@LE.le ℝ inst (Real.exp x) y` without the user having to write the
+    /// instance arguments out.
+    fn offsets(&self, other: &Shape) -> std::ops::Range<usize> {
+        let concl = self.concl.as_ref().is_none_or(|c| {
+            other.concl.as_ref().is_some_and(|o| keyed_as(c).iter().any(|k| k.names(o)))
+        });
+        match concl && self.args.len() <= other.args.len() {
+            true => 0..other.args.len() - self.args.len() + 1,
+            false => 0..0,
+        }
+    }
+}
+
+/// How many reducible definitions a search unfolds through, either way. Deep
+/// enough for any chain Mathlib writes -- `EuclideanSpace` is two from
+/// `WithLp` -- and a bound on a cycle, which the elaborator rules out and a
+/// hand-built index need not.
+pub const UNFOLD_DEPTH: usize = 16;
+
+/// Every name that is the same as `name` once reducible definitions are
+/// unfolded, `name` included: where its unfolding ends, and every name whose
+/// unfolding ends there. `steps` are the `(name, unfolds)` pairs of the index.
+pub fn reducible_class<'a>(
+    steps: impl IntoIterator<Item = (&'a DeclName, &'a DeclName)>,
+    name: &DeclName,
+) -> Vec<DeclName> {
+    let steps: Vec<(&DeclName, &DeclName)> = steps.into_iter().collect();
+    let mut root = name;
+    for _ in 0..UNFOLD_DEPTH {
+        match steps.iter().find(|(from, _)| *from == root) {
+            Some((_, to)) => root = *to,
+            None => break,
+        }
+    }
+    let mut class = vec![root.clone()];
+    let mut frontier = vec![root];
+    for _ in 0..UNFOLD_DEPTH {
+        frontier = steps
+            .iter()
+            .filter(|(from, to)| frontier.contains(to) && !class.contains(from))
+            .map(|(from, _)| *from)
+            .collect();
+        if frontier.is_empty() {
+            break;
+        }
+        class.extend(frontier.iter().map(|n| (*n).clone()));
+    }
+    // Where the walk up was cut short, `name` is not below the root it found.
+    class.push(name.clone());
+    class.sort();
+    class.dedup();
+    class
 }
 
 /// Relations written with one symbol that Mathlib elaborates, for some types,
@@ -238,6 +322,13 @@ pub struct Decl {
     pub has_sorry: bool,
     pub span: Option<Span>,
     pub elaborated: bool,
+    /// The constant a reducible definition unfolds to, when its body applies
+    /// one: `EuclideanSpace` to `PiLp`, `PiLp` to `WithLp`. Lean keys an
+    /// instance with every such step taken, which is how `WithLp.measurableSpace`
+    /// is found for `EuclideanSpace ℝ (Fin 3)`; a search takes them for the
+    /// same reason. `None` for everything else, and for every text row: no
+    /// elaborator, no transparency.
+    pub unfolds: Option<DeclName>,
 }
 
 impl Decl {
@@ -256,6 +347,7 @@ impl Decl {
             has_sorry: false,
             span: None,
             elaborated: true,
+            unfolds: None,
         }
     }
 
@@ -539,6 +631,69 @@ mod tests {
     #[test]
     fn an_empty_pattern_matches_anything() {
         assert!(Shape::default().matches(&shape("LE.le", &["Real.exp"])));
+    }
+
+    /// `abbrev EuclideanSpace 𝕜 n := PiLp 2 fun _ => 𝕜` and `abbrev PiLp p α
+    /// := WithLp p (∀ i, α i)`, and a name that unfolds to neither.
+    fn steps() -> Vec<(DeclName, DeclName)> {
+        [("EuclideanSpace", "PiLp"), ("PiLp", "WithLp"), ("Unrelated", "Prod")]
+            .iter()
+            .map(|(a, b)| (DeclName::new(*a), DeclName::new(*b)))
+            .collect()
+    }
+
+    fn class_of(name: &str) -> Vec<String> {
+        let steps = steps();
+        let class = reducible_class(steps.iter().map(|(a, b)| (a, b)), &DeclName::new(name));
+        class.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_class_is_everything_that_unfolds_to_the_same_root() {
+        let all = ["EuclideanSpace", "PiLp", "WithLp"];
+        assert_eq!(class_of("EuclideanSpace"), all);
+        assert_eq!(class_of("PiLp"), all);
+        assert_eq!(class_of("WithLp"), all);
+        assert_eq!(class_of("Real"), ["Real"]);
+    }
+
+    #[test]
+    fn a_cycle_of_unfoldings_ends() {
+        let steps = [("A", "B"), ("B", "A")].map(|(a, b)| (DeclName::new(a), DeclName::new(b)));
+        let class = reducible_class(steps.iter().map(|(a, b)| (a, b)), &DeclName::new("A"));
+        assert_eq!(class, [DeclName::new("A"), DeclName::new("B")]);
+    }
+
+    fn unfolding(written: &str) -> ArgHead {
+        let class = class_of(written).iter().map(DeclName::new).collect();
+        ArgHead::Reducible { written: DeclName::new(written), class }
+    }
+
+    #[test]
+    fn a_reducible_argument_matches_every_name_of_its_class() {
+        let pattern = Shape::new(Some(DeclName::new("MeasurableSpace")), vec![unfolding("PiLp")]);
+        for head in ["EuclideanSpace", "PiLp", "WithLp"] {
+            assert!(pattern.matches(&shape("MeasurableSpace", &[head])), "{head}");
+        }
+        assert!(!pattern.matches(&shape("MeasurableSpace", &["Prod"])));
+        assert!(!pattern.matches(&shape("MeasurableSpace", &["_"])));
+        assert_eq!(
+            pattern.heads().map(DeclName::as_str).collect::<Vec<_>>(),
+            ["MeasurableSpace", "PiLp"]
+        );
+    }
+
+    #[test]
+    fn an_alignment_says_which_arguments_matched_only_once_unfolded() {
+        let pattern =
+            Shape::new(Some(DeclName::new("Eq")), vec![unfolding("EuclideanSpace"), ArgHead::Any]);
+        let stmt = shape("Eq", &["PiLp", "EuclideanSpace", "_"]);
+        let found: Vec<Vec<Option<&str>>> = pattern
+            .alignments(&stmt)
+            .map(|s| s.into_iter().map(|m| m.map(DeclName::as_str)).collect())
+            .collect();
+        assert_eq!(found, [vec![Some("PiLp"), None], vec![None, None]]);
+        assert_eq!(pattern.alignments(&shape("Ne", &["PiLp"])).count(), 0);
     }
 
     #[test]

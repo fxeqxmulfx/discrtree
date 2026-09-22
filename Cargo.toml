@@ -1,6 +1,6 @@
 [package]
 name = "discrtree"
-version = "0.60.0"
+version = "0.61.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

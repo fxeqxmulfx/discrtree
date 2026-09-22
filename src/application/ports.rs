@@ -101,6 +101,13 @@ pub trait DeclRepo {
     /// [`DeclName::names`].
     fn ending_in(&self, field: &DeclName) -> Result<Vec<DeclName>>;
 
+    /// Every name that is `name` once reducible definitions are unfolded,
+    /// `name` included. See [`crate::domain::decl::reducible_class`]. A store
+    /// that keeps no unfoldings knows only `name`.
+    fn reducible_class(&self, name: &DeclName) -> Result<Vec<DeclName>> {
+        Ok(vec![name.clone()])
+    }
+
     /// What the source was when it was indexed, if the store remembers.
     fn provenance(&self, _source: &SourceId) -> Result<Option<Provenance>> {
         Ok(None)
@@ -199,7 +206,11 @@ pub struct Provenance {
 /// another way -- and leave it alone otherwise. The cost of getting it wrong in
 /// each direction is not symmetric: too eager wastes an hour, too lazy leaves
 /// an index that looks current and answers `no match` for what is in it.
-pub const ROW_FORMAT: i64 = 1;
+///
+/// 2 is the first with `unfolds`, which only a dump can supply: rows loaded
+/// from an older dump are recorded in the format that dump was, so the source
+/// stays behind until it is dumped again.
+pub const ROW_FORMAT: i64 = 2;
 
 impl Provenance {
     /// The writer half, filled in by this build, with the rest left to the

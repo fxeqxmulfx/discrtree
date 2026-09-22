@@ -142,6 +142,11 @@ impl DeclRepo for FakeRepo {
         ))
     }
 
+    fn reducible_class(&self, name: &DeclName) -> Result<Vec<DeclName>> {
+        let steps = self.decls.iter().filter_map(|d| d.unfolds.as_ref().map(|u| (&d.name, u)));
+        Ok(decl::reducible_class(steps, name))
+    }
+
     /// The same rule SQLite applies: the smallest strictly-containing span in
     /// the same module. Written out again here because the two agreeing is what
     /// makes the fake worth testing against.

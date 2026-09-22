@@ -93,6 +93,7 @@ fn to_decl(
         has_sorry: s.has_sorry,
         span: Some(crate::domain::decl::Span::new(s.line_start, s.line_end)),
         elaborated: false,
+        unfolds: None,
     })
 }
 

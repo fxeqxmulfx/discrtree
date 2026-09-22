@@ -41,6 +41,11 @@ pub struct Row {
     #[serde(default)]
     pub line_end: Option<u32>,
     pub elaborated: bool,
+    /// Absent from a dump an older `dt` wrote, which is how [`dump_format`]
+    /// tells one from the other; present and `null` for a constant that
+    /// unfolds to nothing.
+    #[serde(default)]
+    pub unfolds: Option<String>,
 }
 
 impl From<Row> for Decl {
@@ -64,6 +69,7 @@ impl From<Row> for Decl {
                 _ => None,
             },
             elaborated: r.elaborated,
+            unfolds: r.unfolds.map(DeclName::new),
         }
     }
 }
@@ -85,8 +91,34 @@ impl From<&Decl> for Row {
             line_start: d.span.map(|s| s.start),
             line_end: d.span.map(|s| s.end),
             elaborated: d.elaborated,
+            unfolds: d.unfolds.as_ref().map(DeclName::to_string),
         }
     }
+}
+
+/// What a dump holds, as a number that changes when `lean/dump.lean` writes
+/// something an older one did not: 2 is the first with `unfolds`.
+///
+/// Read off the file rather than assumed from the build reading it, because a
+/// dump outlives the `dt` that wrote it: `dt index` loads whatever is on disk,
+/// and rows loaded from an older dump are missing what it never wrote, however
+/// new the `dt` that loaded them. Never more than
+/// [`ROW_FORMAT`](crate::application::ports::ROW_FORMAT), which rows from a
+/// current dump are in.
+pub const DUMP_FORMAT: i64 = 2;
+
+/// The format of the dump at `path`, told by its first row: one written with
+/// an `unfolds` field, `null` or not, is current. A dump with no rows is
+/// missing nothing.
+pub fn dump_format(path: &Path) -> Result<i64> {
+    let file =
+        std::fs::File::open(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
+    for line in BufReader::new(file).lines() {
+        if let Ok(serde_json::Value::Object(row)) = serde_json::from_str(&line?) {
+            return Ok(if row.contains_key("unfolds") { DUMP_FORMAT } else { 1 });
+        }
+    }
+    Ok(DUMP_FORMAT)
 }
 
 /// Read a dump. Lines that will not parse are skipped rather than fatal: a
@@ -250,6 +282,11 @@ impl DeclRepo for JsonlRepo {
             self.decls.iter().map(|d| (d.ty.as_str(), d.shape.heads().collect())),
             word,
         ))
+    }
+
+    fn reducible_class(&self, name: &DeclName) -> Result<Vec<DeclName>> {
+        let steps = self.decls.iter().filter_map(|d| d.unfolds.as_ref().map(|u| (&d.name, u)));
+        Ok(decl::reducible_class(steps, name))
     }
 
     fn counts(&self) -> Result<Vec<(SourceId, usize)>> {

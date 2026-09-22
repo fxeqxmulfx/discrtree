@@ -624,16 +624,14 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
         let reasons: BTreeSet<&Option<Option<String>>> =
             stale.iter().map(|r| &r.written_by).collect();
         let why = match reasons.iter().next() {
-            Some(Some(by)) if reasons.len() == 1 => {
-                format!(" — indexed by {}", wrote(by.as_deref()))
-            }
+            Some(Some(by)) if reasons.len() == 1 => format!(" — {}", written(by.as_deref())),
             _ => String::new(),
         };
         let listed = match why.is_empty() && reasons.len() > 1 {
             true => stale
                 .iter()
                 .map(|r| match &r.written_by {
-                    Some(by) => format!("{} (indexed by {})", r.name, wrote(by.as_deref())),
+                    Some(by) => format!("{} ({})", r.name, written(by.as_deref())),
                     None => r.name.clone(),
                 })
                 .collect::<Vec<_>>()
@@ -694,6 +692,10 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
 pub fn stale(s: &Stale, kind: Option<SourceKind>, behind: &[Behind]) -> String {
     let id = &s.id;
     let what = match (&s.why, kind) {
+        // Written by this very dt, and still old: the dump it loaded is.
+        (Why::Written { by }, _) if by.as_deref() == Some(version()) => {
+            "was loaded from a dump an older dt wrote".to_string()
+        }
         // The rows are as old as the dt that wrote them, and that dt is the
         // value a reader can check: it is printed by `dt --version`.
         (Why::Written { by }, _) => {
@@ -798,6 +800,16 @@ fn wrote(by: Option<&str>) -> String {
     }
 }
 
+/// Why a source's rows are old, when they are. Rows this very build wrote are
+/// old only because the dump it read them from is, and naming this build as
+/// the older `dt` would send the reader looking for a newer one.
+fn written(by: Option<&str>) -> String {
+    match by {
+        Some(v) if v == version() => "loaded from a dump an older dt wrote".to_string(),
+        by => format!("indexed by {}", wrote(by)),
+    }
+}
+
 /// This build's version, as `dt --version` prints it.
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -894,6 +906,7 @@ mod tests {
             text_as_uses: Vec::new(),
             swapped: false,
             respelled: Vec::new(),
+            unfolded: Vec::new(),
         }
     }
 
@@ -942,6 +955,7 @@ mod tests {
                 text_as_uses: Vec::new(),
                 swapped: false,
                 respelled: Vec::new(),
+                unfolded: Vec::new(),
             },
             false,
         );
@@ -1038,6 +1052,7 @@ mod tests {
                 text_as_uses: Vec::new(),
                 swapped: false,
                 respelled: Vec::new(),
+                unfolded: Vec::new(),
             },
             false,
         );
@@ -1075,6 +1090,7 @@ mod tests {
                 text_as_uses: Vec::new(),
                 swapped: false,
                 respelled: Vec::new(),
+                unfolded: Vec::new(),
             },
             false,
         );
@@ -1097,6 +1113,7 @@ mod tests {
             text_as_uses: Vec::new(),
             swapped: false,
             respelled: Vec::new(),
+            unfolded: Vec::new(),
         };
         let r = find(
             &empty(Empty::InScope {
@@ -1159,6 +1176,7 @@ mod tests {
             text_as_uses: Vec::new(),
             swapped: false,
             respelled: Vec::new(),
+            unfolded: Vec::new(),
         };
         let shape = |under: Vec<(&str, usize)>, without: Vec<&str>, swapped: bool| {
             find(
@@ -1205,6 +1223,7 @@ mod tests {
                     text_as_uses: Vec::new(),
                     swapped: false,
                     respelled: Vec::new(),
+                    unfolded: Vec::new(),
                 },
                 false,
             )
@@ -1282,6 +1301,7 @@ mod tests {
             text_as_uses: Vec::new(),
             swapped: false,
             respelled: Vec::new(),
+            unfolded: Vec::new(),
         };
         let r = find(
             &empty(Empty::NotIndexed {
@@ -1336,6 +1356,7 @@ mod tests {
                 text_as_uses: Vec::new(),
                 swapped: false,
                 respelled: Vec::new(),
+                unfolded: Vec::new(),
             },
             false,
         );
@@ -1361,6 +1382,7 @@ mod tests {
                 text_as_uses: Vec::new(),
                 swapped: false,
                 respelled: Vec::new(),
+                unfolded: Vec::new(),
             },
             false,
         );
@@ -1584,5 +1606,38 @@ mod tests {
         let mixed = [old("mathlib"), behind("project", SourceKind::Local, true)];
         let r = status(&report(&mixed), std::path::Path::new("/p/i.db"));
         assert!(r.contains("behind: mathlib (indexed by an older dt), project —"), "{r}");
+    }
+
+    /// Rows this build loaded from a dump an older one wrote are old, and this
+    /// build is not the older `dt`: naming it as one would send the reader
+    /// looking for a newer version that does not exist.
+    #[test]
+    fn rows_loaded_from_an_old_dump_blame_the_dump() {
+        use crate::domain::source::SourceKind;
+        let here = Some(env!("CARGO_PKG_VERSION").to_string());
+        let s = Stale {
+            id: crate::domain::source::SourceId::new("mathlib"),
+            why: Why::Written { by: here.clone() },
+        };
+        let line = stale(&s, Some(SourceKind::Lake), &[]);
+        assert!(
+            line.contains(
+                "`mathlib` was loaded from a dump an older dt wrote; rows may be missing — \
+                 `dt refresh mathlib`"
+            ),
+            "{line}"
+        );
+        let rows = [SourceStatus {
+            current_rev: Some("4f21c8e".into()),
+            written_by: Some(here),
+            ..behind("mathlib", SourceKind::Lake, true)
+        }];
+        let r = status(&report(&rows), std::path::Path::new("/p/index.db"));
+        assert!(
+            r.contains(
+                "behind: mathlib — loaded from a dump an older dt wrote — re-run `dt refresh`"
+            ),
+            "{r}"
+        );
     }
 }

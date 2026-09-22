@@ -4,11 +4,13 @@
 
 mod support;
 
+use discrtree::application::find::Find;
 use discrtree::application::index;
-use discrtree::application::ports::{DeclRepo, DeclSink, Provenance};
+use discrtree::application::ports::{DeclRepo, DeclSink, NoBuild, Provenance};
 use discrtree::application::status;
-use discrtree::domain::decl::{ArgHead, Decl, DeclKind, Shape, Span};
+use discrtree::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
+use discrtree::domain::pattern;
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
 use discrtree::domain::source::{SourceKind, SourceMeta, Sources};
@@ -1037,7 +1039,8 @@ fn an_index_written_by_an_older_dt_opens_and_says_so() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format; \
-         ALTER TABLE decl DROP COLUMN statement;",
+         ALTER TABLE decl DROP COLUMN statement; DROP INDEX decl_unfolds; \
+         ALTER TABLE decl DROP COLUMN unfolds;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 2i64).unwrap();
@@ -1201,4 +1204,160 @@ fn a_repeated_query_is_answered_again_after_the_rows_change() {
     db.clear_source(&SourceId::new("mathlib")).unwrap();
     db.finish().unwrap();
     assert_eq!(names(&db), [] as [String; 0], "and a row deleted since is gone");
+}
+
+/// Rows that unfold, as `(name, what it unfolds to)`, in module `M`.
+fn unfolding(steps: &[(&str, Option<&str>)]) -> Vec<Decl> {
+    steps
+        .iter()
+        .map(|(name, to)| {
+            let mut d = Decl::stub(name, "mathlib", "M");
+            d.kind = DeclKind::Def;
+            d.unfolds = to.map(DeclName::new);
+            d
+        })
+        .collect()
+}
+
+/// The walk the index takes through `decl_unfolds` is the walk the domain
+/// takes through the pairs, name for name: up to where a name's unfoldings
+/// end, and down every one that ends there -- through a cycle too, which no
+/// elaborator writes and a hand-built index can.
+#[test]
+fn the_index_unfolds_a_name_into_the_class_the_domain_does() {
+    let steps = [
+        ("EuclideanSpace", Some("PiLp")),
+        ("PiLp", Some("WithLp")),
+        ("Mixed", Some("WithLp")),
+        ("WithLp", None),
+        ("Real", None),
+        ("A", Some("B")),
+        ("B", Some("A")),
+    ];
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &unfolding(&steps)).unwrap();
+    db.finish().unwrap();
+    let pairs: Vec<(DeclName, DeclName)> = steps
+        .iter()
+        .filter_map(|(from, to)| Some((DeclName::new(*from), DeclName::new((*to)?))))
+        .collect();
+    for name in ["EuclideanSpace", "PiLp", "WithLp", "Mixed", "Real", "A", "B", "Unindexed"] {
+        let name = DeclName::new(name);
+        assert_eq!(
+            db.reducible_class(&name).unwrap(),
+            decl::reducible_class(pairs.iter().map(|(a, b)| (a, b)), &name),
+            "{name}"
+        );
+    }
+    let class = |name: &str| -> Vec<String> {
+        db.reducible_class(&DeclName::new(name)).unwrap().iter().map(|n| n.to_string()).collect()
+    };
+    assert_eq!(class("PiLp"), ["EuclideanSpace", "Mixed", "PiLp", "WithLp"]);
+    assert_eq!(class("Real"), ["Real"]);
+    assert_eq!(class("B"), ["A", "B"]);
+}
+
+/// What the three searches of the todo have to answer, asked of the index the
+/// way `dt find` asks it: the instance Lean finds for `EuclideanSpace ℝ (Fin
+/// 3)`, which is stated for `WithLp` -- two unfoldings from the name written,
+/// one from `PiLp`. `Fin` is written inside the argument that was unfolded,
+/// and the instance does not mention it; written outside it too, it is asked.
+#[test]
+fn a_pattern_finds_the_instance_stated_for_what_its_argument_unfolds_to() {
+    let mut rows =
+        unfolding(&[("EuclideanSpace", Some("PiLp")), ("PiLp", Some("WithLp")), ("WithLp", None)]);
+    let instance = |name: &str, arg: &str, consts: &[&str]| {
+        let mut d = theorem(name, "mathlib", "Mathlib.MeasureTheory", "MeasurableSpace", consts);
+        d.kind = DeclKind::Instance;
+        d.shape.args = vec![ArgHead::Named(DeclName::new(arg))];
+        d
+    };
+    rows.push(instance(
+        "WithLp.measurableSpace",
+        "WithLp",
+        &["ENNReal", "MeasurableSpace", "WithLp"],
+    ));
+    rows.push(instance("Real.measurableSpace", "Real", &["MeasurableSpace", "Real"]));
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let find = |pattern: &str| {
+        let mut q = pattern::parse(pattern).query;
+        q.elaborated_only = true;
+        let hits = Find { repo: &db, build: &NoBuild }.run(&q).unwrap();
+        let names: Vec<String> = hits.rows.iter().map(|d| d.name.to_string()).collect();
+        let unfolded: Vec<(String, Vec<String>)> = hits
+            .unfolded
+            .iter()
+            .map(|(w, s)| (w.to_string(), s.iter().map(|n| n.to_string()).collect()))
+            .collect();
+        (names, unfolded)
+    };
+    let to_withlp = |written: &str| vec![(written.to_string(), vec!["WithLp".to_string()])];
+    for (pattern, written) in [
+        ("MeasurableSpace (EuclideanSpace _ _)", "EuclideanSpace"),
+        ("MeasurableSpace (PiLp _ _)", "PiLp"),
+        ("MeasurableSpace (EuclideanSpace ℝ (Fin 3))", "EuclideanSpace"),
+    ] {
+        assert_eq!(
+            find(pattern),
+            (vec!["WithLp.measurableSpace".into()], to_withlp(written)),
+            "{pattern}"
+        );
+    }
+    assert_eq!(
+        find("MeasurableSpace (WithLp _ _)"),
+        (vec!["WithLp.measurableSpace".into()], vec![]),
+        "found as written, and nothing to say about it"
+    );
+    let outside = "Fin 3 → MeasurableSpace (EuclideanSpace ℝ (Fin 3))";
+    let written = pattern::parse("MeasurableSpace (EuclideanSpace ℝ (Fin 3))").query;
+    assert_eq!(pattern::parse(outside).query.shape, written.shape);
+    let (names, _) = find(outside);
+    assert!(names.is_empty(), "`Fin` written outside the argument is asked: {names:?}");
+
+    // A statement about the name as written answers only by mentioning `Fin`.
+    // The SQL cannot tell which way a row matched, so it leaves the use to the
+    // rows it reads, and a count has to read them too to agree.
+    let about_written =
+        instance("EuclideanSpace.measurableSpace", "EuclideanSpace", &["MeasurableSpace"]);
+    index::load(&mut db, &[about_written]).unwrap();
+    db.finish().unwrap();
+    let mut q = written;
+    q.shape.args = vec![ArgHead::Reducible {
+        written: DeclName::new("EuclideanSpace"),
+        class: db.reducible_class(&DeclName::new("EuclideanSpace")).unwrap(),
+    }];
+    let names: Vec<String> = db.find(&q).unwrap().iter().map(|d| d.name.to_string()).collect();
+    assert_eq!(names, ["WithLp.measurableSpace"]);
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+    q.inside = vec![Vec::new()];
+    assert!(db.find(&q).unwrap().is_empty());
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 0);
+}
+
+/// An index 0.60.0 wrote, schema 4, has every column but `decl.unfolds`. It
+/// opens, its rows unfold to nothing, and its sources are behind: nothing is
+/// also what a row that does unfold reads as there, so the rows have to be
+/// written again before a search can see through an `abbrev`.
+#[test]
+fn an_index_from_before_unfoldings_opens_and_is_behind() {
+    let dir = TempDir::new("dt-unfolds");
+    let path = dir.path().join("index.db");
+    let id = SourceId::new("mathlib");
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        index::load(&mut db, &unfolding(&[("PiLp", Some("WithLp")), ("WithLp", None)])).unwrap();
+        db.record(&id, &Provenance { row_format: Some(1), ..Provenance::by_this_build() }).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP INDEX decl_unfolds; ALTER TABLE decl DROP COLUMN unfolds;").unwrap();
+    conn.pragma_update(None, "user_version", 4i64).unwrap();
+    drop(conn);
+
+    let db = SqliteIndex::open(&path).expect("a schema-4 index is migrated, not refused");
+    let pilp = DeclName::new("PiLp");
+    assert_eq!(db.get(&pilp).unwrap().unwrap().unfolds, None);
+    assert_eq!(db.reducible_class(&pilp).unwrap(), [pilp]);
+    assert!(db.provenance(&id).unwrap().unwrap().outdated());
 }

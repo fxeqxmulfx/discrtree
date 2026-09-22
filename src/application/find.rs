@@ -198,6 +198,12 @@ pub struct Hits {
     /// and `mul_self_nonneg` about `a * a`, and whoever writes either means
     /// both. See [`Power`].
     pub respelled: Vec<Power>,
+    /// Each argument head the pattern wrote that rows below have something
+    /// else in place of, and what they have, for the same reason: the two are
+    /// one thing once reducible definitions are unfolded, as Lean unfolds them
+    /// to find an instance. `EuclideanSpace` is `PiLp`, which is `WithLp`, and
+    /// the instance for all three is stated for `WithLp`.
+    pub unfolded: Vec<(DeclName, Vec<DeclName>)>,
 }
 
 /// The relations whose two sides can trade places without changing what a
@@ -214,6 +220,9 @@ fn turned(query: &Query) -> Option<Query> {
     }
     let mut out = query.clone();
     out.shape.args.reverse();
+    // And so does what was written inside a side.
+    out.inside.resize(out.shape.args.len(), Vec::new());
+    out.inside.reverse();
     // A power stays with the side it is written on.
     for (i, _) in &mut out.powers {
         *i = 1 - *i;
@@ -233,7 +242,7 @@ fn respellings(query: &Query) -> Vec<(Query, Vec<Power>)> {
     let traded: Vec<usize> = (0..query.powers.len())
         .filter(|&j| {
             let (i, p) = query.powers[j];
-            query.shape.args.get(i) == Some(&ArgHead::Named(p.head()))
+            query.shape.args.get(i).and_then(ArgHead::name) == Some(&p.head())
         })
         .collect();
     let mut sets = vec![traded.clone()];
@@ -329,8 +338,10 @@ fn qualified(query: &Query, reading: &Reading) -> Option<Query> {
         }
     }
     // A constant inside the pattern is in both lists, and is renamed in both so
-    // that a failure still blames it as written in the pattern.
-    for u in out.uses.iter_mut().chain(out.pattern_uses.iter_mut()) {
+    // that a failure still blames it as written in the pattern -- and where it
+    // was written inside an argument, there too.
+    let held = out.inside.iter_mut().flatten();
+    for u in out.uses.iter_mut().chain(out.pattern_uses.iter_mut()).chain(held) {
         if let Some(resolved) = top(u) {
             *u = resolved;
             any = true;
@@ -340,6 +351,9 @@ fn qualified(query: &Query, reading: &Reading) -> Option<Query> {
     let before = out.uses.len();
     out.uses.retain(|u| !(variable(u) && written.contains(u)));
     out.pattern_uses.retain(|u| !variable(u));
+    for held in &mut out.inside {
+        held.retain(|u| !variable(u));
+    }
     any |= out.uses.len() != before;
     any.then_some(out)
 }
@@ -351,6 +365,7 @@ impl Find<'_> {
                 "nothing to search for: give a pattern, or one of --name, --concl, --uses, --in, --text"
             )
         }
+        let query = &self.unfolding(query)?;
         let mut rows = self.repo.find(query)?;
         // What the query is ranked and truncated by: the one that found the
         // rows, which is not the one that was typed when a bare word had to be
@@ -365,6 +380,7 @@ impl Find<'_> {
             // _` needs `inner` read as `Inner.inner` and its square written as
             // a product before anything answers.
             if let Some(retry) = qualified(query, &reading) {
+                let retry = self.unfolding(&retry)?;
                 rows = self.repo.find(&retry)?;
                 asked = retry;
                 resolved = true;
@@ -443,7 +459,50 @@ impl Find<'_> {
             true => Some(self.diagnose(&asked, &reading.called)?),
             false => None,
         };
-        Ok(Hits { rows, truncated, empty, read_as, variables, text_as_uses, swapped, respelled })
+        let mut unfolded: Vec<(DeclName, Vec<DeclName>)> = Vec::new();
+        for (written, stated) in rows.iter().flat_map(|d| asked.unfolded(d)) {
+            match unfolded.iter_mut().find(|(w, _)| *w == written) {
+                Some((_, all)) if all.contains(&stated) => {}
+                Some((_, all)) => all.push(stated),
+                None => unfolded.push((written, vec![stated])),
+            }
+        }
+        Ok(Hits {
+            rows,
+            truncated,
+            empty,
+            read_as,
+            variables,
+            text_as_uses,
+            swapped,
+            respelled,
+            unfolded,
+        })
+    }
+
+    /// The query with each argument head it names made every name of the same
+    /// thing, where the index knows more than one: `EuclideanSpace` also
+    /// `PiLp` and `WithLp`, which it unfolds to, and the other way round.
+    ///
+    /// Lean looks an instance up with reducible definitions unfolded, in the
+    /// goal and in the instances alike, and a lemma is found by `simp` and
+    /// `rw` the same way. A pattern copied out of a goal names what the goal
+    /// was written with, and the statement that answers it is often stated
+    /// for what that unfolds to -- or for the other way of writing it. A field
+    /// is a suffix and names no one constant, and stays as it is.
+    fn unfolding(&self, query: &Query) -> Result<Query> {
+        let mut out = query.clone();
+        for a in &mut out.shape.args {
+            let ArgHead::Named(n) = a else { continue };
+            if n.is_field() {
+                continue;
+            }
+            let class = self.repo.reducible_class(n)?;
+            if class.len() > 1 {
+                *a = ArgHead::Reducible { written: n.clone(), class };
+            }
+        }
+        Ok(out)
     }
 
     /// The constants each bare word in the pattern could be naming, commonest
@@ -705,6 +764,7 @@ impl Find<'_> {
             shape: query.shape.clone(),
             uses,
             pattern_uses: query.pattern_uses.clone(),
+            inside: query.inside.clone(),
             limit: 1,
             ..Query::new()
         };
@@ -741,7 +801,7 @@ impl Find<'_> {
         rev.reverse();
         let swapped = rev != shape.args && hit(rev)?;
         let named: Vec<usize> =
-            (0..shape.args.len()).filter(|i| matches!(shape.args[*i], ArgHead::Named(_))).collect();
+            (0..shape.args.len()).filter(|i| shape.args[*i].name().is_some()).collect();
         let mut without = Vec::new();
         // Only worth asking of a pattern that named two or more. With one, the
         // answer is always "it matches without it", which says nothing beyond
@@ -751,7 +811,7 @@ impl Find<'_> {
                 let mut args = shape.args.clone();
                 args[i] = ArgHead::Any;
                 if hit(args)?
-                    && let ArgHead::Named(n) = &shape.args[i]
+                    && let Some(n) = shape.args[i].name()
                 {
                     without.push(n.clone());
                 }
@@ -764,7 +824,7 @@ impl Find<'_> {
     /// search, and only for a pattern that named both a relation and at least
     /// one argument -- without a relation there is nothing to be wrong about.
     fn under(&self, shape: &Shape) -> Result<Vec<(DeclName, usize)>> {
-        if shape.concl.is_none() || !shape.args.iter().any(|a| matches!(a, ArgHead::Named(_))) {
+        if shape.concl.is_none() || !shape.args.iter().any(|a| a.name().is_some()) {
             return Ok(Vec::new());
         }
         let free = Shape { concl: None, args: shape.args.clone() };

@@ -8,6 +8,7 @@ use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
+use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS decl (
   line_start  INTEGER,
   line_end    INTEGER,
   elaborated  INTEGER NOT NULL DEFAULT 1,
-  statement   TEXT
+  statement   TEXT,
+  unfolds     TEXT
 );
 
 -- One row per (name, source, module). Two sources are two answers to the same
@@ -54,6 +56,11 @@ CREATE INDEX        IF NOT EXISTS decl_source ON decl(source);
 -- the index that had only that.
 DROP INDEX IF EXISTS decl_concl;
 CREATE INDEX        IF NOT EXISTS decl_heads  ON decl(concl, concl_args);
+
+-- What a reducible definition unfolds to, walked downwards: the definitions
+-- that unfold to `WithLp` are the rows under it here. A few thousand rows out
+-- of the whole table, so only those are kept; upwards is `decl_lookup`.
+CREATE INDEX        IF NOT EXISTS decl_unfolds ON decl(unfolds) WHERE unfolds IS NOT NULL;
 
 -- Constants of the type. A side table rather than a string column so that
 -- `--uses a,b` is two index lookups instead of two substring scans.
@@ -103,7 +110,7 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// The one index the side tables have, and the one thing a load does not need.
 ///
@@ -179,7 +186,10 @@ fn check_version(conn: &Connection) -> Result<()> {
 /// did not record it" — which is exactly what that file is. Rebuilding a 1.2 GB
 /// index to learn a fact the empty column already states is the cost of not
 /// having this. `decl.statement` is the same kind of column: empty reads as
-/// "not recorded", which is what an index from before it is.
+/// "not recorded", which is what an index from before it is. So is
+/// `decl.unfolds`, with one difference: empty also means "unfolds to nothing",
+/// so the sources keep the row format they were written with, and that is what
+/// tells `dt status` they are behind.
 fn migrate(conn: &Connection, found: i64) -> Result<bool> {
     if found == 2 {
         conn.execute_batch(
@@ -189,6 +199,9 @@ fn migrate(conn: &Connection, found: i64) -> Result<bool> {
     }
     if found == 2 || found == 3 {
         conn.execute_batch("ALTER TABLE decl ADD COLUMN statement TEXT;")?;
+    }
+    if (2..=4).contains(&found) {
+        conn.execute_batch("ALTER TABLE decl ADD COLUMN unfolds TEXT;")?;
         return Ok(true);
     }
     Ok(false)
@@ -240,6 +253,12 @@ impl SqliteIndex {
 
     fn init(conn: Connection) -> Result<SqliteIndex> {
         check_version(&conn)?;
+        conn.create_scalar_function(
+            "heads_named",
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            heads_named,
+        )?;
         conn.execute_batch(SCHEMA)?;
         // FTS5 is a compile-time option. Without it everything except free-text
         // search still works, so a missing module is not fatal.
@@ -412,6 +431,7 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
             _ => None,
         },
         elaborated: r.get::<_, i64>("elaborated")? != 0,
+        unfolds: r.get::<_, Option<String>>("unfolds")?.map(DeclName::new),
     })
 }
 
@@ -501,6 +521,35 @@ impl DeclRepo for SqliteIndex {
             .query_map(params![name.as_str()], row_and_id)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         self.with_lists(rows, &[USES, DEP])
+    }
+
+    /// Two walks, each a step per lookup: up the unfoldings by `decl_lookup`
+    /// to where they end, and back down every one that ends there by
+    /// `decl_unfolds`. The same answer as [`decl::reducible_class`], which the
+    /// tests hold it to.
+    fn reducible_class(&self, name: &DeclName) -> Result<Vec<DeclName>> {
+        let found = self
+            .conn
+            .prepare_cached(
+                "WITH RECURSIVE
+                 up(n, depth) AS (
+                     SELECT ?1, 0
+                     UNION SELECT d.unfolds, up.depth + 1 FROM decl d JOIN up ON d.name = up.n
+                     WHERE d.unfolds IS NOT NULL AND up.depth < ?2),
+                 root(n) AS (SELECT n FROM up ORDER BY depth DESC LIMIT 1),
+                 down(n, depth) AS (
+                     SELECT n, 0 FROM root
+                     UNION SELECT d.name, down.depth + 1 FROM decl d JOIN down ON d.unfolds = down.n
+                     WHERE down.depth < ?2)
+                 SELECT DISTINCT n FROM down",
+            )?
+            .query_map(params![name.as_str(), decl::UNFOLD_DEPTH as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        let mut class: Vec<DeclName> =
+            found.into_iter().map(DeclName::new).chain([name.clone()]).collect();
+        class.sort();
+        class.dedup();
+        Ok(class)
     }
 
     /// One scan of `decl`, counted in Rust.
@@ -623,7 +672,15 @@ impl DeclRepo for SqliteIndex {
         if query.uses.is_empty() {
             return Ok(rows.into_iter().map(|(_, d)| d).collect());
         }
-        self.with_lists(rows, &[USES])
+        let decls = self.with_lists(rows, &[USES])?;
+        // A use written inside an argument that matched only once unfolded may
+        // be missing from a row that answers, and the SQL let through each row
+        // with a head that could have matched so. Whether it did is a question
+        // of alignment, asked here.
+        if query.excusable().is_empty() {
+            return Ok(decls);
+        }
+        Ok(decls.into_iter().filter(|d| query.answers_shape_and_uses(d)).collect())
     }
 
     /// Counted in SQL, without reading a row. A shape is matched in the
@@ -631,6 +688,11 @@ impl DeclRepo for SqliteIndex {
     /// rows have to be read either way, and a count that ignored the shape
     /// would be a different query's answer.
     fn count(&self, query: &Query) -> Result<usize> {
+        // Which rows may leave out a use is decided on the constants of each,
+        // which only `find` reads.
+        if !query.excusable().is_empty() {
+            return Ok(self.find(query)?.len());
+        }
         if !query.shape.is_empty() {
             return self.with_matching(query, |rows| {
                 rows.iter().filter(|(_, d)| query.shape.matches(&d.shape)).count()
@@ -780,16 +842,64 @@ fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
     // what lets a shape query see the whole corpus instead of the first `cap`
     // rows that happen to share a conclusion. `LE.le` alone matches tens of
     // thousands of declarations.
+    //
+    // An argument that can match through an unfolding is any of the names it
+    // is known by.
     for a in &q.shape.args {
-        if let ArgHead::Named(n) = a {
-            tests.push("(' ' || concl_args || ' ') GLOB ?".into());
-            // A field ends a name, and a name ends at a space.
-            let starts = if n.is_field() { "*" } else { "* " };
-            binds.push(format!("{starts}{} *", glob_escaped(n.as_str())));
-        }
+        let names: Vec<&DeclName> = match a {
+            ArgHead::Named(n) => vec![n],
+            ArgHead::Reducible { class, .. } => class.iter().collect(),
+            ArgHead::Any => continue,
+        };
+        tests.push("heads_named(concl_args, ?)".into());
+        binds.push(spaced(&names));
     }
     (!tests.is_empty())
         .then(|| format!("d.id IN (SELECT id FROM decl WHERE {})", tests.join(" AND ")))
+}
+
+/// `heads_named(heads, names)`, for SQL: whether one of `heads` is a constant
+/// one of `names` names, both joined by spaces as `concl_args` is. The same
+/// [`DeclName::names`] decides as in the domain.
+///
+/// A `GLOB` per name did it before, and an argument that can match through an
+/// unfolding has a name for each definition that unfolds to its head: eight
+/// for `HMul.hMul`, and eight `GLOB`s over the 163 000 `Eq` rows of Mathlib
+/// took four times what one did. Here the names are read once a statement,
+/// and a row is split once, as bytes: asking each name of each head whether
+/// it is a field, and each row whether it is text, was still the ten
+/// milliseconds unfolding cost `x * x * x * x = _`.
+fn heads_named(ctx: &Context<'_>) -> rusqlite::Result<bool> {
+    let names =
+        ctx.get_or_create_aux(1, |v| -> rusqlite::Result<Names> { Ok(Names::read(v.as_str()?)) })?;
+    let heads = ctx.get_raw(0).as_bytes()?;
+    Ok(heads.split(|b| *b == b' ').any(|h| names.name(h)))
+}
+
+/// The names a [`heads_named`] call was given: the whole ones apart from the
+/// fields, which a constant only has to end with.
+struct Names {
+    whole: Vec<Box<[u8]>>,
+    fields: Vec<Box<[u8]>>,
+}
+
+impl Names {
+    fn read(names: &str) -> Names {
+        let (fields, whole) =
+            names.split_whitespace().map(DeclName::new).partition(DeclName::is_field);
+        let bytes =
+            |v: Vec<DeclName>| v.into_iter().map(|n| n.into_string().into_bytes().into()).collect();
+        Names { whole: bytes(whole), fields: bytes(fields) }
+    }
+
+    fn name(&self, head: &[u8]) -> bool {
+        self.whole.iter().any(|n| **n == *head) || self.fields.iter().any(|f| head.ends_with(f))
+    }
+}
+
+/// Names as [`heads_named`] reads them.
+fn spaced(names: &[&DeclName]) -> String {
+    names.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(" ")
 }
 
 /// The `WHERE` a query becomes, and what to bind into it. Separate from the
@@ -808,15 +918,27 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     }
     // A field is a suffix, and still a seek: the key is `(decl_id, const)`,
     // so the `GLOB` runs over one row's constants and never over the table.
+    //
+    // A row may leave out a use written only inside arguments that can match
+    // through an unfolding, if it has for each of them a head that matches it
+    // so. Whether those heads are where the arguments are is asked of the
+    // row; see `find`.
     for c in &q.uses {
         let (test, bind) = match c.is_field() {
             true => ("GLOB ?", format!("*{}", glob_escaped(c.as_str()))),
             false => ("= ?", c.to_string()),
         };
-        where_clauses.push(format!(
-            "EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const {test})"
-        ));
+        let uses =
+            format!("EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const {test})");
         binds.push(bind);
+        let instead = q.instead_of(c);
+        if instead.is_empty() {
+            where_clauses.push(uses);
+            continue;
+        }
+        let heads = vec!["heads_named(d.concl_args, ?)"; instead.len()].join(" AND ");
+        where_clauses.push(format!("({uses} OR {heads})"));
+        binds.extend(instead.iter().map(|names| spaced(names)));
     }
     if let Some(m) = &q.module {
         where_clauses.push("(d.module = ? OR d.module LIKE ?)".into());
@@ -964,8 +1086,8 @@ impl DeclSink for SqliteIndex {
             let mut insert = tx.prepare_cached(
                 "INSERT OR REPLACE INTO decl
                  (name, source, module, kind, type, concl, concl_args, doc, sorry,
-                  line_start, line_end, elaborated)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                  line_start, line_end, elaborated, unfolds)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             )?;
             // `OR IGNORE` because the side tables are keyed on (decl_id, value)
             // now. Both producers already deduplicate — the dumper because
@@ -1040,6 +1162,7 @@ impl DeclSink for SqliteIndex {
                     d.span.map(|s| s.start),
                     d.span.map(|s| s.end),
                     d.elaborated as i64,
+                    d.unfolds.as_ref().map(DeclName::as_str),
                 ])?;
                 // A replaced row is deleted and re-inserted, so this id is
                 // always fresh and its side rows are always new. Clearing them
@@ -1082,5 +1205,35 @@ impl DeclSink for SqliteIndex {
         self.conn.execute_batch("ANALYZE;")?;
         self.dirty = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `heads_named` is [`DeclName::names`] over the heads a row keeps as
+    /// text: a whole head, or for a field the end of one, by any of the names
+    /// it is given. A name that is part of a head names nothing, and the
+    /// domain would turn away what it let through without saying so.
+    #[test]
+    fn a_head_is_named_whole_or_as_a_field_by_any_of_the_names() {
+        let db = SqliteIndex::in_memory().unwrap();
+        let named = |heads: &str, names: &str| -> bool {
+            db.conn
+                .query_row("SELECT heads_named(?1, ?2)", params![heads, names], |r| r.get(0))
+                .unwrap()
+        };
+        let heads = "Real HMul.hMul Real.exp";
+        for names in ["Real", "HMul.hMul", "Real.exp", "Nat Real.exp"] {
+            assert!(named(heads, names), "{names}");
+        }
+        for fields in [".hMul", ".exp", "Nat .exp"] {
+            assert!(named(heads, fields), "{fields}");
+        }
+        for names in ["HMul", "hMul", "Real.ex", "eal", ".Mul", ".Real", "Nat", ""] {
+            assert!(!named(heads, names), "{names}");
+        }
+        assert!(!named("", "Real"));
     }
 }

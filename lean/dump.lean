@@ -129,6 +129,29 @@ def rangesIn (module : ModuleIdx) (name : Name) : MetaM (Option DeclarationRange
   | some r => pure (some r)
   | none   => findDeclarationRanges? name
 
+/-- The body of a definition under its lambdas: `fun 𝕜 n => PiLp 2 fun _ => 𝕜`
+is read at `PiLp 2 fun _ => 𝕜`. -/
+partial def body : Expr → Expr
+  | .lam _ _ b _ => body b
+  | .mdata _ b   => body b
+  | e            => e
+
+/-- The constant a reducible definition unfolds to, when its body applies one:
+`EuclideanSpace` to `PiLp`, `PiLp` to `WithLp`, `Ne` to `Not`.
+
+Lean's discrimination trees reduce every key with reducible transparency, so an
+instance stated at `WithLp` is found for a goal written at `EuclideanSpace`. The
+row records the one step so that a search can take it too. Instances are left
+out: they are reducible for unification to see through, and no key is read
+through one. A body headed by a variable -- `id`, `outParam` -- unfolds to no
+constant, and says so. -/
+def unfoldsTo (env : Environment) (ci : ConstantInfo) : Option Name :=
+  match ci with
+  | .defnInfo d =>
+    if getReducibilityStatusCore env ci.name matches .reducible && !isInstanceCore env ci.name
+    then headSym (body d.value) else none
+  | _ => none
+
 /-- One JSONL row. Field names match `discrtree::model::Decl`. -/
 def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     (module : Name) (moduleIdx : ModuleIdx) : MetaM Json := do
@@ -162,7 +185,12 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     ("line_end",   match range with
                    | some r => Json.num r.range.endPos.line
                    | none   => Json.null),
-    ("elaborated", Json.bool true)
+    ("elaborated", Json.bool true),
+    -- Written when empty too: its presence is what tells a dump from one an
+    -- older `dt` wrote, which has no such field to read.
+    ("unfolds",    match unfoldsTo env ci with
+                   | some n => Json.str n.toString
+                   | none   => Json.null)
   ]
 
 /-- A declaration to write, and the module that declared it, by name and by

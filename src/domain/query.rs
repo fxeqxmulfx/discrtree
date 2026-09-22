@@ -23,6 +23,14 @@ pub struct Query {
     /// that an empty result blames `` `List.range'` in the pattern `` rather
     /// than a flag the reader never typed.
     pub pattern_uses: Vec<DeclName>,
+    /// For each argument of `shape`, the constants of `pattern_uses` written
+    /// inside it and nowhere else: `Fin` in `MeasurableSpace (EuclideanSpace ℝ
+    /// (Fin 3))`. An argument that matches only once unfolded has been
+    /// rewritten, and what was inside it may be gone -- the instance that
+    /// answers is about `WithLp p X` and mentions no `Fin` -- so they are asked
+    /// of a statement only where the argument is the one written. Not a
+    /// condition either; an argument past the end holds nothing.
+    pub inside: Vec<Vec<DeclName>>,
     /// The arguments of `shape` that the pattern writes as a power of one
     /// term, by position, and how it writes each. Not a condition either: a
     /// shape keys on heads, and `x ^ 2` is `HPow.hPow` as `x ^ n` is, `x * x`
@@ -162,8 +170,8 @@ impl Query {
         // An argument head is written inside the pattern, not as a flag, so it
         // is named the way the user wrote it rather than the way it is stored.
         for a in &self.shape.args {
-            if let ArgHead::Named(n) = a {
-                let shape = Shape { concl: None, args: vec![ArgHead::Named(n.clone())] };
+            if let Some(n) = a.name() {
+                let shape = Shape { concl: None, args: vec![a.clone()] };
                 out.push((format!("`{n}` in the pattern"), one(Query { shape, ..Query::new() })));
             }
         }
@@ -225,10 +233,7 @@ impl Query {
         {
             return false;
         }
-        if !self.shape.matches(&d.shape) {
-            return false;
-        }
-        if !self.uses.iter().all(|c| mentions(d, c)) {
+        if !self.answers_shape_and_uses(d) {
             return false;
         }
         if let Some(m) = &self.module
@@ -256,6 +261,83 @@ impl Query {
             }
         }
         true
+    }
+
+    /// Whether `d` has the shape and mentions every use, as one condition: a
+    /// use written inside an argument is excused where that argument matched
+    /// only once unfolded. See [`Query::inside`].
+    pub fn answers_shape_and_uses(&self, d: &Decl) -> bool {
+        if !self.unfolds() {
+            return self.shape.matches(&d.shape) && self.uses.iter().all(|c| mentions(d, c));
+        }
+        self.shape
+            .alignments(&d.shape)
+            .any(|s| self.uses.iter().all(|c| mentions(d, c) || self.excused(c, &s)))
+    }
+
+    /// Whether an argument of the shape can match through an unfolding.
+    pub fn unfolds(&self) -> bool {
+        self.shape.args.iter().any(|a| matches!(a, ArgHead::Reducible { .. }))
+    }
+
+    /// The uses a statement may leave out and still answer: those written
+    /// only inside arguments that can match through an unfolding. Which of
+    /// the statements that leave one out answer is a question of alignment,
+    /// asked row by row.
+    pub fn excusable(&self) -> Vec<&DeclName> {
+        self.uses.iter().filter(|c| !self.instead_of(c).is_empty()).collect()
+    }
+
+    /// What a statement that leaves out `c` has among its heads instead, if
+    /// it may leave it out at all: for each argument `c` was written inside,
+    /// the names other than the one written that it matches once unfolded.
+    /// One of each, or the statement matched an argument as written and has
+    /// to mention `c`. Empty for a use every statement has to mention.
+    pub fn instead_of(&self, c: &DeclName) -> Vec<Vec<&DeclName>> {
+        let mut out = Vec::new();
+        for i in self.holders(c) {
+            let Some(ArgHead::Reducible { written, class }) = self.shape.args.get(i) else {
+                return Vec::new();
+            };
+            out.push(class.iter().filter(|m| *m != written).collect());
+        }
+        out
+    }
+
+    /// Whether an alignment excuses `c`: every argument it was written inside
+    /// matched only once unfolded.
+    fn excused(&self, c: &DeclName, alignment: &[Option<&DeclName>]) -> bool {
+        let holders = self.holders(c);
+        !holders.is_empty()
+            && holders.into_iter().all(|i| alignment.get(i).is_some_and(Option::is_some))
+    }
+
+    /// The arguments `c` was written inside.
+    fn holders(&self, c: &DeclName) -> Vec<usize> {
+        (0..self.inside.len()).filter(|i| self.inside[*i].contains(c)).collect()
+    }
+
+    /// What `d` matched only once unfolded, as the head written and the
+    /// statement's: empty where it answers as written.
+    pub fn unfolded(&self, d: &Decl) -> Vec<(DeclName, DeclName)> {
+        if !self.unfolds() {
+            return Vec::new();
+        }
+        let answers: Vec<Vec<Option<&DeclName>>> = self
+            .shape
+            .alignments(&d.shape)
+            .filter(|s| self.uses.iter().all(|c| mentions(d, c) || self.excused(c, s)))
+            .collect();
+        if answers.iter().any(|s| s.iter().all(Option::is_none)) {
+            return Vec::new();
+        }
+        let Some(first) = answers.first() else { return Vec::new() };
+        self.shape
+            .args
+            .iter()
+            .zip(first)
+            .filter_map(|(p, m)| Some((p.name()?.clone(), (*m)?.clone())))
+            .collect()
     }
 }
 
@@ -292,6 +374,11 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     // Shape agreement too, one step finer than the heads the index keeps:
     // every product agrees with `a * a` there.
     if !q.powers.is_empty() && writes_powers(q, d) {
+        score += 4;
+    }
+    // And one step coarser: a statement about the head written outranks one
+    // about another name for it, which is found only once both are unfolded.
+    if q.unfolds() && q.unfolded(d).is_empty() {
         score += 4;
     }
     score += q.uses.iter().filter(|c| mentions(d, c)).count() as u32;
@@ -552,6 +639,117 @@ mod tests {
         assert!(rank(&q, &product) < rank(&q, &square));
         q.powers = vec![(1, Power { exponent: 2, spelling: Spelling::Mul })];
         assert!(rank(&q, &square) < rank(&q, &product));
+    }
+
+    /// `EuclideanSpace` is `PiLp`, which is `WithLp`, once unfolded.
+    fn unfolding(written: &str) -> ArgHead {
+        let class = ["EuclideanSpace", "PiLp", "WithLp"].map(DeclName::new).to_vec();
+        ArgHead::Reducible { written: DeclName::new(written), class }
+    }
+
+    /// `MeasurableSpace (EuclideanSpace ℝ (Fin 3))`, as a search asks it.
+    fn measurable_euclidean() -> Query {
+        let mut q = Query::new();
+        q.shape =
+            Shape::new(Some(DeclName::new("MeasurableSpace")), vec![unfolding("EuclideanSpace")]);
+        q.uses = vec![DeclName::new("Fin")];
+        q.pattern_uses = q.uses.clone();
+        q.inside = vec![vec![DeclName::new("Fin")]];
+        q
+    }
+
+    /// An instance of `MeasurableSpace` for `head`, mentioning `consts` too.
+    fn instance(name: &str, head: &str, consts: &[&str]) -> Decl {
+        let mut d = Decl::stub(name, "mathlib", "Mathlib.Analysis.Normed.Lp.MeasurableSpace");
+        d.kind = DeclKind::Instance;
+        d.ty = format!("MeasurableSpace ({head} p X)");
+        d.shape = Shape::new(Some(DeclName::new("MeasurableSpace")), vec![ArgHead::parse(head)]);
+        d.consts =
+            ["MeasurableSpace", head].iter().chain(consts).map(|c| DeclName::new(*c)).collect();
+        d
+    }
+
+    /// The report: the instance Lean finds for `EuclideanSpace ℝ (Fin 3)` is
+    /// stated for `WithLp p X`, and says nothing of `Fin`. Where the argument
+    /// is the one written, what was written inside it is still asked.
+    #[test]
+    fn a_use_written_inside_an_unfolded_argument_is_excused_there_and_only_there() {
+        let q = measurable_euclidean();
+        assert_eq!(q.excusable(), [&DeclName::new("Fin")]);
+        let with_lp = instance("WithLp.measurableSpace", "WithLp", &[]);
+        assert!(q.matches(&with_lp));
+        assert_eq!(
+            q.unfolded(&with_lp),
+            [(DeclName::new("EuclideanSpace"), DeclName::new("WithLp"))]
+        );
+        assert!(!q.matches(&instance("EuclideanSpace.inst", "EuclideanSpace", &[])));
+        let fin = instance("EuclideanSpace.inst", "EuclideanSpace", &["Fin"]);
+        assert!(q.matches(&fin));
+        assert!(q.unfolded(&fin).is_empty());
+    }
+
+    /// A use written outside the argument as well, or given as a flag, is
+    /// asked of every statement, however the argument matched.
+    #[test]
+    fn a_use_written_outside_an_unfolded_argument_is_asked_of_every_statement() {
+        let mut q = measurable_euclidean();
+        q.inside = vec![Vec::new()];
+        assert!(q.excusable().is_empty());
+        assert!(!q.matches(&instance("WithLp.measurableSpace", "WithLp", &[])));
+        assert!(q.matches(&instance("WithLp.measurableSpace", "WithLp", &["Fin"])));
+    }
+
+    #[test]
+    fn a_use_inside_two_arguments_is_excused_only_where_both_were_unfolded() {
+        let eq = |l: &str, r: &str| {
+            let mut d = decl();
+            d.shape =
+                Shape::new(Some(DeclName::new("Eq")), vec![ArgHead::parse(l), ArgHead::parse(r)]);
+            d.consts = ["Eq", l, r].map(DeclName::new).to_vec();
+            d
+        };
+        let mut q = Query::new();
+        q.shape = Shape::new(
+            Some(DeclName::new("Eq")),
+            vec![unfolding("EuclideanSpace"), unfolding("PiLp")],
+        );
+        q.uses = vec![DeclName::new("Fin")];
+        q.inside = vec![vec![DeclName::new("Fin")], vec![DeclName::new("Fin")]];
+        assert!(q.matches(&eq("WithLp", "WithLp")));
+        assert!(!q.matches(&eq("EuclideanSpace", "WithLp")), "one side is as written");
+        q.shape.args[1] = ArgHead::parse("PiLp");
+        assert!(q.excusable().is_empty(), "one side cannot be unfolded");
+        assert!(!q.matches(&eq("WithLp", "PiLp")));
+    }
+
+    /// What a statement that leaves out `Fin` has among its heads instead,
+    /// which the SQL asks of a row before any alignment is: a name the
+    /// argument unfolds to other than the one written, since a statement
+    /// about that one has to mention `Fin` -- one for each argument it is in.
+    #[test]
+    fn a_use_is_left_out_for_another_name_of_each_argument_it_is_inside() {
+        let instead = |q: &Query| -> Vec<Vec<String>> {
+            let names = q.instead_of(&DeclName::new("Fin"));
+            names.iter().map(|v| v.iter().map(|n| n.to_string()).collect()).collect()
+        };
+        let mut q = measurable_euclidean();
+        assert_eq!(instead(&q), [["PiLp", "WithLp"]]);
+        q.shape.args.push(unfolding("PiLp"));
+        q.inside.push(vec![DeclName::new("Fin")]);
+        assert_eq!(instead(&q), [["PiLp", "WithLp"], ["EuclideanSpace", "WithLp"]]);
+        q.shape.args[1] = ArgHead::parse("PiLp");
+        assert!(instead(&q).is_empty(), "one argument can only match as written");
+    }
+
+    /// Both are the same instance to Lean. The one about the name the reader
+    /// wrote is the one they were looking for, even when it is the longer.
+    #[test]
+    fn a_statement_about_the_head_written_ranks_above_one_about_another_name() {
+        let q = measurable_euclidean();
+        let mut written = instance("EuclideanSpace.inst", "EuclideanSpace", &["Fin"]);
+        written.ty = format!("{} and a good deal more", written.ty);
+        let other = instance("PiLp.inst", "PiLp", &["Fin"]);
+        assert!(rank(&q, &written) < rank(&q, &other));
     }
 
     /// The quick no must never be the wrong answer, and that is checked
