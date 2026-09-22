@@ -9,6 +9,7 @@ use crate::domain::query::Query;
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -42,9 +43,17 @@ CREATE TABLE IF NOT EXISTS decl (
 DROP INDEX IF EXISTS decl_name;
 CREATE UNIQUE INDEX IF NOT EXISTS decl_ident  ON decl(name, source, module);
 CREATE INDEX        IF NOT EXISTS decl_lookup ON decl(name);
-CREATE INDEX        IF NOT EXISTS decl_concl  ON decl(concl);
 CREATE INDEX        IF NOT EXISTS decl_module ON decl(module);
 CREATE INDEX        IF NOT EXISTS decl_source ON decl(source);
+
+-- The heads a shape is keyed by, the conclusion's and its arguments', so that
+-- a shape query tests the arguments in the index and reads only the rows that
+-- pass. With the conclusion alone it read every row under it: `_ = _ * _` read
+-- the 163 000 `Eq` rows of Mathlib to keep the 6564 with a product, which was
+-- half of its time. It serves whatever the conclusion alone did, and replaces
+-- the index that had only that.
+DROP INDEX IF EXISTS decl_concl;
+CREATE INDEX        IF NOT EXISTS decl_heads  ON decl(concl, concl_args);
 
 -- Constants of the type. A side table rather than a string column so that
 -- `--uses a,b` is two index lookups instead of two substring scans.
@@ -196,6 +205,23 @@ pub struct SqliteIndex {
     /// rebuild. A maintained load never sets it, and that is what makes
     /// [`SqliteIndex::finish`] cheap after one.
     dirty: bool,
+    /// The rows the last query read. See [`Last`].
+    last: RefCell<Option<Last>>,
+}
+
+/// The rows of the last query, kept so that the next one does not read them
+/// again. A search asks the same question more than once: the look that turns
+/// `x * x * x * x = _` around sends the very SQL the first look sent, because
+/// the index keys heads and not sides, and only the domain tells the two
+/// apart. One look of `x * x * x * x = _` is 6564 rows and 100 ms.
+///
+/// `written` is what makes it safe: the rows are reused only while the
+/// database has not changed under them, by this connection or another.
+struct Last {
+    sql: String,
+    binds: Vec<String>,
+    written: (i64, u64),
+    rows: Vec<(i64, Decl)>,
 }
 
 impl SqliteIndex {
@@ -225,7 +251,7 @@ impl SqliteIndex {
         // No budget until a load says otherwise, so a caller that writes
         // without clearing a source first — a fresh index, every test — takes
         // the bulk path it always did.
-        Ok(SqliteIndex { conn, bulk: false, budget: 0, dirty: false })
+        Ok(SqliteIndex { conn, bulk: false, budget: 0, dirty: false, last: RefCell::new(None) })
     }
 
     /// What the source was when it was last indexed.
@@ -394,16 +420,51 @@ fn row_and_id(r: &SqlRow<'_>) -> rusqlite::Result<(i64, Decl)> {
     Ok((r.get("id")?, decl_from_row(r)?))
 }
 
+/// The side tables, each with the column its list is in: the constants a
+/// statement mentions, and the declarations a proof depends on.
+const USES: (&str, &str) = ("uses", "const");
+const DEP: (&str, &str) = ("dep", "name");
+
 impl SqliteIndex {
-    /// Fill in the two side tables for rows read with [`row_and_id`], and drop
-    /// the ids. Done in one statement per batch: `dt deps` on a 5154-node
-    /// closure would otherwise be 5154 round trips.
+    /// A pair that changes whenever the rows might have. `data_version` moves
+    /// when another connection commits and never for this one's own writes,
+    /// which is what `total_changes` counts.
+    fn written(&self) -> Result<(i64, u64)> {
+        let version = self.conn.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        Ok((version, self.conn.total_changes()))
+    }
+
+    /// The rows the query's SQL returns, read or remembered, handed to `f`
+    /// without being copied. See [`Last`].
+    ///
+    /// `f` may not touch the index: the remembered rows are borrowed for as
+    /// long as it runs.
+    fn with_matching<T>(&self, query: &Query, f: impl FnOnce(&[(i64, Decl)]) -> T) -> Result<T> {
+        let (sql, binds) = build_sql(query, self.has_fts());
+        let written = self.written()?;
+        let mut last = self.last.borrow_mut();
+        if !matches!(&*last, Some(l) if l.sql == sql && l.binds == binds && l.written == written) {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let bind: Vec<&dyn rusqlite::ToSql> =
+                binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows = stmt
+                .query_map(bind.as_slice(), row_and_id)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            *last = Some(Last { sql, binds, written, rows });
+        }
+        let rows = &last.as_ref().expect("filled just above").rows;
+        Ok(f(rows))
+    }
+
+    /// Fill in the lists these side tables hold for rows read with
+    /// [`row_and_id`], and drop the ids. Done in one statement per batch: `dt
+    /// deps` on a 5154-node closure would otherwise be 5154 round trips.
     ///
     /// By id and not by name, because a name can be in several rows:
     /// `RestrictedProduct.singleAddMonoidHom` is in Mathlib with the
     /// dependencies of its proof and in FLT with the ones a scanner guessed,
     /// and read by name each row had both.
-    fn with_lists(&self, rows: Vec<(i64, Decl)>) -> Result<Vec<Decl>> {
+    fn with_lists(&self, rows: Vec<(i64, Decl)>, tables: &[(&str, &str)]) -> Result<Vec<Decl>> {
         let (ids, mut decls): (Vec<i64>, Vec<Decl>) = rows.into_iter().unzip();
         if decls.is_empty() {
             return Ok(decls);
@@ -413,7 +474,7 @@ impl SqliteIndex {
             at.entry(*id).or_default().push(i);
         }
         let placeholders = vec!["?"; ids.len()].join(",");
-        for (table, column) in [("uses", "const"), ("dep", "name")] {
+        for &(table, column) in tables {
             let sql =
                 format!("SELECT decl_id, {column} FROM {table} WHERE decl_id IN ({placeholders})");
             let mut stmt = self.conn.prepare(&sql)?;
@@ -439,7 +500,7 @@ impl DeclRepo for SqliteIndex {
             .prepare_cached("SELECT * FROM decl WHERE name = ?1 ORDER BY elaborated DESC")?
             .query_map(params![name.as_str()], row_and_id)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        self.with_lists(rows)
+        self.with_lists(rows, &[USES, DEP])
     }
 
     /// One scan of `decl`, counted in Rust.
@@ -536,7 +597,7 @@ impl DeclRepo for SqliteIndex {
                 rows.push(r?);
             }
         }
-        let mut out = self.with_lists(rows)?;
+        let mut out = self.with_lists(rows, &[USES, DEP])?;
         // Keep the order asked for: `dt add` depends on it being topological.
         let position: std::collections::HashMap<&DeclName, usize> =
             names.iter().enumerate().map(|(i, n)| (n, i)).collect();
@@ -546,17 +607,23 @@ impl DeclRepo for SqliteIndex {
     }
 
     fn find(&self, query: &Query) -> Result<Vec<Decl>> {
-        let (sql, binds) = build_sql(query, self.has_fts());
-        let mut stmt = self.conn.prepare(&sql)?;
-        let bind: Vec<&dyn rusqlite::ToSql> =
-            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let mut rows =
-            stmt.query_map(bind.as_slice(), row_and_id)?.collect::<rusqlite::Result<Vec<_>>>()?;
         // Argument shape is checked in the domain: it is positional matching
         // with an alignment search, which SQL would express badly and slowly.
-        // Before the lists are read, which a row that fails it has no use for.
-        rows.retain(|(_, d)| query.shape.matches(&d.shape));
-        self.with_lists(rows)
+        // Before anything is copied, which a row that fails it has no use for.
+        let rows = self.with_matching(query, |rows| {
+            rows.iter()
+                .filter(|(_, d)| query.shape.matches(&d.shape))
+                .map(|(id, d)| (*id, d.clone()))
+                .collect::<Vec<_>>()
+        })?;
+        // Nothing reads the constants of a row unless the query named some, so
+        // nothing but such a query pays for them -- a fifth of `_ = _`. And
+        // never the dependencies, which no search reads at all: the `Eq` rows
+        // with a product have 315 430 of them against 148 610 constants.
+        if query.uses.is_empty() {
+            return Ok(rows.into_iter().map(|(_, d)| d).collect());
+        }
+        self.with_lists(rows, &[USES])
     }
 
     /// Counted in SQL, without reading a row. A shape is matched in the
@@ -565,7 +632,9 @@ impl DeclRepo for SqliteIndex {
     /// would be a different query's answer.
     fn count(&self, query: &Query) -> Result<usize> {
         if !query.shape.is_empty() {
-            return Ok(self.find(query)?.len());
+            return self.with_matching(query, |rows| {
+                rows.iter().filter(|(_, d)| query.shape.matches(&d.shape)).count()
+            });
         }
         let (filter, binds) = build_filter(query, self.has_fts());
         let mut stmt = self.conn.prepare(&format!("SELECT count(*) FROM decl d{filter}"))?;
@@ -682,27 +751,25 @@ const NOT_GENERATED: &str = "NOT (d.name LIKE '%.ctorIdx' OR d.name LIKE '%.ctor
      OR d.name LIKE '%.ofNat!_ctorIdx' ESCAPE '!' OR d.name LIKE '%.brecOn.%' \
      OR (d.name LIKE '%.elim' AND instr(d.type, ?) > 0))";
 
-/// The `WHERE` a query becomes, and what to bind into it. Separate from the
-/// statement around it because a count wants the same filter with no window
-/// and no ordering: the rows are not read, only tallied.
-fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
-    let mut where_clauses: Vec<String> = Vec::new();
-    let mut binds: Vec<String> = Vec::new();
-
-    if let Some(n) = &q.name {
-        where_clauses.push("lower(d.name) LIKE ?".into());
-        binds.push(format!("%{}%", n.to_lowercase()));
-    }
+/// The test of a shape's heads, the conclusion's and its named arguments', if
+/// it has any, with its binds pushed.
+///
+/// A subquery that hands back ids, because it reads only `decl_heads`: the
+/// heads are tested there, and a row is read once it has passed. The rows it
+/// names come in order of id, which is what lets a shape query be read in the
+/// order the rows were indexed and still stop at its window.
+fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
+    let mut tests: Vec<String> = Vec::new();
     if let Some(c) = &q.shape.concl {
         match c.is_field() {
             true => {
-                where_clauses.push("d.concl GLOB ?".into());
+                tests.push("concl GLOB ?".into());
                 binds.push(format!("*{}", glob_escaped(c.as_str())));
             }
             false => {
                 let heads = decl::keyed_as(c);
                 let marks = vec!["?"; heads.len()].join(", ");
-                where_clauses.push(format!("d.concl IN ({marks})"));
+                tests.push(format!("concl IN ({marks})"));
                 binds.extend(heads.iter().map(ToString::to_string));
             }
         }
@@ -715,11 +782,29 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // thousands of declarations.
     for a in &q.shape.args {
         if let ArgHead::Named(n) = a {
-            where_clauses.push("(' ' || d.concl_args || ' ') GLOB ?".into());
+            tests.push("(' ' || concl_args || ' ') GLOB ?".into());
             // A field ends a name, and a name ends at a space.
             let starts = if n.is_field() { "*" } else { "* " };
             binds.push(format!("{starts}{} *", glob_escaped(n.as_str())));
         }
+    }
+    (!tests.is_empty())
+        .then(|| format!("d.id IN (SELECT id FROM decl WHERE {})", tests.join(" AND ")))
+}
+
+/// The `WHERE` a query becomes, and what to bind into it. Separate from the
+/// statement around it because a count wants the same filter with no window
+/// and no ordering: the rows are not read, only tallied.
+fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(n) = &q.name {
+        where_clauses.push("lower(d.name) LIKE ?".into());
+        binds.push(format!("%{}%", n.to_lowercase()));
+    }
+    if let Some(heads) = heads_filter(q, &mut binds) {
+        where_clauses.push(heads);
     }
     // A field is a suffix, and still a seek: the key is `(decl_id, const)`,
     // so the `GLOB` runs over one row's constants and never over the table.
@@ -799,16 +884,28 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // `query::rank`, so the window is filled with the rows it would choose.
     // The `_` in a name is a LIKE wildcard and over-matches here; that changes
     // which rows are offered, never which one wins.
+    //
+    // A shape query reads its rows in the order they were indexed, and that
+    // order decides what a window holds and where the rows the ranking cannot
+    // tell apart come: `Nat.add_comm` before `Int.add_comm` for `a + b = b +
+    // a`. Left to the index it is the order of its keys, by the heads of the
+    // arguments, and the ids the heads name come sorted, so asking costs no
+    // sort.
+    let by_id = heads_filter(q, &mut Vec::new()).is_some();
     let order = match &q.name {
         Some(n) => {
             let n = n.to_lowercase();
             binds.push(n.clone());
             binds.push(format!("%.{n}"));
             binds.push(format!("{n}%"));
-            " ORDER BY (lower(d.name) = ?) DESC, (lower(d.name) LIKE ?) DESC, \
-             (lower(d.name) LIKE ?) DESC, length(d.name)"
+            let then = if by_id { ", d.id" } else { "" };
+            format!(
+                " ORDER BY (lower(d.name) = ?) DESC, (lower(d.name) LIKE ?) DESC, \
+                 (lower(d.name) LIKE ?) DESC, length(d.name){then}"
+            )
         }
-        None => "",
+        None if by_id => " ORDER BY d.id".into(),
+        None => String::new(),
     };
     (format!("SELECT d.* FROM decl d{filter}{order} LIMIT {cap}"), binds)
 }

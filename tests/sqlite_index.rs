@@ -238,6 +238,10 @@ fn an_elaborated_row_wins_over_a_text_row_with_the_same_name() {
 /// `RestrictedProduct.singleAddMonoidHom` has fourteen dependencies read off
 /// its proof in Mathlib, and three more a scanner guessed from FLT's text. The
 /// lists were read by name, and both rows had all seventeen.
+///
+/// A search reads the constants of each row only when the query names
+/// constants, which is the only case anything looks at them, and never the
+/// dependencies.
 #[test]
 fn rows_that_share_a_name_keep_their_own_lists() {
     let mut db = SqliteIndex::in_memory().unwrap();
@@ -259,7 +263,10 @@ fn rows_that_share_a_name_keep_their_own_lists() {
     assert_eq!(many, [own("mathlib", "Nat.add")]);
     let flt = Query { source: Some(SourceId::new("flt")), ..Query::new() };
     let found: Vec<_> = db.find(&flt).unwrap().iter().map(lists).collect();
-    assert_eq!(found, [own("flt", "Pi.single")]);
+    assert_eq!(found, [("flt".to_string(), vec![], vec![])], "no lists for a query naming none");
+    let asked = Query { uses: vec![DeclName::new("Pi.single")], ..flt };
+    let found: Vec<_> = db.find(&asked).unwrap().iter().map(lists).collect();
+    assert_eq!(found, [("flt".to_string(), vec![], vec![DeclName::new("Pi.single")])]);
 }
 
 #[test]
@@ -1165,4 +1172,33 @@ fn a_list_of_kinds_selects_any_of_them() {
         db.find(&q).unwrap().into_iter().map(|d| d.name.to_string()).collect();
     got.sort();
     assert_eq!(got, vec!["A.def", "A.opaque"]);
+}
+
+/// A search asks the index the same question more than once -- the look that
+/// turns a pattern around sends the very SQL the first look sent, because the
+/// index keys heads and neither side -- so the rows it read are kept. They
+/// must not outlive the rows themselves.
+#[test]
+fn a_repeated_query_is_answered_again_after_the_rows_change() {
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &[theorem("A.one", "mathlib", "M", "Eq", &[])]).unwrap();
+    db.finish().unwrap();
+    let mut q = Query::new();
+    q.shape.concl = Some(DeclName::new("Eq"));
+    let names = |db: &SqliteIndex| {
+        let mut got: Vec<String> =
+            db.find(&q).unwrap().into_iter().map(|d| d.name.to_string()).collect();
+        got.sort();
+        got
+    };
+    assert_eq!(names(&db), ["A.one"]);
+    assert_eq!(names(&db), ["A.one"], "and the same again");
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+    index::load(&mut db, &[theorem("A.two", "mathlib", "M", "Eq", &[])]).unwrap();
+    db.finish().unwrap();
+    assert_eq!(names(&db), ["A.one", "A.two"], "a row written since is found");
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 2, "and counted again");
+    db.clear_source(&SourceId::new("mathlib")).unwrap();
+    db.finish().unwrap();
+    assert_eq!(names(&db), [] as [String; 0], "and a row deleted since is gone");
 }

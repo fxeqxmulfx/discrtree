@@ -88,6 +88,29 @@ impl Power {
         };
         Power { spelling, ..self }
     }
+
+    /// Whether a statement has the signs a power this size needs, read off its
+    /// bytes. Only `*` is ever read as a product and only `^` as a power, so a
+    /// statement without them writes none, whatever else it says.
+    ///
+    /// A quick no, and nothing more: it says a statement could write the
+    /// power, never that it does. That is what makes it worth asking. Reading
+    /// a statement for its powers costs ten microseconds and this costs a
+    /// scan, and 71% of the 6564 `Eq` rows of Mathlib with a product are short
+    /// of the three signs `x * x * x * x` needs.
+    pub fn signs_in(self, statement: &str) -> bool {
+        match self.spelling {
+            // Written `^`, the power is one at its top.
+            Spelling::Pow => statement.contains('^'),
+            // Written `*`, it is a product at its top, and its `n` factors are
+            // `n - 1` products -- unless a `^` writes several of them at once,
+            // as `x ^ 3 * x` does.
+            Spelling::Mul => {
+                let signs = statement.bytes().filter(|b| *b == b'*').count() as u32;
+                signs > 0 && (signs + 1 >= self.exponent || statement.contains('^'))
+            }
+        }
+    }
 }
 
 /// Ten, not forty. A search is read in full by whoever asked it, and the
@@ -284,10 +307,14 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
 /// and has `HMul.hMul` for `x * x` and for `x * y` alike, and only the
 /// statement tells them apart. A query that writes no power asks for none.
 pub fn writes_powers(q: &Query, d: &Decl) -> bool {
-    q.powers.is_empty() || {
-        let has = crate::domain::pattern::powers_in(&d.ty);
-        q.powers.iter().all(|p| has.contains(p))
-    }
+    q.powers.is_empty()
+        // Asked of every row a search finds, and of the same row once a look,
+        // so the statements that cannot answer are turned away before they are
+        // read. See [`Power::signs_in`].
+        || (q.powers.iter().all(|(_, p)| p.signs_in(&d.ty)) && {
+            let has = crate::domain::pattern::powers_in(&d.ty);
+            q.powers.iter().all(|p| has.contains(p))
+        })
 }
 
 /// Whether the type mentions a constant the query names. See
@@ -525,5 +552,24 @@ mod tests {
         assert!(rank(&q, &product) < rank(&q, &square));
         q.powers = vec![(1, Power { exponent: 2, spelling: Spelling::Mul })];
         assert!(rank(&q, &square) < rank(&q, &product));
+    }
+
+    /// The quick no must never be the wrong answer, and that is checked
+    /// against the whole of Mathlib elsewhere. Here is what it turns away and
+    /// what it has to let through.
+    #[test]
+    fn a_statement_short_of_multiplication_signs_writes_no_power() {
+        let mul = |exponent| Power { exponent, spelling: Spelling::Mul };
+        let pow = |exponent| Power { exponent, spelling: Spelling::Pow };
+        assert!(!mul(2).signs_in("0 ≤ a + a"), "a sum is no product");
+        assert!(mul(2).signs_in("0 ≤ a * a"));
+        assert!(!mul(4).signs_in("a * b = b * a"), "three signs short of four factors");
+        assert!(mul(4).signs_in("a * a * a * a = b"));
+        // A `^` writes several factors at once, so the count says nothing --
+        // but a power written `*` is still a product at its top.
+        assert!(mul(4).signs_in("a ^ 3 * a = b"));
+        assert!(!mul(4).signs_in("a ^ 4 = b"));
+        assert!(!pow(2).signs_in("a * a = b"), "a product is not written `^`");
+        assert!(pow(2).signs_in("a ^ 2 = b"));
     }
 }

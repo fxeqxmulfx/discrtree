@@ -194,7 +194,7 @@ pub fn parse(pattern: &str) -> Parsed {
 }
 
 fn read(pattern: &str) -> Parsed {
-    let (lexemes, lambdas) = strip_lambdas(&lex(pattern));
+    let (lexemes, lambdas) = strip_lambdas(lex(pattern));
     let (all, receivers) = expand_postfix(lexemes);
     // One word, one reading: the `xs` of `xs.length` is a variable, and so is
     // the `xs` of `xs ++ ys` beside it.
@@ -204,15 +204,15 @@ fn read(pattern: &str) -> Parsed {
         dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().chain(receivers).collect());
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
-    let tokens = without_foralls(&tokens);
+    let tokens = without_foralls(tokens);
     let assumed = conditions_of(&hypotheses);
     let mut query = Query::new();
     let mut operator = None;
 
-    match split_on_operator(&tokens) {
+    match split_on_operator(tokens) {
         Some((lhs, op, rhs)) => {
-            let (left_head, left_rest) = side(&lhs);
-            let (right_head, right_rest) = side(&rhs);
+            let (left_head, left_rest) = side(lhs);
+            let (right_head, right_rest) = side(rhs);
             let rest = left_rest.into_iter().chain(right_rest).chain(assumed);
             if op == "∉" {
                 // `a ∉ s` is `¬ (a ∈ s)` once elaborated: a negation with one
@@ -228,16 +228,16 @@ fn read(pattern: &str) -> Parsed {
                 );
                 query.uses = rest.chain(sides).collect();
             } else {
-                let concl = notation(&op).map(|(_, head, ..)| DeclName::new(head));
+                let concl = notation(op).map(|(_, head, ..)| DeclName::new(head));
                 query.shape = Shape::new(concl, vec![left_head, right_head]);
                 query.uses = rest.collect();
             }
-            operator = Some(op);
+            operator = Some(op.to_string());
         }
-        None => match constants(&tokens).split_first() {
+        None => match constants(tokens).split_first() {
             Some((head, rest)) => {
                 let args: Vec<ArgHead> =
-                    arguments(&tokens, head).into_iter().map(|a| side(a).0).collect();
+                    arguments(tokens, head).into_iter().map(|a| side(a).0).collect();
                 // A name an argument is headed by is said by the shape, as the
                 // name a side is headed by is. See [`side`].
                 let mut rest = rest.to_vec();
@@ -256,8 +256,8 @@ fn read(pattern: &str) -> Parsed {
             // argument is which is another matter -- notation hides the
             // implicit ones -- so the head is all this claims, and a head
             // alone still matches.
-            None if head_of(&tokens).is_some() => {
-                query.shape = Shape::new(head_of(&tokens), Vec::new());
+            None if head_of(tokens).is_some() => {
+                query.shape = Shape::new(head_of(tokens), Vec::new());
                 query.uses = assumed;
             }
             None => {
@@ -277,7 +277,7 @@ fn read(pattern: &str) -> Parsed {
             }
         },
     }
-    query.powers = powers_of(&tokens);
+    query.powers = powers_of(tokens);
     // What the shape does not already say. A head of it is in every type the
     // shape matches, and a condition that repeats it is one more to blame
     // when the search comes back empty, for no row it could rule out.
@@ -302,8 +302,12 @@ fn read(pattern: &str) -> Parsed {
 ///
 /// Before the postfix notation is expanded, so that a lambda is reported as it
 /// was written: `fun i => l[i]` and not the application it expands to.
-fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
-    let depth = depths(tokens);
+fn strip_lambdas(mut tokens: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let begins = |t: &String| BINDERS.contains(&t.as_str()) || ARROWS.contains(&t.as_str());
+    if !tokens.iter().any(begins) {
+        return (tokens, Vec::new());
+    }
+    let depth = depths(&tokens);
     // Where each lambda begins. `fun` and `λ` say so outright; an arrow says
     // so too, one group back, because the binders a lambda ends with are the
     // rest of that group. Without this, `(x => f x)` reads its `=>` as `Eq`
@@ -321,7 +325,8 @@ fn strip_lambdas(tokens: &[String]) -> (Vec<String>, Vec<String>) {
     let mut i = 0;
     while i < tokens.len() {
         if !starts.contains(&i) {
-            out.push(tokens[i].clone());
+            // Taken and not copied: nothing reads a token behind `i` again.
+            out.push(std::mem::take(&mut tokens[i]));
             i += 1;
             continue;
         }
@@ -370,8 +375,14 @@ fn lex(s: &str) -> Vec<String> {
             }
             continue;
         }
-        let ahead: String = std::iter::once(c).chain(cs.clone().take(3)).collect();
-        if let Some((written, token)) = COMPOUNDS.iter().find(|(w, _)| ahead.starts_with(w)) {
+        // Read off the characters ahead, and not collected into a string of
+        // them: this runs at every symbol of every statement a power is
+        // looked for in.
+        let written_here = |w: &&(&str, &str)| {
+            let mut ahead = std::iter::once(c).chain(cs.clone());
+            w.0.chars().all(|x| ahead.next() == Some(x))
+        };
+        if let Some((written, token)) = COMPOUNDS.iter().find(written_here) {
             for _ in 1..written.chars().count() {
                 cs.next();
             }
@@ -610,20 +621,13 @@ fn of_nat() -> DeclName {
 /// The hypotheses are not thrown away. They cannot constrain the shape, but
 /// what they mention is in the type, so they become `--uses` conditions — see
 /// [`conditions_of`].
-fn split_on_arrows(tokens: &[String]) -> (Vec<Vec<String>>, Vec<String>) {
-    let mut parts: Vec<Vec<String>> = vec![Vec::new()];
-    for t in tokens {
-        if t == "→" {
-            parts.push(Vec::new());
-        } else if let Some(last) = parts.last_mut() {
-            last.push(t.clone());
-        }
-    }
+fn split_on_arrows(tokens: &[String]) -> (Vec<&[String]>, &[String]) {
+    let mut parts: Vec<&[String]> = tokens.split(|t| t == "→").collect();
     let concl = parts.pop().unwrap_or_default();
     // A pattern that is nothing but arrows, or ends in one, has no conclusion
     // to read; the parts before it are all there is, so nothing is split off.
     if concl.is_empty() {
-        return (Vec::new(), tokens.to_vec());
+        return (Vec::new(), tokens);
     }
     (parts.into_iter().filter(|p| !p.is_empty()).collect(), concl)
 }
@@ -632,7 +636,10 @@ fn split_on_arrows(tokens: &[String]) -> (Vec<Vec<String>>, Vec<String>) {
 /// [`Shape`] is read off a statement with its binders stripped: `∀ {a b : Int},
 /// |a + b| ≤ |a| + |b|`, pasted whole out of a goal, asks what `|a + b| ≤ |a| +
 /// |b|` asks. `∃` stays: an existential is what such a statement concludes.
-fn without_foralls(tokens: &[String]) -> Vec<String> {
+fn without_foralls(tokens: &[String]) -> &[String] {
+    if tokens.first().is_none_or(|t| t != "∀") {
+        return tokens;
+    }
     let depth = depths(tokens);
     let mut i = 0;
     while tokens.get(i).is_some_and(|t| t == "∀") {
@@ -641,13 +648,13 @@ fn without_foralls(tokens: &[String]) -> Vec<String> {
             None => break,
         }
     }
-    tokens[i..].to_vec()
+    &tokens[i..]
 }
 
 /// What the hypotheses can still be searched for: the head symbol of each, and
 /// the constants it mentions. Both are in the declaration's type, so both are
 /// honest `--uses` conditions — unlike the shape, which only the conclusion has.
-fn conditions_of(hypotheses: &[Vec<String>]) -> Vec<DeclName> {
+fn conditions_of(hypotheses: &[&[String]]) -> Vec<DeclName> {
     hypotheses
         .iter()
         .flat_map(|h| {
@@ -679,7 +686,7 @@ fn is_condition(n: &DeclName) -> bool {
 /// `And`, and splitting at the first relation read both as something else.
 /// Everything this looser than [`RELATION`] associates to the right or not at
 /// all, so of equals the first is the outermost.
-fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<String>)> {
+fn split_on_operator(tokens: &[String]) -> Option<(&[String], &str, &[String])> {
     let depth = depths(tokens);
     let (i, _) = tokens
         .iter()
@@ -689,7 +696,7 @@ fn split_on_operator(tokens: &[String]) -> Option<(Vec<String>, String, Vec<Stri
         .filter_map(|(i, (t, _))| notation(t).map(|(.., prec, _)| (i, prec)))
         .filter(|(_, prec)| *prec <= RELATION)
         .min_by_key(|(_, prec)| *prec)?;
-    Some((tokens[..i].to_vec(), tokens[i].clone(), tokens[i + 1..].to_vec()))
+    Some((&tokens[..i], &tokens[i], &tokens[i + 1..]))
 }
 
 fn notation(token: &str) -> Option<(&'static str, &'static str, u16, bool)> {
@@ -846,41 +853,47 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
     outermost(tokens).map(|(_, head)| DeclName::new(head))
 }
 
+/// An infix notation written among some tokens: which one it is, and the
+/// constant it stands for.
+type Written = (usize, &'static str);
+
 /// The outermost infix notation written at the top level of these tokens:
 /// where it is, and the constant it stands for.
-fn outermost(tokens: &[String]) -> Option<(usize, &'static str)> {
+fn outermost(tokens: &[String]) -> Option<Written> {
     let depth = depths(tokens);
-    let top: Vec<_> = (0..tokens.len())
-        .filter(|i| depth[*i] == 0)
-        .filter_map(|i| {
-            notation_at(tokens, &depth, i).map(|(_, head, prec, left)| (i, head, prec, left))
-        })
-        .collect();
-    let loosest = top.iter().map(|(_, _, prec, _)| *prec).min()?;
+    // The loosest precedence written, whether the first notation at it
+    // associates to the left, and the first and the last written at it.
+    let mut loosest: Option<(u16, bool, Written, Written)> = None;
+    for i in (0..tokens.len()).filter(|i| depth[*i] == 0) {
+        let Some((_, head, prec, left)) = notation_at(tokens, &depth, i) else { continue };
+        match &mut loosest {
+            Some((p, _, _, last)) if prec == *p => *last = (i, head),
+            Some((p, ..)) if prec > *p => {}
+            _ => loosest = Some((prec, left, (i, head), (i, head))),
+        }
+    }
+    let (prec, left, first, last) = loosest?;
     // A postfix operator heads the one term it follows, and not an
     // application it is written at the end of: `(Real.log x)⁻¹` is an
     // inverse, and `Real.log x⁻¹` is headed by the function applied.
-    if loosest >= MAX && terms(tokens).len() > 1 {
+    if prec >= MAX && terms(tokens).len() > 1 {
         return None;
     }
-    let mut at = top.into_iter().filter(|(_, _, prec, _)| *prec == loosest);
     // `a - b + c` is `(a - b) + c`: of operators that associate to the left,
     // the last one is applied outermost.
-    let first = at.next()?;
-    let outer = if first.3 { at.next_back().unwrap_or(first) } else { first };
-    Some((outer.0, outer.1))
+    Some(if left { last } else { first })
 }
 
 /// Where the arguments a shape reads off these tokens are written as a
 /// power, and how: the two sides of a relation, or the terms the head of a
 /// prefix pattern is applied to, numbered as the shape has them.
 fn powers_of(tokens: &[String]) -> Vec<(usize, Power)> {
-    let args: Vec<Vec<String>> = match split_on_operator(tokens) {
+    let args: Vec<&[String]> = match split_on_operator(tokens) {
         // A negated membership, whose sides are no arguments of its shape.
-        Some((_, op, _)) if op == "∉" => Vec::new(),
+        Some((_, "∉", _)) => Vec::new(),
         Some((lhs, _, rhs)) => vec![lhs, rhs],
         None => match constants(tokens).first() {
-            Some(head) => arguments(tokens, head).into_iter().map(<[String]>::to_vec).collect(),
+            Some(head) => arguments(tokens, head),
             None => Vec::new(),
         },
     };
@@ -959,10 +972,10 @@ fn ungrouped(mut tokens: &[String]) -> &[String] {
 /// pattern has `_` for it: a statement names its variables, and `s.card *
 /// s.card` is a square in one.
 pub fn powers_in(statement: &str) -> Vec<(usize, Power)> {
-    let (lexemes, _) = strip_lambdas(&lex(statement));
+    let (lexemes, _) = strip_lambdas(lex(statement));
     let (tokens, _) = expand_postfix(lexemes);
-    let (_, concl) = split_on_arrows(&without_foralls(&tokens));
-    powers_of(&without_foralls(&concl))
+    let (_, concl) = split_on_arrows(without_foralls(&tokens));
+    powers_of(without_foralls(concl))
 }
 
 /// The arguments the head of a prefix pattern is applied to, each as the

@@ -28,6 +28,34 @@ The right output: the same answers, in the time 0.57.0 took or less.
 
 Seen with dt 0.58.0, 2026-09-22.
 
+Fixed in 0.59.0. Each of the four is answered where it lies. The index keys
+the heads of the conclusion's arguments beside the conclusion itself, so
+`_ = _ * _` reads the 6564 rows with a product and not the 163 000 `Eq` rows
+they are among. A search reads the constants of a row only when the query
+names constants -- which is when ranking and `dt dup` look at them -- and
+never the dependencies of its proof, which nothing a search does reads. The
+rows of a query are kept until something writes to the index, so the turned
+look, whose SQL is the first look's because the index keys heads and neither
+side, is answered without reading them again. And a statement too short of
+multiplication signs to write the power asked for is turned away by its bytes:
+71% of those 6564 rows are short of the three `x * x * x * x` needs, and
+reading one for its powers costs ten microseconds. Reading what remains got
+twice as cheap besides, by lexing and splitting without allocating: 9.9 µs a
+statement against 20.2 µs, over all 460 682 of them.
+
+    x * x * x * x = _    0.727 -> 0.150    (0.57.0: 0.191)
+    x * x * x = _        0.597 -> 0.133    (0.57.0: 0.191)
+    _ = a * a            0.399 -> 0.141    (0.57.0: 0.285)
+    ‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ 0.217 -> 0.061    (0.57.0: 0.120)
+    a + b = b + a        0.142 -> 0.068    (0.57.0: 0.141)
+    0 ≤ a * a            0.036 -> 0.017    (0.57.0: 0.035)
+
+Best of three on the same project, seconds. The answers are unchanged: 25
+patterns at two limits print what 0.58.0 printed, and every one of the
+460 682 statements of that index reads the same powers as before. An index
+written by an earlier dt builds the new one on the first open, which takes
+about 0.7 s once and 14.7 MB, and drops the one it replaces.
+
 ## A power in a pattern ranks nothing, so `0 ≤ a * a` puts every product before the square
 
 Found 2026-09-22, dt 0.57.0, checking the 0.57.0 fix on the same project. A

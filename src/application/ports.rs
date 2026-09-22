@@ -22,6 +22,15 @@ pub trait DeclRepo {
     fn get(&self, name: &DeclName) -> Result<Option<Decl>> {
         Ok(self.named(name)?.into_iter().next())
     }
+    /// The rows a query matches.
+    ///
+    /// A store may leave their lists empty unless the query names constants,
+    /// because that is the only case anything reads: ranking asks which of the
+    /// asked-for constants a row mentions, and `dt dup` compares against the
+    /// constants of one statement, and both name them. The dependencies of a
+    /// proof are never read by a search and are most of a row's lists --
+    /// 315 430 against 148 610 constants for the `Eq` rows of Mathlib with a
+    /// product. Ask [`DeclRepo::get_many`] for a row with everything.
     fn find(&self, query: &Query) -> Result<Vec<Decl>>;
     /// How many rows match, which is not the same question as which rows do:
     /// a diagnosis asks how big the scope a search narrowed to is, and the
