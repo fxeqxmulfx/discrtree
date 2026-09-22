@@ -2,6 +2,47 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A lemma looked up by name prints its binders and not what it says
+
+Found 2026-09-22, dt 0.59.0, reading the output of the 0.59.0 fix. The line
+under a name carries the first line of the elaborated type, clipped to 100
+columns, and an elaborated type opens with every type, instance and variable
+Lean inferred. Two thirds of the 460 682 statements of Mathlib are wrapped,
+and the wrap almost always falls inside that opening, so the line stops
+before the statement begins:
+
+    $ dt find --name max!_mem
+    Std.TreeSet.max!_mem  theorem  Std.Data.TreeSet.Lemmas
+      ∀ {α : Type u} {cmp : α → α → Ordering} {t : Std.TreeSet α cmp} [Std.TransCmp cmp] [inst : Inhabited…
+
+    $ dt find --name minimum_of_length_pos_le_iff
+    List.minimum_of_length_pos_le_iff  theorem  Mathlib.Data.List.MinMax
+      ∀ {α : Type u_1} [inst : LinearOrder α] {l : List α} {b : α} (h : 0 < l.length),
+
+The first says `t.isEmpty = false → t.max! ∈ t` and the second
+`List.minimum_of_length_pos h ≤ b ↔ l.minimum ≤ ↑b`, and neither is printed.
+Across eight name lookups 26 of the 37 lines printed were binders alone. Over
+the whole index 215 140 statements of 460 681, 47%, have nothing of what they
+say within the printed line. A pattern search shows it less -- shorter
+statements rank first, and 68 of 1399 lines there are binders alone -- but a
+name lookup is exactly the search whose answer the reader has to read, and
+`--long`, which prints the type whole, is a second run of the search.
+
+Binders are not all noise: `(h : 0 < l.length)` is a hypothesis of the lemma
+and dropping it would state something the lemma does not. What may go is what
+Lean inferred and the reader did not write: the types, the instances, and the
+variables the statement itself names again.
+
+The right output: the line says what the lemma states, keeping the binders
+that state something and marking that the rest were dropped.
+
+    Std.TreeSet.max!_mem  theorem  Std.Data.TreeSet.Lemmas
+      ∀ …, t.isEmpty = false → t.max! ∈ t
+    List.minimum_of_length_pos_le_iff  theorem  Mathlib.Data.List.MinMax
+      ∀ … (h : 0 < l.length), List.minimum_of_length_pos h ≤ b ↔ l.minimum ≤ ↑b
+
+Seen with dt 0.59.0, 2026-09-22.
+
 ## A power that misses as written takes 0.7 s, reading the same rows at every look
 
 Found 2026-09-22, dt 0.58.0, timing the 0.58.0 fix on the same project. A
