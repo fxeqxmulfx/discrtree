@@ -25,9 +25,10 @@ pub struct Query {
     pub pattern_uses: Vec<DeclName>,
     /// The arguments of `shape` that the pattern writes as a power of one
     /// term, by position, and how it writes each. Not a condition either: a
-    /// shape keys on heads, and `x ^ 2` is `HPow.hPow` as `x ^ n` is. It says
-    /// which arguments may be asked again spelled the other way. See
-    /// [`Power`].
+    /// shape keys on heads, and `x ^ 2` is `HPow.hPow` as `x ^ n` is, `x * x`
+    /// `HMul.hMul` as `x * y` is. It ranks a row that writes them above one
+    /// that only shares their heads, and says which arguments may be asked
+    /// again spelled the other way. See [`Power`] and [`writes_powers`].
     pub powers: Vec<(usize, Power)>,
     /// Module prefix, e.g. `Mathlib.Analysis`.
     pub module: Option<String>,
@@ -265,12 +266,28 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     {
         score += 4;
     }
+    // Shape agreement too, one step finer than the heads the index keeps:
+    // every product agrees with `a * a` there.
+    if !q.powers.is_empty() && writes_powers(q, d) {
+        score += 4;
+    }
     score += q.uses.iter().filter(|c| mentions(d, c)).count() as u32;
     if d.has_sorry {
         score = score.saturating_sub(2);
     }
     // Descending score, then ascending type length.
     (u32::MAX - score, d.ty.len())
+}
+
+/// Whether the statement writes each power the query does, spelled the way
+/// the query spells it, on the side the query has it. The index keys on heads
+/// and has `HMul.hMul` for `x * x` and for `x * y` alike, and only the
+/// statement tells them apart. A query that writes no power asks for none.
+pub fn writes_powers(q: &Query, d: &Decl) -> bool {
+    q.powers.is_empty() || {
+        let has = crate::domain::pattern::powers_in(&d.ty);
+        q.powers.iter().all(|p| has.contains(p))
+    }
 }
 
 /// Whether the type mentions a constant the query names. See
@@ -490,5 +507,23 @@ mod tests {
         let mut q = Query::new();
         q.uses = vec![DeclName::new("Real.exp")];
         assert!(rank(&q, &good) < rank(&q, &bad));
+    }
+
+    /// `0 ≤ a * a` put `mul_self_nonneg` behind every shorter product: the
+    /// heads are the same, and the square is only in the statement.
+    #[test]
+    fn a_row_that_writes_the_power_ranks_above_a_shorter_one_that_does_not() {
+        let stating = |ty: &str| Decl { ty: ty.into(), ..decl() };
+        let square = stating("∀ {R : Type u} [inst : Semiring R] (a : R), 0 ≤ a * a");
+        let product = stating("∀ (r : ℝ), 0 ≤ r.sign * r");
+        let mut q = Query::new();
+        q.shape = Shape::new(
+            Some(DeclName::new("LE.le")),
+            vec![ArgHead::parse("OfNat.ofNat"), ArgHead::parse("HMul.hMul")],
+        );
+        // By length, as ever, where the pattern writes no power.
+        assert!(rank(&q, &product) < rank(&q, &square));
+        q.powers = vec![(1, Power { exponent: 2, spelling: Spelling::Mul })];
+        assert!(rank(&q, &square) < rank(&q, &product));
     }
 }

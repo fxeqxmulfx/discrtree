@@ -234,8 +234,12 @@ real_inner_mul_inner_self_le  theorem  Mathlib.Analysis.InnerProductSpace.Basic
 
 Factors are one term when they are written alike with no `_` in them: `x * x`
 is a square and `_ * _` is any product. A power inside a side is not asked
-about again, and a side is asked again only when the pattern found nothing,
-which one written as a product seldom does: `x * x` matches `x * y` by heads.
+about again. By heads `x * x` matches `x * y`, so the statement also decides
+what the pattern found as written: a row that writes the power ranks above one
+that only shares its heads, and rows that all only share them are a miss, asked
+again turned and respelled. They are the answer only when no second look finds
+the power: `0 ≤ a * a` puts `mul_self_nonneg` above `0 ≤ r.sign * r`, and
+`x * x * x = _` is answered by `pow_three'`, which states `a ^ 3 = a * a * a`.
 
 `⊆` and `⊂` are searched under two heads. Mathlib elaborates them to `LE.le`
 and `LT.lt` on `Set` and `Finset`, which only print as `⊆` and `⊂`, and to

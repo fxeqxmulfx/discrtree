@@ -856,9 +856,9 @@ fn an_equation_found_only_the_other_way_round_is_answered_with_it() {
     );
 }
 
-/// Lemmas that write a power, and one that writes a product of two different
-/// terms, for a reader who spells the power the other way from the lemma
-/// they want.
+/// Lemmas that write a power, and products of two different terms that share
+/// their heads, for a reader who spells the power the other way from the
+/// lemma they want, or its relation the other way round.
 fn powers() -> FakeRepo {
     let row = |name: &str, concl: &str, args: &[&str], consts: &[&str], ty: &str| {
         let mut d = shaped_as(name, "M", concl, args, consts);
@@ -908,6 +908,54 @@ fn powers() -> FakeRepo {
                 &["HMul.hMul"],
                 "∀ {a b : ℝ}, 0 ≤ a → a ≤ b → a * (a * a) ≤ b * (b * b)",
             ),
+            row(
+                "pow_three'",
+                "Eq",
+                &["_", "HPow.hPow", "HMul.hMul"],
+                &["HPow.hPow", "HMul.hMul"],
+                "∀ {M : Type u_2} [inst : Monoid M] (a : M), a ^ 3 = a * a * a",
+            ),
+            row(
+                "mul_self_nonneg",
+                "LE.le",
+                &["_", "Preorder.toLE", "OfNat.ofNat", "HMul.hMul"],
+                &["OfNat.ofNat", "HMul.hMul"],
+                "∀ {R : Type u} [inst : Semiring R] [inst_1 : LinearOrder R] [ExistsAddOfLE R] \
+                 [PosMulMono R] [AddLeftMono R] (a : R),\n  0 ≤ a * a",
+            ),
+            // Products of two different terms, sharing the heads of patterns
+            // that write a power: `mul_comm` those of `x * x * x = _`,
+            // `Real.sign_mul_nonneg` those of `0 ≤ a * a`, and
+            // `cos_angle_mul_norm_mul_norm` those of `‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ`.
+            row(
+                "mul_comm",
+                "Eq",
+                &["_", "HMul.hMul", "HMul.hMul"],
+                &["HMul.hMul"],
+                "∀ {G : Type u_1} [inst : CommMagma G] (a b : G), a * b = b * a",
+            ),
+            row(
+                "Real.sign_mul_nonneg",
+                "LE.le",
+                &["Real", "Real.instLE", "OfNat.ofNat", "HMul.hMul"],
+                &["Real.sign", "OfNat.ofNat", "HMul.hMul"],
+                "∀ (r : ℝ), 0 ≤ r.sign * r",
+            ),
+            row(
+                "InnerProductGeometry.cos_angle_mul_norm_mul_norm",
+                "Eq",
+                &["Real", "HMul.hMul", "Inner.inner"],
+                &[
+                    "Real.cos",
+                    "InnerProductGeometry.angle",
+                    "Norm.norm",
+                    "HMul.hMul",
+                    "Inner.inner",
+                ],
+                &format!(
+                    "{over}Real.cos (InnerProductGeometry.angle x y) * (‖x‖ * ‖y‖) = inner ℝ x y"
+                ),
+            ),
         ],
     }
 }
@@ -945,7 +993,9 @@ fn a_power_found_only_written_the_other_way_is_answered_with_it() {
     assert_eq!(names(&hits), ["sq_abs"]);
     assert_eq!(hits.respelled, [square(mul)]);
 
-    // An equation may need turning too, and says both.
+    // An equation may need turning too, and says both. `Real.cos (angle x y)
+    // * (‖x‖ * ‖y‖) = inner ℝ x y` has the pattern's heads as written, and is
+    // not the square it asks about.
     let hits = find("‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ").unwrap();
     assert_eq!(names(&hits), ["real_inner_self_eq_norm_sq"]);
     assert_eq!(hits.respelled, [square(mul)]);
@@ -958,18 +1008,59 @@ fn a_power_found_only_written_the_other_way_is_answered_with_it() {
     assert_eq!(hits.respelled, [Power { exponent: 3, spelling: pow }]);
 }
 
-/// The second spelling is a second look, taken when the first found nothing.
-/// Where nothing answers either way, what is diagnosed is the pattern as it
-/// was written.
+/// The report: `0 ≤ a * a` put `mul_self_nonneg` 24th of 45, behind every
+/// shorter product. The index has `HMul.hMul` for each of them, and only the
+/// statement says which writes the square.
 #[test]
-fn a_power_is_asked_again_only_when_it_answers_nothing_as_written() {
+fn a_row_that_writes_the_power_ranks_above_one_that_only_shares_its_head() {
     use discrtree::domain::pattern::parse;
     let repo = powers();
+    let hits = Find { repo: &repo, build: &NoBuild }.run(&parse("0 ≤ a * a").query).unwrap();
+    let names: Vec<_> = hits.rows.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["mul_self_nonneg", "Real.sign_mul_nonneg"]);
+    assert!(!hits.swapped && hits.respelled.is_empty());
+}
+
+/// The second looks are taken when nothing writes the powers the pattern
+/// does, whether nothing matched or only rows that share their heads, and
+/// bring only rows that write them. Where none finds any, the rows that share
+/// the heads are the answer; where nothing answers at all, what is diagnosed
+/// is the pattern as it was written.
+#[test]
+fn a_power_is_asked_again_when_nothing_writes_it_as_written() {
+    use discrtree::domain::pattern::parse;
+    use discrtree::domain::query::{Power, Spelling};
+    let repo = powers();
     let find = |pattern: &str| Find { repo: &repo, build: &NoBuild }.run(&parse(pattern).query);
+    let names = |hits: &discrtree::application::find::Hits| {
+        hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+    };
 
     let hits = find("⟪x, x⟫_ℝ = ‖x‖ ^ 2").unwrap();
-    assert_eq!(hits.rows.len(), 1);
+    assert_eq!(names(&hits), ["real_inner_self_eq_norm_sq"]);
     assert!(hits.respelled.is_empty() && !hits.swapped);
+
+    // The report: `mul_comm` and `cos_angle_mul_norm_mul_norm` have the
+    // cube's heads, and `pow_three'` states it the other way round.
+    let hits = find("x * x * x = _").unwrap();
+    assert_eq!(names(&hits), ["pow_three'"]);
+    assert!(hits.swapped && hits.respelled.is_empty());
+
+    // A second look brings what writes the power and nothing else: `0 ≤
+    // r.sign * r` has the head of `a * a` too.
+    let hits = find("0 ≤ a ^ 2").unwrap();
+    assert_eq!(names(&hits), ["mul_self_nonneg"]);
+    assert_eq!(hits.respelled, [Power { exponent: 2, spelling: Spelling::Pow }]);
+
+    // Where no look finds the power, what shares its heads is the answer, as
+    // written ...
+    let hits = find("x * x * x * x = _").unwrap();
+    assert_eq!(names(&hits), ["mul_comm", "InnerProductGeometry.cos_angle_mul_norm_mul_norm"]);
+    assert!(!hits.swapped && hits.respelled.is_empty());
+    // ... or turned, where nothing has the heads as written.
+    let hits = find("⟪x, x⟫_ℝ = ‖x‖ * ‖x‖ * ‖x‖").unwrap();
+    assert_eq!(names(&hits), ["InnerProductGeometry.cos_angle_mul_norm_mul_norm"]);
+    assert!(hits.swapped && hits.respelled.is_empty());
 
     // Products of inner products are there, and not one of them is a
     // fourth power.

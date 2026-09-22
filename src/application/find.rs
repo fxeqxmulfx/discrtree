@@ -4,7 +4,6 @@ use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
 use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
-use crate::domain::pattern;
 use crate::domain::query::{self, Power, Query};
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
@@ -259,13 +258,24 @@ fn respellings(query: &Query) -> Vec<(Query, Vec<Power>)> {
         .collect()
 }
 
-/// Whether the statement writes each power the query does, spelled the way
-/// the query spells it, on the side the query has it. The index keys on heads
-/// and has `HMul.hMul` for `x * x` and for `x * y` alike: without this, a
-/// square asked for as a product would be answered by every product.
-fn writes_powers(query: &Query, d: &Decl) -> bool {
-    let has = pattern::powers_in(&d.ty);
-    query.powers.iter().all(|p| has.contains(p))
+/// The second looks at a query, in the order they are taken: its relation
+/// turned, then its powers respelled, each also turned. Each comes with
+/// whether it is turned and the powers it trades, as the pattern wrote them.
+fn looks(query: &Query) -> Vec<(Query, bool, Vec<Power>)> {
+    let mut out: Vec<_> = turned(query).map(|t| (t, true, Vec::new())).into_iter().collect();
+    for (retry, written) in respellings(query) {
+        let turn = turned(&retry);
+        out.push((retry, false, written.clone()));
+        out.extend(turn.map(|t| (t, true, written)));
+    }
+    out
+}
+
+/// Whether the rows answer the query: whether any of them writes the powers
+/// its pattern does. Every product shares the head of `a * a`, and a pattern
+/// that writes a square is asking about the square.
+fn answers(query: &Query, rows: &[Decl]) -> bool {
+    rows.iter().any(|d| query::writes_powers(query, d))
 }
 
 /// What the words of a pattern that found nothing were read as, the second
@@ -381,26 +391,26 @@ impl Find<'_> {
                 }
             }
         }
+        // Rows that share only the heads of the powers the pattern writes are
+        // a miss to the looks below, which are taken for rows that do write
+        // them and bring no others. Where none finds any, the rows that share
+        // the heads are the answer after all -- the first look's, or else
+        // those the relation turned finds.
         let mut swapped = false;
-        if rows.is_empty()
-            && let Some(retry) = turned(&asked)
-        {
-            let found = self.repo.find(&retry)?;
-            if !found.is_empty() {
-                (rows, asked, swapped) = (found, retry, true);
-            }
-        }
         let mut respelled = Vec::new();
-        if rows.is_empty() {
-            'respelt: for (retry, written) in respellings(&asked) {
-                let turn = turned(&retry).map(|t| (t, true));
-                for (retry, turn) in std::iter::once((retry, false)).chain(turn) {
-                    let mut found = self.repo.find(&retry)?;
-                    found.retain(|d| writes_powers(&retry, d));
-                    if !found.is_empty() {
-                        (rows, asked, swapped, respelled) = (found, retry, turn, written);
-                        break 'respelt;
-                    }
+        if !answers(&asked, &rows) {
+            for (retry, turn, written) in looks(&asked) {
+                let (writing, sharing): (Vec<Decl>, Vec<Decl>) = self
+                    .repo
+                    .find(&retry)?
+                    .into_iter()
+                    .partition(|d| query::writes_powers(&retry, d));
+                if !writing.is_empty() {
+                    (rows, asked, swapped, respelled) = (writing, retry, turn, written);
+                    break;
+                }
+                if rows.is_empty() && written.is_empty() && !sharing.is_empty() {
+                    (rows, asked, swapped) = (sharing, retry, turn);
                 }
             }
         }
@@ -424,7 +434,9 @@ impl Find<'_> {
         if resolved && !stands {
             asked = query.clone();
         }
-        rows.sort_by_key(|d| query::rank(&asked, d));
+        // Cached, because a pattern that writes a power is ranked by reading
+        // each statement.
+        rows.sort_by_cached_key(|d| query::rank(&asked, d));
         let truncated = rows.len() > asked.limit;
         rows.truncate(asked.limit);
         let empty = match rows.is_empty() {

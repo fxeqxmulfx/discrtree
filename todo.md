@@ -48,6 +48,20 @@ rows kept as the answer when they do not.
 
 Seen with dt 0.57.0, 2026-09-22.
 
+Fixed in 0.58.0. A row whose printed statement writes the pattern's powers,
+spelled as the pattern spells them and on its side, ranks above one that only
+shares their heads: `0 ≤ a * a` puts `mul_self_nonneg` first, and `0 ≤ a ^ 2`
+the seven that state `0 ≤ a ^ 2` before `0 ≤ 0 ^ x`, `sq_nonneg` fourth. Rows
+that all only share the heads are a miss to the second looks, the relation
+turned and then each respelling and its turn, and the first look to find a row
+that writes the power answers with those rows alone: `x * x * x = _` answers
+`pow_three'` and `pow_three` turned, `‖x‖ * ‖x‖ = ⟪x, x⟫_ℝ`
+`real_inner_self_eq_norm_mul_norm` turned. Where no look finds it, the rows
+that share the heads stay the answer -- the first look's, or the turned look's
+when the first finds none. A pattern that misses as written now takes every
+look, at a query each: `x * x * x * x = _` goes from 0.2 s to 0.7 s on
+Mathlib.
+
 ## A square written `x ^ 2` misses the lemma Mathlib states with `x * x`
 
 Found 2026-09-22, dt 0.56.0, looking for Cauchy-Schwarz against a unit vector,
