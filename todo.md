@@ -2,6 +2,42 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A pattern does not see through an `abbrev`, so the instance Lean finds is not found
+
+Found 2026-09-23, dt 0.60.0, looking for the measurable-space instance on
+`EuclideanSpace ℝ (Fin d)` after `MeasurableSpace (EucSpace d)` failed to
+synthesize in a file that did not import it. The type is two abbreviations
+deep -- `abbrev EuclideanSpace 𝕜 n := PiLp 2 fun _ => 𝕜` and
+`abbrev PiLp p α := WithLp p (∀ i, α i)` -- and a pattern written at either
+level misses:
+
+    $ dt find 'MeasurableSpace (EuclideanSpace _ _)'
+    no match: nothing has that shape; those arguments go together under `Eq` (16), `ContMDiff` (6), `IsManifold` (5)
+    $ dt find 'MeasurableSpace (PiLp _ _)'
+    no match: nothing has that shape; those arguments go together under `Eq` (13), `LinearIsometryEquiv` (7), `LinearIndependent` (3)
+    $ dt find --elaborated 'MeasurableSpace (EuclideanSpace ℝ (Fin 3))'
+    no match: nothing has that shape; those arguments go together under `Eq` (16), `ContMDiff` (6), `IsManifold` (5)
+
+while the level the instance is stated at finds it:
+
+    $ dt find 'MeasurableSpace (WithLp _ _)'
+    WithLp.measurableSpace  instance  Mathlib.Analysis.Normed.Lp.MeasurableSpace
+      (p : ENNReal) → (X : Type u_1) → [MeasurableSpace X] → MeasurableSpace (WithLp p X)
+
+Lean's own discrimination tree reduces keys with reducible transparency, which
+is why instance synthesis finds `WithLp.measurableSpace` for
+`EuclideanSpace ℝ (Fin 3)` once the module is imported. A user who writes the
+type as the statement they are working on writes it (`EuclideanSpace`, or a
+local `abbrev` of it) gets "nothing has that shape", which reads as "Mathlib
+has no such instance" -- the wrong conclusion, and the one that sends the user
+to grep. The message is also wrong on its own terms: the shape exists, one
+reducible unfolding away.
+
+The right output: the three queries above return `WithLp.measurableSpace`,
+by reducing the pattern's subterms through reducible definitions the way
+`DiscrTree.reduceDT` does before matching (and indexing the rows the same way,
+if they are not already).
+
 ## A lemma looked up by name prints its binders and not what it says
 
 Found 2026-09-22, dt 0.59.0, reading the output of the 0.59.0 fix. The line
