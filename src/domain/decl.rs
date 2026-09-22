@@ -369,6 +369,114 @@ fn binds(mut rest: &str) -> bool {
     }
 }
 
+/// What a type states, on one line, without the binders Lean inferred.
+///
+/// An elaborated type opens with every type, instance and implicit argument
+/// the elaborator filled in, and Lean wraps what it prints. The wrap almost
+/// always falls inside that opening, so the first line of a statement is its
+/// binders and nothing else: of the 460 681 statements of Mathlib, 47% say
+/// nothing of themselves within the first 100 columns, and 70% of the lines
+/// eight lookups by name printed were binders alone.
+///
+/// `∀ {α : Type u} {t : Std.TreeSet α} [inst : Inhabited α], t.isEmpty = false → t.max! ∈ t`
+/// comes back as `∀ …, t.isEmpty = false → t.max! ∈ t`.
+///
+/// The explicit binders stay. They are the ones a reader writes at the call
+/// site, and every hypothesis is among them, so `(h : 0 < l.length)` is kept
+/// where `{l : List α}` goes -- dropping it would state something the lemma
+/// does not. That leaves 2.8% of statements still opening past 100 columns,
+/// which are the ones with a long explicit binder block and no shorter honest
+/// form.
+///
+/// One line, because Lean's wrapping is Lean's: a caller that clips would
+/// otherwise clip at the wrap rather than at its own width.
+pub fn says(ty: &str) -> std::borrow::Cow<'_, str> {
+    match ty.strip_prefix('∀').and_then(binder_block) {
+        Some((kept, true, stated)) => unwrapped(format!("∀ …{kept}, {stated}").into()),
+        _ => unwrapped(ty.into()),
+    }
+}
+
+/// The text on one line, single-spaced. Lean wraps at its own width, indents
+/// what it wrapped, and pads to line things up, and none of the three is this
+/// caller's.
+fn unwrapped(s: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'_, str> {
+    match s.contains('\n') || s.contains("  ") {
+        true => s.split_whitespace().collect::<Vec<_>>().join(" ").into(),
+        false => s,
+    }
+}
+
+/// The binders a `∀` opens with: the explicit ones as written, whether any
+/// other kind was passed over, and what the type states after them. `None`
+/// where the binders do not close -- a type this does not understand is
+/// printed whole rather than guessed at.
+fn binder_block(after: &str) -> Option<(String, bool, &str)> {
+    let (mut kept, mut dropped) = (String::new(), false);
+    let mut rest = after;
+    loop {
+        rest = rest.trim_start();
+        let open = rest.chars().next()?;
+        if open == ',' {
+            return Some((kept, dropped, rest[1..].trim_start()));
+        }
+        match closing(open) {
+            // `(a b : α)` is the reader's argument, `{α : Type}` and
+            // `[Monoid α]` and `⦃x : α⦄` are the elaborator's.
+            Some(close) => {
+                let end = balanced(rest, open, close)?;
+                match open {
+                    '(' => {
+                        kept.push(' ');
+                        kept.push_str(&rest[..end]);
+                    }
+                    _ => dropped = true,
+                }
+                rest = &rest[end..];
+            }
+            // A binder printed bare, as `∀ x y, p x y`: it names a variable
+            // the statement goes on to use, and costs a word to keep.
+            None => {
+                let end = rest.find(|c: char| c.is_whitespace() || ",()[]{}".contains(c))?;
+                if end == 0 {
+                    return None;
+                }
+                kept.push(' ');
+                kept.push_str(&rest[..end]);
+                rest = &rest[end..];
+            }
+        }
+    }
+}
+
+/// The bracket that closes a binder's, if the character opens one.
+fn closing(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '⦃' => Some('⦄'),
+        _ => None,
+    }
+}
+
+/// Where the group opening `s` ends, one past its closing bracket. Every
+/// bracket counts, so `(f : C(α, β))` closes at its own.
+fn balanced(s: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0u32;
+    for (at, c) in s.char_indices() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(at + c.len_utf8());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +601,44 @@ mod tests {
         ] {
             assert!(!prints_bare(ty, word), "{ty}");
         }
+    }
+
+    /// What the elaborator filled in goes; what the reader writes at the call
+    /// site stays, and a hypothesis is always among that.
+    #[test]
+    fn a_statement_says_itself_without_the_binders_lean_inferred() {
+        let wrapped = "∀ {α : Type u} {cmp : α → α → Ordering} [Std.TransCmp cmp] [inst : Inhabited α],\n  t.isEmpty = false → t.max! ∈ t";
+        assert_eq!(says(wrapped), "∀ …, t.isEmpty = false → t.max! ∈ t");
+        assert_eq!(
+            says("∀ {l : List α} {b : α} (h : 0 < l.length),\n  List.minimum_of_length_pos h ≤ b"),
+            "∀ … (h : 0 < l.length), List.minimum_of_length_pos h ≤ b",
+            "an explicit binder can be a hypothesis, and dropping it would state another lemma"
+        );
+    }
+
+    /// Nothing to leave out is left in, and a type this does not understand is
+    /// printed rather than guessed at.
+    #[test]
+    fn a_statement_with_nothing_inferred_is_left_as_it_is() {
+        for ty in ["⊤ * ⊥ = ⊥", "∀ (n : Nat), n * 0 = 0", "∀ x y, p x y"] {
+            assert_eq!(says(ty), ty);
+        }
+        // Brackets that never close: no binder block, so no elision.
+        assert_eq!(says("∀ {α : Type, x = x"), "∀ {α : Type, x = x");
+        // A binder group holds brackets and commas of its own.
+        assert_eq!(
+            says("∀ {s : Finset ι} (f : C(α, β)) (h : ∑ i ∈ s, g i = 0), p f"),
+            "∀ … (f : C(α, β)) (h : ∑ i ∈ s, g i = 0), p f"
+        );
+    }
+
+    /// Lean wraps at its own width and indents what it wrapped. A line under a
+    /// name is the caller's, so the wrap goes even where no binder does.
+    #[test]
+    fn a_wrapped_statement_comes_back_on_one_line() {
+        assert_eq!(
+            says("(μ : Measure G) :\n  mulConv μ f = g"),
+            "(μ : Measure G) : mulConv μ f = g"
+        );
     }
 }

@@ -7,7 +7,7 @@ with what it rests on and the `import` line that actually provides it.
 ```
 $ dt find 'Real.exp _ ≤ Real.exp _'
 Real.exp_le_exp_of_le  theorem  Mathlib.Analysis.Complex.Exponential
-  ∀ {x y : ℝ}, x ≤ y → Real.exp x ≤ Real.exp y
+  ∀ …, x ≤ y → Real.exp x ≤ Real.exp y
 1 result(s)
 
 $ dt show Real.exp_le_exp_of_le --import-only
@@ -111,6 +111,12 @@ that carries it. The output is shaped accordingly.
 * **Ten results, not forty.** The eleventh hit for a query worth asking is
   rarely the wanted one. When the limit hides something the footer says
   `10 shown, more match` rather than letting a truncated answer look complete.
+* **The binders Lean inferred are one character.** A statement is stored
+  elaborated, and an elaborated type opens with every type, instance and
+  implicit argument the elaborator filled in. That opening runs past the
+  printed line for 47% of Mathlib, so the line said nothing of the lemma. What
+  a reader writes at the call site stays -- every hypothesis is among it -- and
+  the rest is `…`.
 * **The docstring waits for `--long`.** It was a quarter of `dt find` and
   almost never the reason a search succeeded.
 
@@ -208,7 +214,7 @@ are marked as turned:
 $ dt find "Prod.fst ⁻¹' _ = _ ×ˢ Set.univ"
 dt: nothing states it that way round; these state it with the two sides swapped
 Set.prod_univ  theorem  Mathlib.Data.Set.Prod
-  ∀ {α : Type u_1} {β : Type u_2} {s : Set α}, s ×ˢ Set.univ = Prod.fst ⁻¹' s
+  ∀ …, s ×ˢ Set.univ = Prod.fst ⁻¹' s
 ```
 
 An order is not turned: `b ≤ a` is no answer to `a ≤ b`, and there the miss

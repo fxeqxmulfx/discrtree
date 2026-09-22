@@ -11,7 +11,7 @@ use crate::application::ports::Missing;
 use crate::application::rdeps::Users;
 use crate::application::show::{Shown, Source};
 use crate::application::status::{Behind, Declaration, Report, SourceStatus, Stale, Why};
-use crate::domain::decl::{ArgHead, Decl};
+use crate::domain::decl::{ArgHead, Decl, says};
 use crate::domain::lean_core;
 use crate::domain::lean_text;
 use crate::domain::name::ModuleName;
@@ -293,7 +293,8 @@ pub fn find(hits: &Hits, long: bool) -> String {
             d.kind,
             d.module
         ));
-        let ty = if long { d.ty.as_str().into() } else { first_line(&d.ty, 100) };
+        let stated = says(&d.ty);
+        let ty = if long { d.ty.as_str().into() } else { first_line(&stated, 100) };
         if !ty.is_empty() {
             out.push_str(&format!("  {ty}\n"));
         }
@@ -847,7 +848,7 @@ pub fn dup(dups: &[Duplicate]) -> String {
     }
     let mut out = String::new();
     for d in dups {
-        out.push_str(&format!("{}\n  {}\n", d.local.name, first_line(&d.local.ty, 100)));
+        out.push_str(&format!("{}\n  {}\n", d.local.name, first_line(&says(&d.local.ty), 100)));
         for c in &d.candidates {
             out.push_str(&format!(
                 "  {:>3}%  {}{}\n         {}\n",

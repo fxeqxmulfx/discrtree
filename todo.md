@@ -43,6 +43,32 @@ that state something and marking that the rest were dropped.
 
 Seen with dt 0.59.0, 2026-09-22.
 
+Fixed in 0.60.0. A statement is printed on one line, with the binders the
+elaborator filled in written `…`. Explicit binders stay, because they are what
+a reader writes at the call site and every hypothesis is among them; `{...}`,
+`[...]` and `⦃...⦄` go. Statements that open past the printed line fall from
+215 273 of 460 681 to 13 026, 47% to 2.8%, and 271 895 statements, 59%, now fit
+whole in 100 columns. What remains blind is a long block of explicit binders,
+which has no shorter honest form:
+
+    dt 0.59.0  ∀ {α : Type u} {cmp : α → α → Ordering} {t : Std.TreeSet α cmp} [Std.TransCmp cmp] [inst : Inhabited…
+    dt 0.60.0  ∀ …, t.isEmpty = false → t.max! ∈ t
+
+The wrap goes with them, and that is the half of the fix the entry missed.
+Lean wraps at its own width, and the first line it wrote is shorter than the
+line `dt` prints: 165 270 statements stopped at the wrap with room left over,
+and 82 758 of those are not `∀` types at all, so no rule about binders would
+have reached them. A `[text]` row used to stop at its colon and now says what
+it states.
+
+Checked on all 460 681 statements against a parser written separately for the
+check: every line agrees, 292 106 of them said shorter. Over eight lookups by
+name 40 of the 56 statement lines were binders alone and none now is. The
+answers to 25 patterns at limits 10 and 60 differ from 0.59.0 in their
+statement lines and nowhere else -- not one name, module, order or footer moved
+-- and searching costs what it did, 0.14 s for `x * x * x * x = _` against
+0.150. Saying a statement costs 0.85 µs, and only the rows printed pay it.
+
 ## A power that misses as written takes 0.7 s, reading the same rows at every look
 
 Found 2026-09-22, dt 0.58.0, timing the 0.58.0 fix on the same project. A
