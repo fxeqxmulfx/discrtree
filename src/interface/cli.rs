@@ -324,7 +324,9 @@ pub struct FindArgs {
     /// A pattern, e.g. 'Real.exp _ ≤ _'.
     pub pattern: Option<String>,
 
-    /// Substring of the declaration name, case-insensitive.
+    /// Substring of the declaration name, case-insensitive. A `*` in it is
+    /// anything, and `.*` is the same: 'mem_*_finite' has `mem_` in it and
+    /// `_finite` after. Quote it, for the shell.
     #[arg(long, value_name = "SUBSTRING")]
     pub name: Option<String>,
 

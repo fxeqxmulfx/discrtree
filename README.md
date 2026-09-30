@@ -95,6 +95,37 @@ dependency becomes one `import` line and its entire subtree disappears. That is
 not a depth cap — it is the reason the answer for a Mathlib lemma is one line
 rather than 5000 declarations.
 
+## A name written from memory has a `*` in it
+
+`--name` is what is written when the shape is not known, and it is written from
+memory: two words of a name, in the order Mathlib puts them. A `*` stands for
+whatever lies between the text on either side, and `.*` is the same `*`,
+because that is how a regular expression writes it:
+
+```
+$ dt find --name 'convexHull.*finite' --in Mathlib
+convexHull_eq_union_convexHull_finite_subsets  theorem  Mathlib.Analysis.Convex.Combination
+  ∀ … (s : Set E), (convexHull R) s = ⋃ t, ⋃ (_ : ↑t ⊆ s), (convexHull R) ↑t
+1 result(s)
+```
+
+It is a glob and not a regular expression, and nothing else is special. The
+pieces are found in order, without overlapping, anywhere in the name and
+whatever the case. `.` is the dot of a namespace, `?` is the one in
+`List.head?`, and `_` is a `_`: it was a wildcard until 0.62.0, the filter
+being a SQL `LIKE`, and `--name exp_le` put `instToExprLevel` first. Ranking is
+what a name given whole gets. The row the pieces and what lies between them make
+up entirely comes first, then one whose last component they make up, then one
+that begins with them. The name is quoted, since a shell reads a `*` too.
+
+A miss says which piece no name has, so what is left to repair is a piece and
+not a guess at the whole:
+
+```
+$ dt find --name 'mem_coneHull.*finite' --in Mathlib
+no match: `mem_coneHull` in --name matches nothing on its own
+```
+
 ## Output is priced per read
 
 `dt` is read by an agent at least as often as by a person, and an agent pays

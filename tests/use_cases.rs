@@ -15,6 +15,7 @@ use discrtree::domain::decl::Span;
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::SourceId;
+use discrtree::interface::render;
 use std::path::PathBuf;
 use support::{FakeBuild, FakeFiles, FakeRepo, FakeRevisions, FakeWriter, sources, theorem};
 
@@ -453,6 +454,22 @@ fn find_refuses_a_query_that_constrains_nothing() {
     let repo = repo();
     let err = Find { repo: &repo, build: &NoBuild }.run(&Query::new()).unwrap_err().to_string();
     assert!(err.contains("nothing to search for"), "got: {err}");
+}
+
+/// `--name '*'` is every name, so a search that asks nothing else asks
+/// nothing, and beside another condition it is that condition.
+#[test]
+fn a_name_of_nothing_but_a_star_constrains_nothing() {
+    let repo = repo();
+    let mut q = Query::new();
+    q.name = Some("*".into());
+    let err = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap_err().to_string();
+    assert!(err.contains("nothing to search for"), "got: {err}");
+
+    q.kind = vec![discrtree::domain::decl::DeclKind::Def];
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap();
+    let names: Vec<&str> = found.rows.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["Real.exp"]);
 }
 
 #[test]
@@ -1299,6 +1316,79 @@ fn a_module_prefix_from_lean_core_names_core_and_not_a_bad_prefix() {
     }
 }
 
+/// `--name mem_coneHull.*finite` said it "matches nothing on its own", and a
+/// reader could not tell whether `mem_coneHull` was the misspelling, `finite`
+/// was, or it was their order. The piece no name has is the one to correct;
+/// and where each is in some name, it is the pieces together that are not.
+#[test]
+fn a_name_with_a_star_that_finds_nothing_blames_the_piece_no_name_has() {
+    let repo = FakeRepo {
+        decls: vec![
+            theorem("Set.mem_of_finite", "mathlib", "M", "Eq", &[]),
+            theorem("Set.Finite.subset", "mathlib", "M", "Eq", &[]),
+        ],
+    };
+    let find = Find { repo: &repo, build: &NoBuild };
+    let mut q = Query::new();
+    q.name = Some("mem_coneHull.*finite".into());
+    q.module = Some("M".into());
+    let found = find.run(&q).unwrap();
+    assert_eq!(found.empty, Some(Empty::Barren(vec!["`mem_coneHull` in --name".to_string()])));
+    assert_eq!(
+        render::find(&found, false),
+        "no match: `mem_coneHull` in --name matches nothing on its own\n"
+    );
+
+    // Both are there, and `finite` comes before `mem_of` in nothing. Inside
+    // the scope that holds them, that is what is said; outside it, the
+    // pieces are the conditions and it is their combination that is empty.
+    q.name = Some("finite.*mem_of".into());
+    let found = find.run(&q).unwrap();
+    assert_eq!(
+        found.empty,
+        Some(Empty::InScope {
+            module: Some("M".into()),
+            source: None,
+            held: 2,
+            failing: Vec::new(),
+            elsewhere: Vec::new(),
+        })
+    );
+    q.module = None;
+    let found = find.run(&q).unwrap();
+    assert_eq!(found.empty, Some(Empty::Combination));
+    q.module = Some("M".into());
+
+    // And where the pieces do come in that order, they find it.
+    q.name = Some("mem.*finite".into());
+    let found = find.run(&q).unwrap();
+    let names: Vec<&str> = found.rows.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["Set.mem_of_finite"]);
+}
+
+/// What comes before the first `*` is the name so far, and a qualified one
+/// from a corpus nobody indexed is worth saying so about as it is whole; after
+/// a `*`, or as a fragment, nothing is a namespace.
+#[test]
+fn a_qualified_name_with_a_star_from_an_unindexed_corpus_says_so() {
+    let (repo, build) = (repo(), FakeBuild::with(&[]).without_core());
+    let find = Find { repo: &repo, build: &build };
+    let mut q = Query::new();
+    q.name = Some("Int.emod*of_dvd".into());
+    match find.run(&q).unwrap().empty {
+        Some(Empty::NotIndexed { asked: Asked::Name(n), missing: Missing::Core(_) }) => {
+            assert_eq!(n.as_str(), "Int.emod", "the name so far, not the pattern");
+        }
+        other => panic!("expected core to be named, got {other:?}"),
+    }
+    q.name = Some("Int.emod.*of_dvd".into());
+    assert!(matches!(find.run(&q).unwrap().empty, Some(Empty::NotIndexed { .. })));
+
+    // A star first: no namespace begins there.
+    q.name = Some("*Int.emod_of_dvd".into());
+    assert_eq!(find.run(&q).unwrap().empty, Some(Empty::Plain));
+}
+
 /// The note has to reach every command that can be handed a qualified name,
 /// not only the one it was written in. `dt show` sends the reader to
 /// `dt find --name`, and a bare `no match` there argues them straight back out
@@ -1425,7 +1515,11 @@ fn the_help_says_the_things_that_matter() {
         .to_string();
     // The pattern language exists nowhere else: without an example in the help
     // it can only be discovered by guessing, one failed invocation at a time.
-    for expected in ["Real.exp _ ≤ _", "--elaborated", "`dt status` lists them"] {
+    // So is the `*` of `--name`, which a name typed from memory has to have
+    // and a regular expression spells `.*`.
+    for expected in
+        ["Real.exp _ ≤ _", "--elaborated", "`dt status` lists them", "'mem_*_finite'", "`.*`"]
+    {
         assert!(find.contains(expected), "`dt find --help` must mention {expected}:\n{find}");
     }
 }
@@ -1577,6 +1671,11 @@ fn a_named_declaration_of_another_shape_is_shown_with_its_shape() {
 
     // A fragment of a name is a search, not a declaration to point at.
     q.name = Some("sublist_cons".into());
+    let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
+    assert!(!matches!(found, Some(Empty::NamedElsewise { .. })), "got {found:?}");
+
+    // And a name with a `*` in it is a fragment however much of it is there.
+    q.name = Some("sublist_*_iff".into());
     let found = Find { repo: &repo, build: &NoBuild }.run(&q).unwrap().empty;
     assert!(!matches!(found, Some(Empty::NamedElsewise { .. })), "got {found:?}");
 }

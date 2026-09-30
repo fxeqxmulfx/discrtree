@@ -17,7 +17,7 @@ use discrtree::domain::source::{SourceKind, SourceMeta, Sources};
 use discrtree::infrastructure::revision;
 use discrtree::infrastructure::sqlite::SqliteIndex;
 use discrtree::interface::render;
-use support::{FakeRevisions, TempDir, theorem};
+use support::{FakeRepo, FakeRevisions, TempDir, theorem};
 
 fn loaded() -> SqliteIndex {
     let mut db = SqliteIndex::in_memory().unwrap();
@@ -624,6 +624,11 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
     let found = status::declared_matching(&stale, &asked);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].name, DeclName::new("T.depth_or"));
+    // The rule is the search's, so a `*` reaches a name the index lacks too.
+    let starred = Query { name: Some("t.*depth*or".into()), ..Query::new() };
+    assert_eq!(status::declared_matching(&stale, &starred).len(), 1);
+    let starred = Query { name: Some("depth_*x".into()), ..Query::new() };
+    assert!(status::declared_matching(&stale, &starred).is_empty());
     assert_eq!(found[0].statement.as_deref(), Some("namespace T"), "line 1 of the file");
     let shaped = Query {
         shape: Shape { concl: Some(DeclName::new("LE.le")), args: Vec::new() },
@@ -1005,6 +1010,142 @@ fn the_row_called_exactly_what_was_asked_for_is_inside_the_window() {
     assert!(
         got.iter().any(|d| d.name.as_str() == "Real.sin_sq"),
         "the exact row is missing from the window entirely"
+    );
+}
+
+/// The window is cut in SQL and ranked in the domain, so the rows the ranking
+/// would put first have to survive the cut for a name written with a `*` as
+/// they do for one without. Each step of the ranking is a term of the `ORDER
+/// BY`, and a row's term is all that keeps it inside the window: three hundred
+/// rows that match the filter and are shorter fill it otherwise, because
+/// length is what the rest are ordered by.
+#[test]
+fn the_rows_the_pieces_make_up_are_inside_the_window() {
+    // `sin.*sq` has two pieces, and these are its three steps in order: a name
+    // they make up, a name whose last component they make up, and a name that
+    // only begins with them.
+    let whole = "sin_and_a_long_way_on_to_sq";
+    let last = "Real.Trig.sin_sq";
+    let begun = "sin_and_a_long_way_on_to_sq_le";
+    let window = |fillers: fn(usize) -> String, wanted: &[&str]| {
+        let mut db = SqliteIndex::in_memory().unwrap();
+        let mut rows: Vec<_> = (0..300)
+            .map(|i| theorem(&fillers(i), "mathlib", "Mathlib.Analysis.Trig", "LE.le", &[]))
+            .collect();
+        rows.extend(
+            wanted.iter().map(|n| theorem(n, "mathlib", "Mathlib.Analysis.Trig", "Eq", &[])),
+        );
+        index::load(&mut db, &rows).unwrap();
+        db.finish().unwrap();
+        let mut q = Query::new();
+        q.name = Some("sin.*sq".into());
+        let got = db.find(&q).unwrap();
+        for n in wanted {
+            assert!(
+                got.iter().any(|d| d.name.as_str() == *n),
+                "{n} is missing from the window entirely, among {} rows",
+                got.len()
+            );
+        }
+    };
+    // Fillers with the pieces in them and nothing more: the last two steps are
+    // what lift `last` and `begun` over them.
+    window(|i| format!("a.sinsq_{i}"), &[last, begun]);
+    // Fillers that begin with the pieces, as `begun` does: the first two steps
+    // are what lift `whole` and `last` over them.
+    window(|i| format!("sinsq_{i}"), &[whole, last]);
+}
+
+/// The rule for `--name` is written once, in the domain, and the SQL has to
+/// be that rule: what it offers is what `matches` accepts, for a `*` in any
+/// place and for the `_` that is in most names -- a wildcard to `LIKE`, and
+/// the reason `a_b` used to find `aXb`.
+#[test]
+fn a_name_with_stars_is_answered_as_the_domain_answers_it() {
+    let names = [
+        "Set.mem_coneHull_iff_finite",
+        "mem_coneHull_finite",
+        "Set.finite_mem_coneHull",
+        "Real.sin_sq",
+        "Real.sinXsq",
+        "Real.sin_sq_le_one",
+        "List.head?",
+        "List.heads",
+        "Matrix.«term_*ᵥ_»",
+        "Std.«term*...*»",
+        "A.b_c",
+        "A.bXc",
+        "A.b%c",
+        "A.bYYc",
+        "A.b\\c",
+    ];
+    let rows: Vec<_> = names
+        .iter()
+        .map(|n| theorem(n, "mathlib", "Mathlib.Analysis.Convex.Cone", "Eq", &[]))
+        .collect();
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let fake = FakeRepo { decls: rows };
+
+    let asked = [
+        "mem_coneHull.*finite",
+        "mem_coneHull*finite",
+        "MEM_CONEHULL.*FINITE",
+        "*finite",
+        "finite*",
+        "*coneHull*",
+        "s*e*t",
+        "sin_sq",
+        "sin*sq",
+        "sin_*",
+        "Real.*sq",
+        "Real.sin",
+        "head?",
+        "h*d?",
+        "b_c",
+        "b%c",
+        "b\\c",
+        "b*c",
+        "term_*_",
+        "term*",
+        "*«term_*ᵥ_»",
+        "zzz",
+        "zzz*finite",
+        "mem*mem",
+        ".",
+        "A.",
+        "*",
+    ];
+    for name in asked {
+        let q = Query { name: Some(name.into()), limit: 100, ..Query::new() };
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        let named = |v: Vec<Decl>| sorted(v.iter().map(|d| d.name.to_string()).collect());
+        let by_domain = named(fake.find(&q).unwrap());
+        assert_eq!(named(db.find(&q).unwrap()), by_domain, "--name {name}");
+        assert_eq!(
+            DeclRepo::count(&db, &q).unwrap(),
+            by_domain.len(),
+            "the count of --name {name}"
+        );
+    }
+
+    // And the ones that show the two are not the `LIKE` they are written in.
+    let found = |name: &str| -> Vec<String> {
+        let q = Query { name: Some(name.into()), limit: 100, ..Query::new() };
+        let mut v: Vec<String> = db.find(&q).unwrap().iter().map(|d| d.name.to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(found("b_c"), ["A.b_c"], "`_` is itself");
+    assert_eq!(found("b%c"), ["A.b%c"], "and so is `%`");
+    assert_eq!(found("b*c"), ["A.b%c", "A.bXc", "A.bYYc", "A.b\\c", "A.b_c"]);
+    assert_eq!(
+        found("mem_coneHull.*finite"),
+        ["Set.mem_coneHull_iff_finite", "mem_coneHull_finite"]
     );
 }
 

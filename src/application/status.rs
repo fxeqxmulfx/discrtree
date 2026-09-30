@@ -270,7 +270,8 @@ fn behind(
 /// shape or a `--uses` condition has nothing to match. A query carrying one is
 /// not answered from here rather than answered loosely.
 pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Declaration> {
-    if !q.shape.is_empty() || !q.uses.is_empty() || (q.name.is_none() && q.text.is_empty()) {
+    let asked = q.name_asked();
+    if !q.shape.is_empty() || !q.uses.is_empty() || (asked.is_none() && q.text.is_empty()) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -283,10 +284,7 @@ pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Decla
                 continue;
             }
             for (name, at) in &b.decls {
-                let named = q
-                    .name
-                    .as_ref()
-                    .is_none_or(|n| name.as_str().to_lowercase().contains(&n.to_lowercase()));
+                let named = asked.as_ref().is_none_or(|n| n.is_in(name.as_str()));
                 let statement = at.statement.clone().unwrap_or_default();
                 let spelled = q.text.iter().all(|t| {
                     statement.to_lowercase().contains(&t.to_lowercase())

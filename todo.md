@@ -22,6 +22,56 @@ side, anywhere in it, and `.*` is the same `*`, which is what a reader who
 thinks in regular expressions writes. A name written so that finds nothing says
 which piece no name has.
 
+Fixed in 0.62.0. A name is cut at its stars into pieces, and a row has it when
+it has the pieces in order, without overlap, wherever they fall and whatever the
+case. A dot in front of a star goes with it, so `.*` is `*`. A star at either
+end asks no more than the text beside it, and a name of nothing but stars asks
+nothing, as an empty one does: `dt find --name '*'` says there is nothing to
+search for. Nothing else is special. The command above says
+
+    no match: `mem_coneHull` in --name matches nothing on its own
+
+and `--name 'convexHull.*finite'` finds
+`convexHull_eq_union_convexHull_finite_subsets`. The pieces of a name are
+conditions of their own to the answer that says which condition matches nothing,
+and a qualified name with a star in it from a corpus that was never dumped is
+still told so, by what comes before its first star. Ranking is what a name
+given whole gets: the row the pieces and what lies between them make up
+entirely first (`sum_finsum_comm` for `sum_*_comm`), then one whose last
+component they make up, then one that begins with them. A name without a star
+ranks as it did.
+
+Checking the filter against that rule found it wrong for the name every lemma
+has. It was a SQL `LIKE`, whose `_` and `%` are wildcards, so `--name exp_le`
+was `exp`, any character, `le`: it put four `Mathlib.instToExprLevel*` first,
+and `--name _iff_` returned `Differential`, `Diffeology` and
+`differentiableAt_abs`, which have `iff` inside a word. It is a `GLOB` now, with
+the `?`, `*` and `[` that mean something to it written as themselves, and `_`,
+`%` and `\` are what they look like. Of 18 `--name` queries over the index of
+Mathlib, Batteries, core and a project, four answer another way -- `exp_le`,
+`sum_comm --in Mathlib.Algebra`, `_iff_` and `term_`, where `Nat.termφ` was a
+`term_` -- by losing the rows that matched through a `_` and taking in the ones
+the limit had hidden behind them. The other fourteen print the same bytes.
+
+A `*` cannot be asked for as itself. 42 of the 495 264 names in that index have
+one, and every one is the name Lean gave a notation, `Matrix.«term_*ᵥ_»`. It is
+found, with what else fits: `--name 'Matrix.«term_*ᵥ_»'` prints it and
+`Matrix.«term_⊕ᵥ_»`.
+
+Searching costs what it did. `--name Finset.sum_comm` takes 0.160 s of CPU
+against 0.160, and `--name a`, which 423 319 of the 495 264 names have, 0.457
+against 0.456: medians of 25 and 41 runs alternating with a 0.61.0 build.
+
+Not done: pieces that are each in some name and never in this order are still
+answered as a combination,
+
+    $ dt find --name 'ᵥ*term_'
+    no match: every condition matches on its own; drop one
+
+which does not say that the order is the thing to change. Telling that from a
+condition that really is one too many takes a search for the pieces in any
+order, and it is not made.
+
 ## A pattern does not see through an `abbrev`, so the instance Lean finds is not found
 
 Found 2026-09-23, dt 0.60.0, looking for the measurable-space instance on

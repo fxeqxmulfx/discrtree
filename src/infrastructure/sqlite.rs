@@ -909,9 +909,9 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
-    if let Some(n) = &q.name {
-        where_clauses.push("lower(d.name) LIKE ?".into());
-        binds.push(format!("%{}%", n.to_lowercase()));
+    if let Some(n) = q.name_asked() {
+        where_clauses.push("lower(d.name) GLOB ?".into());
+        binds.push(format!("*{}*", glob_of(n.pieces())));
     }
     if let Some(heads) = heads_filter(q, &mut binds) {
         where_clauses.push(heads);
@@ -1004,8 +1004,10 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // sit anywhere among tens of thousands that merely contain it -- outside
     // the window, it is not ranked first, it is absent. The three terms mirror
     // `query::rank`, so the window is filled with the rows it would choose.
-    // The `_` in a name is a LIKE wildcard and over-matches here; that changes
-    // which rows are offered, never which one wins.
+    // Each piece is itself to `GLOB` and a `*` stands between two, so what is
+    // offered is what `NameQuery` matches. The last two terms are wider than
+    // the ranking, a `*` reaching across the dots that end a last component;
+    // that changes which rows are offered, never which one wins.
     //
     // A shape query reads its rows in the order they were indexed, and that
     // order decides what a window holds and where the rows the ranking cannot
@@ -1014,22 +1016,32 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // arguments, and the ids the heads name come sorted, so asking costs no
     // sort.
     let by_id = heads_filter(q, &mut Vec::new()).is_some();
-    let order = match &q.name {
+    let order = match q.name_asked() {
         Some(n) => {
-            let n = n.to_lowercase();
+            let n = glob_of(n.pieces());
             binds.push(n.clone());
-            binds.push(format!("%.{n}"));
-            binds.push(format!("{n}%"));
+            binds.push(format!("*.{n}"));
+            binds.push(format!("{n}*"));
             let then = if by_id { ", d.id" } else { "" };
             format!(
-                " ORDER BY (lower(d.name) = ?) DESC, (lower(d.name) LIKE ?) DESC, \
-                 (lower(d.name) LIKE ?) DESC, length(d.name){then}"
+                " ORDER BY (lower(d.name) GLOB ?) DESC, (lower(d.name) GLOB ?) DESC, \
+                 (lower(d.name) GLOB ?) DESC, length(d.name){then}"
             )
         }
         None if by_id => " ORDER BY d.id".into(),
         None => String::new(),
     };
     (format!("SELECT d.* FROM decl d{filter}{order} LIMIT {cap}"), binds)
+}
+
+/// The pieces of a `--name`, lower case, as the pattern of a `GLOB`: a `*`
+/// between two, and each of them as itself.
+///
+/// `GLOB` and not `LIKE`, whose `_` is a wildcard, and the `_` of `--name
+/// exp_le` was: it found `instToExprLevel`, with an `r` where the `_` is. A
+/// `GLOB` has three characters to escape and a name has one of them, `?`.
+fn glob_of(pieces: &[String]) -> String {
+    pieces.iter().map(|p| glob_escaped(p)).collect::<Vec<_>>().join("*")
 }
 
 /// A name as a `GLOB` pattern that matches only it: `?` is a wildcard there,

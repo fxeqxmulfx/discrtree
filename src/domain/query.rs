@@ -11,7 +11,8 @@ use crate::domain::source::SourceId;
 
 #[derive(Debug, Clone, Default)]
 pub struct Query {
-    /// Case-insensitive substring of the declaration name.
+    /// Case-insensitive substring of the declaration name, with a `*` for
+    /// whatever lies between the pieces of it. See [`NameQuery`].
     pub name: Option<String>,
     /// Shape: conclusion head symbol and argument head symbols.
     pub shape: Shape,
@@ -132,11 +133,17 @@ impl Query {
         Query { limit: DEFAULT_LIMIT, ..Default::default() }
     }
 
+    /// What `--name` asks of a name, when it asks anything: not `--name ''`,
+    /// and not `--name '*'`, which are every name there is.
+    pub fn name_asked(&self) -> Option<NameQuery> {
+        self.name.as_deref().map(NameQuery::new).filter(|n| !n.asks_nothing())
+    }
+
     /// Whether the query constrains anything at all. An unconstrained query
     /// would return the first `limit` rows of the corpus, which is never what
     /// was meant.
     pub fn is_empty(&self) -> bool {
-        self.name.is_none()
+        self.name_asked().is_none()
             && self.shape.is_empty()
             && self.uses.is_empty()
             && self.module.is_none()
@@ -160,8 +167,28 @@ impl Query {
     pub fn conditions(&self) -> Vec<(String, Query)> {
         let one = |q: Query| Query { limit: 1, ..q };
         let mut out = Vec::new();
-        if let Some(n) = &self.name {
-            out.push((format!("--name {n}"), one(Query { name: Some(n.clone()), ..Query::new() })));
+        if let Some(n) = &self.name
+            && let Some(asked) = self.name_asked()
+        {
+            match asked.written() {
+                // Each piece on its own where a `*` makes it several: the one
+                // that is in no name is the one to correct, and `--name
+                // mem_coneHull.*finite` matching nothing does not say whether
+                // it is `mem_coneHull`, `finite` or their order. Named the way
+                // a pattern's constant is, as a part of what was written.
+                [_, _, ..] => {
+                    for piece in asked.written() {
+                        let q = Query { name: Some(piece.clone()), ..Query::new() };
+                        out.push((format!("`{piece}` in --name"), one(q)));
+                    }
+                }
+                _ => {
+                    out.push((
+                        format!("--name {n}"),
+                        one(Query { name: Some(n.clone()), ..Query::new() }),
+                    ));
+                }
+            }
         }
         if let Some(c) = &self.shape.concl {
             let shape = Shape { concl: Some(c.clone()), args: Vec::new() };
@@ -228,8 +255,8 @@ impl Query {
         if !self.generated && d.is_generated() {
             return false;
         }
-        if let Some(n) = &self.name
-            && !d.name.as_str().to_lowercase().contains(&n.to_lowercase())
+        if let Some(n) = self.name_asked()
+            && !n.is_in(d.name.as_str())
         {
             return false;
         }
@@ -363,8 +390,8 @@ impl Eq for Query {}
 /// the right constants beats a long one that happens to mention them.
 pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     let mut score = 0;
-    if let Some(n) = &q.name {
-        score += name_score(n, d);
+    if let Some(n) = q.name_asked() {
+        score += name_score(&n, d);
     }
     if let (Some(asked), Some(concl)) = (&q.shape.concl, &d.shape.concl)
         && crate::domain::decl::keyed_as(asked).iter().any(|k| k.names(concl))
@@ -419,21 +446,156 @@ fn mentions(d: &Decl, asked: &DeclName) -> bool {
 /// declaration called that -- both outrank a row that merely begins with it,
 /// which in turn outranks one that contains it somewhere in the middle.
 ///
+/// Written with a `*`, the same three: a name that the pieces and what lies
+/// between them make up entirely, then a last component that they do, then
+/// one that begins with them. `mem_*_finite` puts `mem_mono_finite` before
+/// `Set.mem_mono_finite`, and both before `Set.Finite.mem_mono_finite_of_le`.
+///
 /// It outscores the shape agreement below deliberately. A caller who writes
 /// the whole name has said which row they want, and nothing else in the query
 /// says it more precisely.
-fn name_score(asked: &str, d: &Decl) -> u32 {
-    let asked = asked.to_lowercase();
-    let name = d.name.as_str().to_lowercase();
-    if name == asked {
+fn name_score(asked: &NameQuery, d: &Decl) -> u32 {
+    if asked.spells(d.name.as_str()) {
         8
-    } else if d.name.base().to_lowercase() == asked {
+    } else if asked.spells(d.name.base()) {
         6
-    } else if name.starts_with(&asked) {
+    } else if asked.begins(d.name.as_str()) {
         2
     } else {
         0
     }
+}
+
+/// What `--name` asks of a declaration's name: some text, and wherever there
+/// is a `*`, anything at all.
+///
+/// A substring, as it has always been: `exp` is in `Real.exp_le_exp`. Each `*`
+/// stands for whatever lies between the text on either side of it, so
+/// `mem_*_finite` is a name with `mem_` in it and `_finite` somewhere after,
+/// and a `*` at either end asks nothing more than the text beside it, since a
+/// substring has no ends to move. Nothing else is special: `.` is the dot of
+/// a namespace, `?` is in `List.head?`, and `_` is itself.
+///
+/// The one exception is the dot in front of a star. A reader who thinks in
+/// regular expressions writes `mem_coneHull.*finite` for the same thing, and
+/// to read that dot as a namespace's would find nothing in a name that has
+/// `mem_coneHull_iff_finite` in it. So `.*` is a `*`. A dot that a star does
+/// not follow is still a dot, and so is one with a star in front.
+///
+/// Names with a `*` in them are few and all alike, the 42 of a Mathlib,
+/// Batteries and core index of 495 264: the name Lean gave a notation, as
+/// `Matrix.«term_*ᵥ_»`. `--name term_*_` finds them, and finds the rest of
+/// what has `term_` and then `_` in it too; a `*` stands for itself among the
+/// rest of what it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameQuery {
+    /// The pieces between the stars as they were written, in order. None is
+    /// empty: two stars in a row are one, and a star at an end is nothing.
+    written: Vec<String>,
+    /// The same in lower case, which is how they are compared.
+    lower: Vec<String>,
+    /// A star came before the first piece, so it is not where a name begins.
+    led: bool,
+}
+
+impl NameQuery {
+    pub fn new(asked: &str) -> NameQuery {
+        let pieces: Vec<&str> = asked.split('*').collect();
+        // Every piece but the last has a star after it, and takes the dot
+        // that comes right before the star with it. `split` yields one piece
+        // at least, and a string with no star is that piece.
+        let last = pieces.len() - 1;
+        let written: Vec<String> = pieces
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| if i < last { p.strip_suffix('.').unwrap_or(p) } else { p })
+            .map(str::to_string)
+            .collect();
+        let led = last > 0 && written[0].is_empty();
+        let written: Vec<String> = written.into_iter().filter(|p| !p.is_empty()).collect();
+        let lower = written.iter().map(|p| p.to_lowercase()).collect();
+        NameQuery { written, lower, led }
+    }
+
+    /// Nothing but stars, or nothing: every name there is.
+    pub fn asks_nothing(&self) -> bool {
+        self.written.is_empty()
+    }
+
+    /// The pieces between the stars, as written. More than one is a gap
+    /// between them.
+    pub fn written(&self) -> &[String] {
+        &self.written
+    }
+
+    /// The same in lower case, which is how a name is compared to them.
+    pub fn pieces(&self) -> &[String] {
+        &self.lower
+    }
+
+    /// The text asked for, in lower case, where there is nothing between
+    /// pieces to ask about: one substring, whatever stars are at its ends.
+    pub fn only(&self) -> Option<&str> {
+        match self.lower.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    /// The text a name asked for begins with, as it was written: the
+    /// namespace of a qualified name, which is not a namespace at all when a
+    /// star came first.
+    pub fn head(&self) -> Option<&str> {
+        self.written.first().filter(|_| !self.led).map(String::as_str)
+    }
+
+    /// Whether the name has the pieces in it, in order, with anything between
+    /// them and around them.
+    pub fn is_in(&self, name: &str) -> bool {
+        in_order(&name.to_lowercase(), &self.lower)
+    }
+
+    /// Whether the pieces and what lies between them are the whole of the
+    /// name: it begins with the first, ends with the last, and has the rest
+    /// between. The name itself, where there is one piece.
+    pub fn spells(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        match self.lower.as_slice() {
+            [] => true,
+            [only] => name == *only,
+            [first, between @ .., last] => {
+                name.len() >= first.len() + last.len()
+                    && name.starts_with(first.as_str())
+                    && name.ends_with(last.as_str())
+                    && in_order(&name[first.len()..name.len() - last.len()], between)
+            }
+        }
+    }
+
+    /// Whether the name begins with the first piece and has the others after
+    /// it, in order.
+    pub fn begins(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        match self.lower.split_first() {
+            None => true,
+            Some((first, rest)) => {
+                name.strip_prefix(first.as_str()).is_some_and(|after| in_order(after, rest))
+            }
+        }
+    }
+}
+
+/// Whether `pieces` are in `text` one after another, each where the one
+/// before it ended or later. The first place each is found is the best place
+/// for it: it leaves the most text for the rest.
+fn in_order(mut text: &str, pieces: &[String]) -> bool {
+    for piece in pieces {
+        match text.find(piece.as_str()) {
+            Some(at) => text = &text[at + piece.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -560,6 +722,132 @@ mod tests {
         assert!(q.matches(&d));
         q.name = Some("sum".into());
         assert!(!q.matches(&d));
+    }
+
+    /// The report: `--name mem_coneHull.*finite` found nothing, because the
+    /// `.*` was looked for in the names as it stands. A star is whatever lies
+    /// between the pieces, wherever it is.
+    #[test]
+    fn a_star_in_a_name_is_whatever_lies_between_the_pieces() {
+        let has = |asked: &str, name: &str| {
+            let mut q = Query::new();
+            q.name = Some(asked.into());
+            q.matches(&Decl::stub(name, "mathlib", "Mathlib.Analysis.Convex.Cone"))
+        };
+        // As it was written, without the dot, and in capitals: one question.
+        for asked in ["mem_coneHull.*finite", "mem_coneHull*finite", "MEM_CONEHULL.*FINITE"] {
+            assert!(has(asked, "Set.mem_coneHull_iff_finite"), "{asked}");
+            assert!(has(asked, "mem_coneHull_finite"), "nothing between is still between: {asked}");
+            assert!(!has(asked, "Set.finite_mem_coneHull"), "the pieces come in order: {asked}");
+            assert!(!has(asked, "Set.mem_coneHull_iff"), "and all of them are there: {asked}");
+        }
+        // Wherever it is, and as many as there are.
+        assert!(has("*finite", "Set.mem_finite"));
+        assert!(has("Set.*", "Set.mem_finite"));
+        assert!(has("*mem*", "Set.mem_finite"));
+        assert!(has("s*m*f", "Set.mem_finite"));
+        assert!(!has("s*f*m", "Set.mem_finite"));
+        assert!(has("mem_**finite", "Set.mem_finite"));
+        // A piece is a place in the name, and `mem` twice needs two of them.
+        assert!(!has("mem*mem", "Set.mem_finite"));
+        assert!(has("mem*mem", "Set.mem_of_mem_finite"));
+        // Nothing else is special: `?` is in `List.head?`, `_` is itself, and
+        // a dot that no star follows is the dot of a namespace.
+        assert!(has("head?", "List.head?"));
+        assert!(!has("head?", "List.heads"));
+        assert!(has("sub_sq", "Real.sub_sq"));
+        assert!(!has("sub.sq", "Real.sub_sq"));
+    }
+
+    #[test]
+    fn the_dot_in_front_of_a_star_is_its_own_and_no_other_dot_is() {
+        let written = |asked: &str| NameQuery::new(asked).written().to_vec();
+        // `.*` is `*`, and so is `*`.
+        assert_eq!(written("mem_coneHull.*finite"), ["mem_coneHull", "finite"]);
+        assert_eq!(written("mem_coneHull*finite"), ["mem_coneHull", "finite"]);
+        assert_eq!(written(".*finite.*"), ["finite"]);
+        // A dot that no star follows is the namespace's, and so is one that a
+        // star comes before.
+        assert_eq!(written("Real.sin_sq"), ["Real.sin_sq"]);
+        assert_eq!(written("A."), ["A."]);
+        assert_eq!(written("Real*.sin_sq"), ["Real", ".sin_sq"]);
+        // Only the one, so that a namespace and then anything can be said.
+        assert_eq!(written("Real..*sq"), ["Real.", "sq"]);
+        // A star at an end is nothing, and two in a row are one.
+        assert_eq!(written("*a**b*"), ["a", "b"]);
+    }
+
+    /// `--name '*'` is every name, as `--name ''` is, and a query that asks
+    /// nothing else is the one `dt find` refuses.
+    #[test]
+    fn a_name_of_nothing_but_stars_asks_nothing() {
+        for asked in ["", "*", "**", ".*", ".*.*"] {
+            let mut q = Query::new();
+            q.name = Some(asked.into());
+            assert!(q.name_asked().is_none(), "{asked:?}");
+            assert!(q.is_empty(), "{asked:?} constrains nothing");
+            assert!(q.matches(&decl()), "and so it matches every name: {asked:?}");
+            assert!(q.conditions().is_empty(), "and cannot be the one that failed: {asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_the_pieces_make_up_ranks_above_one_they_are_only_in() {
+        let named = |n: &str| {
+            let mut d = Decl::stub(n, "mathlib", "Mathlib.Analysis.Convex.Cone");
+            // The same length, so that only the name can tell them apart.
+            d.ty = "short".into();
+            d
+        };
+        let mut q = Query::new();
+        q.name = Some("mem_*_finite".into());
+        let whole = named("mem_mono_finite");
+        let last = named("Set.mem_mono_finite");
+        let begun = named("mem_mono_finite_of_le");
+        let inside = named("Set.Finite.mem_mono_finite_of_le");
+        assert!(rank(&q, &whole) < rank(&q, &last));
+        assert!(rank(&q, &last) < rank(&q, &begun));
+        assert!(rank(&q, &begun) < rank(&q, &inside));
+        // Written without one, the ranking is what it was.
+        q.name = Some("mem_mono_finite".into());
+        assert!(rank(&q, &whole) < rank(&q, &last));
+        assert!(rank(&q, &last) < rank(&q, &begun));
+        assert!(rank(&q, &begun) < rank(&q, &inside));
+    }
+
+    /// A name with a star in it fails for one of its pieces or for none of
+    /// them, and `matches nothing on its own` has to be able to say which.
+    #[test]
+    fn a_name_with_stars_is_blamed_piece_by_piece() {
+        let mut q = Query::new();
+        q.name = Some("mem_coneHull.*finite".into());
+        q.module = Some("Mathlib".into());
+        let conditions = q.conditions();
+        let labels: Vec<&str> = conditions.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["`mem_coneHull` in --name", "`finite` in --name", "--in Mathlib"]);
+        // Each is a question of its own, and a plain one.
+        let asked: Vec<Option<&str>> = conditions.iter().map(|(_, p)| p.name.as_deref()).collect();
+        assert_eq!(asked, [Some("mem_coneHull"), Some("finite"), None]);
+        // A star at an end leaves one piece, and the name is blamed whole.
+        q.name = Some("*finite".into());
+        let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, ["--name *finite", "--in Mathlib"]);
+    }
+
+    #[test]
+    fn the_name_so_far_is_what_comes_before_the_first_star() {
+        let head = |asked: &str| NameQuery::new(asked).head().map(str::to_string);
+        assert_eq!(head("Batteries.RBNode.Balanced").as_deref(), Some("Batteries.RBNode.Balanced"));
+        assert_eq!(head("Batteries.RBNode.*Balanced").as_deref(), Some("Batteries.RBNode"));
+        assert_eq!(head("Batteries.RB*").as_deref(), Some("Batteries.RB"));
+        // No namespace begins after a star, and none where there is no text.
+        assert_eq!(head("*Batteries.RBNode"), None);
+        assert_eq!(head(".*Balanced"), None);
+        assert_eq!(head("*"), None);
+        let only = |asked: &str| NameQuery::new(asked).only().map(str::to_string);
+        assert_eq!(only("Real.sin_sq").as_deref(), Some("real.sin_sq"));
+        assert_eq!(only("*sin_sq*").as_deref(), Some("sin_sq"));
+        assert_eq!(only("sin*sq"), None);
     }
 
     #[test]

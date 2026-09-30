@@ -25,7 +25,8 @@ Not guessable:
 - Lean core (`Init`, `Std`, `Lean`) is a source you add yourself:
   `kind = "core"`, no path or root. Without it `List.head?` is `no match`.
 - `--in` wants a whole module prefix from the root: `Mathlib.Analysis`, not
-  `Analysis`. `--name` is a substring; `--text` is whole words, and repeats.
+  `Analysis`. `--name` is a substring, `*` is anything; `--text` is whole
+  words, and repeats.
 - A `dt:` line on stderr means the index is behind the source and rows may be
   missing; re-run the `dt refresh` it names.
 - Default limit 10; `--long` adds type and docstring. Compiler-generated

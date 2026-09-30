@@ -1377,5 +1377,9 @@ mod tests {
     #[test]
     fn a_query_with_no_conditions_is_recognised_as_empty() {
         assert!(query_of(&args(&["dt", "find"])).unwrap().is_empty());
+        // A name of every name is no condition either.
+        assert!(query_of(&args(&["dt", "find", "--name", "*"])).unwrap().is_empty());
+        assert!(query_of(&args(&["dt", "find", "--name", ".*"])).unwrap().is_empty());
+        assert!(!query_of(&args(&["dt", "find", "--name", "a*"])).unwrap().is_empty());
     }
 }

@@ -4,7 +4,7 @@ use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
 use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
-use crate::domain::query::{self, Power, Query};
+use crate::domain::query::{self, NameQuery, Power, Query};
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -584,15 +584,18 @@ impl Find<'_> {
         // nothing to read; a qualified name is the case where the reader
         // already knows what they are looking for, which is also the case where
         // `no match` is most readily believed to mean the lemma does not exist.
+        // What comes before the first `*` is the name so far, and all that
+        // there is to read of `Batteries.RBNode.*Balanced`.
         if let Some(n) = &query.name
-            && n.contains('.')
-            && let Some(missing) = self.build.declaring(n)
+            && let Some(head) = query.name_asked().as_ref().and_then(NameQuery::head)
+            && head.contains('.')
+            && let Some(missing) = self.build.declaring(head)
             && self
                 .repo
                 .find(&Query { name: Some(n.clone()), limit: 1, ..Query::new() })?
                 .is_empty()
         {
-            return Ok(Empty::NotIndexed { asked: Asked::Name(DeclName::new(n.clone())), missing });
+            return Ok(Empty::NotIndexed { asked: Asked::Name(DeclName::new(head)), missing });
         }
         // Asked before the conditions are probed, because `--kind instance`
         // does match on its own -- text rows have carried the kind since the
@@ -720,9 +723,14 @@ impl Find<'_> {
     /// Asked last of the pattern's diagnoses, and only of a name that is a
     /// whole name or a whole last component: a fragment finds many rows, and
     /// "`--name sublist` finds `List.sublist_cons_iff`" would be a guess at
-    /// which of them was meant.
+    /// which of them was meant. A `*` in the name makes it a fragment as much
+    /// as leaving part of it out does.
     fn named_elsewise(&self, query: &Query) -> Result<Option<Empty>> {
         let Some(n) = &query.name else { return Ok(None) };
+        let Some(asked) = query.name_asked().as_ref().and_then(NameQuery::only).map(str::to_owned)
+        else {
+            return Ok(None);
+        };
         if query.shape.is_empty() {
             return Ok(None);
         }
@@ -732,7 +740,6 @@ impl Find<'_> {
             return Ok(None);
         }
         let by_name = Query { name: Some(n.clone()), limit: SPREAD, ..Query::new() };
-        let asked = n.to_lowercase();
         let found = self.repo.find(&by_name)?.into_iter().filter(|d| d.shaped()).find(|d| {
             d.name.as_str().to_lowercase() == asked || d.name.base().to_lowercase() == asked
         });
