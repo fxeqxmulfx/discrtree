@@ -1,6 +1,6 @@
 [package]
 name = "discrtree"
-version = "0.62.0"
+version = "0.63.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -16,10 +16,12 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
-rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+# Not the defaults: 0.40 adds `ffi-sqlite-wasm-rs`, which puts wasm-only crates
+# into Cargo.lock. `cache` is the other default, and `prepare_cached` needs it.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
+toml = "1"
 
 [profile.release]
 opt-level = 3
