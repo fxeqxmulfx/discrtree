@@ -2,6 +2,26 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## `--name` is a plain substring, so a name written with `.*` in it finds nothing
+
+Found 2026-09-30, dt 0.61.0, in an agent's transcript looking for the lemma that
+puts a point of a cone hull in a finite set. The name was recalled in two pieces
+and joined the way a regular expression joins them:
+
+    $ dt find --name mem_coneHull.*finite --in Mathlib --limit 20
+    no match: --name mem_coneHull.*finite matches nothing on its own
+
+`--name` is a substring, so the `.*` was looked for in the names, and no name
+has one. The answer is true and no use. It takes the name for what it spells,
+and does not say which of the two pieces is the one the index lacks -- it lacks
+`mem_coneHull`, there is no such name -- so a reader takes `no match` for "no
+such lemma", or makes a third guess at the whole.
+
+The right output: a `*` in a name is whatever lies between the text on either
+side, anywhere in it, and `.*` is the same `*`, which is what a reader who
+thinks in regular expressions writes. A name written so that finds nothing says
+which piece no name has.
+
 ## A pattern does not see through an `abbrev`, so the instance Lean finds is not found
 
 Found 2026-09-23, dt 0.60.0, looking for the measurable-space instance on
