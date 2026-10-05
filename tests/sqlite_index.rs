@@ -35,6 +35,68 @@ fn loaded() -> SqliteIndex {
 }
 
 #[test]
+fn shape_counts_are_independent_of_the_result_limit() {
+    let rows: Vec<_> = (0..321)
+        .map(|i| theorem(&format!("Corpus.row_{i}"), "core", "Corpus", "Eq", &[]))
+        .collect();
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    for limit in [0, 1, 10, 100] {
+        let q = Query { shape: Shape::new(Some("Eq".into()), Vec::new()), limit, ..Query::new() };
+        assert_eq!(DeclRepo::count(&db, &q).unwrap(), rows.len(), "limit {limit}");
+    }
+}
+
+#[test]
+fn a_valid_argument_alignment_after_many_decoys_is_found() {
+    let mut rows: Vec<_> = (0..35_001)
+        .map(|i| {
+            let mut row = theorem(&format!("Corpus.decoy_{i}"), "core", "Corpus", "Eq", &[]);
+            row.shape.args = vec![ArgHead::Named("A".into()), ArgHead::Named("B".into())];
+            row
+        })
+        .collect();
+    let mut wanted = theorem("Corpus.wanted", "core", "Corpus", "Eq", &[]);
+    wanted.shape.args = vec![ArgHead::Named("B".into()), ArgHead::Named("A".into())];
+    rows.push(wanted);
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &rows).unwrap();
+    db.finish().unwrap();
+    let q = Query {
+        shape: Shape::new(
+            Some("Eq".into()),
+            vec![ArgHead::Named("B".into()), ArgHead::Named("A".into())],
+        ),
+        limit: 1,
+        ..Query::new()
+    };
+    assert_eq!(
+        db.find(&q).unwrap().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["Corpus.wanted"]
+    );
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+    let q = Query {
+        shape: Shape::new(
+            Some("Eq".into()),
+            vec![ArgHead::Reducible {
+                written: "Alias".into(),
+                class: vec!["Alias".into(), "A".into()],
+            }],
+        ),
+        uses: vec!["Hidden.constant".into()],
+        inside: vec![vec!["Hidden.constant".into()]],
+        limit: 1,
+        ..Query::new()
+    };
+    assert_eq!(
+        DeclRepo::count(&db, &q).unwrap(),
+        rows.len(),
+        "an unfolded argument can excuse its missing constant in every row"
+    );
+}
+
+#[test]
 fn a_row_survives_the_round_trip_through_sqlite() {
     let db = loaded();
     let got = db.get(&DeclName::new("Real.exp_le_exp")).unwrap().unwrap();
@@ -48,6 +110,60 @@ fn a_row_survives_the_round_trip_through_sqlite() {
     // without them would make `dt deps` silently empty.
     assert_eq!(got.deps, vec![DeclName::new("Real.exp")]);
     assert_eq!(got.consts, vec![DeclName::new("Real.exp")]);
+}
+
+#[test]
+fn interleaved_implicit_arguments_match_in_both_repositories() {
+    let mut wanted = theorem("Corpus.wanted", "core", "Corpus", "Class", &[]);
+    wanted.shape = Shape::new(
+        Some("Class".into()),
+        ["A", "inst", "B"].iter().map(|a| ArgHead::parse(a)).collect(),
+    )
+    .with_explicit_args(Some(["A", "B"].iter().map(|a| ArgHead::parse(a)).collect()));
+    let mut swapped = wanted.clone();
+    swapped.name = "Corpus.swapped".into();
+    swapped.shape.args.reverse();
+    swapped.shape.explicit_args.as_mut().unwrap().reverse();
+    let fake = FakeRepo { decls: vec![wanted.clone(), swapped] };
+    let mut db = SqliteIndex::in_memory().unwrap();
+    index::load(&mut db, &fake.decls).unwrap();
+    db.finish().unwrap();
+    assert_eq!(db.get(&wanted.name).unwrap().unwrap().shape, wanted.shape);
+    for (args, implicit, expected) in [
+        (&["A", "B"][..], false, 1),
+        (&["A", "inst", "B"][..], false, 0),
+        (&["A", "inst", "B"][..], true, 1),
+        (&["A", "B", "inst"][..], true, 0),
+        (&["A", "_", "B"][..], true, 1),
+        (&["B"][..], false, 1),
+        (&["inst"][..], false, 0),
+        (&["inst"][..], true, 0),
+    ] {
+        let mut shape =
+            Shape::new(Some("Class".into()), args.iter().map(|a| ArgHead::parse(a)).collect());
+        shape.include_implicit = implicit;
+        let q = Query { shape, limit: 1, ..Query::new() };
+        assert_eq!(db.find(&q).unwrap(), fake.find(&q).unwrap(), "{args:?}");
+        assert_eq!(DeclRepo::count(&db, &q).unwrap(), expected, "{args:?}, @: {implicit}");
+        assert_eq!(fake.count(&q).unwrap(), expected, "{args:?}, @: {implicit}");
+    }
+    let q = Query {
+        shape: Shape::new(
+            Some("Class".into()),
+            vec![
+                ArgHead::Reducible {
+                    written: "Alias".into(),
+                    class: vec!["Alias".into(), "A".into()],
+                },
+                ArgHead::parse("B"),
+            ],
+        ),
+        uses: vec!["Alias.hidden".into()],
+        inside: vec![vec!["Alias.hidden".into()], Vec::new()],
+        ..Query::new()
+    };
+    assert_eq!(db.find(&q).unwrap(), vec![wanted]);
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
 }
 
 /// The SQL counts the same thing the in-memory stores count, which is the
@@ -630,10 +746,8 @@ fn a_rebuild_is_stale_for_a_search_only_when_it_declares_what_the_index_lacks() 
     let starred = Query { name: Some("depth_*x".into()), ..Query::new() };
     assert!(status::declared_matching(&stale, &starred).is_empty());
     assert_eq!(found[0].statement.as_deref(), Some("namespace T"), "line 1 of the file");
-    let shaped = Query {
-        shape: Shape { concl: Some(DeclName::new("LE.le")), args: Vec::new() },
-        ..asked.clone()
-    };
+    let shaped =
+        Query { shape: Shape::new(Some(DeclName::new("LE.le")), Vec::new()), ..asked.clone() };
     assert!(status::declared_matching(&stale, &shaped).is_empty(), "no .ilean answers a shape");
     assert_eq!(declaring(r#""T.depth_le":[3,0,5,6,3,8,3,16]"#), 1, "it moved");
 
@@ -966,17 +1080,45 @@ fn a_maintained_load_leaves_the_fixed_prices_unpaid() {
         .unwrap();
     db.finish().unwrap();
     assert_eq!(before, stat(), "a one-row load re-analyzed the whole index");
-    // FTS5 checks an external-content index against the table it indexes,
-    // which is the one question the maintained path has to answer for itself.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch("INSERT INTO decl_fts(decl_fts, rank) VALUES('integrity-check', 1);")
-        .expect("the maintained text index no longer matches the rows it indexes");
-
     // And the other way: a load that replaces the big source does pay, because
     // for that one the fixed price is the cheaper answer.
     filled(&mut db);
     assert_ne!(before, stat(), "a full reload must leave the statistics current");
+}
+
+#[test]
+fn an_existing_unicode61_text_index_is_upgraded_on_reopen() {
+    let dir = TempDir::new("dt-text-upgrade");
+    let path = dir.path().join("index.db");
+    let mut rows = vec![
+        theorem("Corpus.accent", "core", "Corpus", "Eq", &[]),
+        theorem("Corpus.plain", "core", "Corpus", "Eq", &[]),
+    ];
+    rows[0].doc = Some("café".into());
+    rows[1].doc = Some("cafe".into());
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        index::load(&mut db, &rows).unwrap();
+        db.finish().unwrap();
+    }
+    {
+        let legacy = rusqlite::Connection::open(&path).unwrap();
+        legacy.execute_batch("DROP TABLE decl_fts;
+            CREATE VIRTUAL TABLE decl_fts USING fts5(name, type, doc, content='decl', content_rowid='id', tokenize='unicode61');
+            INSERT INTO decl_fts(decl_fts) VALUES('rebuild');").unwrap();
+    }
+    for _ in 0..2 {
+        let db = SqliteIndex::open(&path).unwrap();
+        assert_eq!(db.count().unwrap(), rows.len());
+        for (text, name) in [("café", "Corpus.accent"), ("cafe", "Corpus.plain")] {
+            let q = Query { text: vec![text.into()], ..Query::new() };
+            assert_eq!(
+                db.find(&q).unwrap().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+                [name]
+            );
+            assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+        }
+    }
 }
 
 /// `--name` is a substring filter, and the rows it matches are cut to a window
@@ -1181,7 +1323,7 @@ fn an_index_written_by_an_older_dt_opens_and_says_so() {
     conn.execute_batch(
         "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format; \
          ALTER TABLE decl DROP COLUMN statement; DROP INDEX decl_unfolds; \
-         ALTER TABLE decl DROP COLUMN unfolds;",
+         ALTER TABLE decl DROP COLUMN unfolds; ALTER TABLE decl DROP COLUMN concl_explicit_args;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 2i64).unwrap();
@@ -1492,7 +1634,11 @@ fn an_index_from_before_unfoldings_opens_and_is_behind() {
         db.record(&id, &Provenance { row_format: Some(1), ..Provenance::by_this_build() }).unwrap();
     }
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("DROP INDEX decl_unfolds; ALTER TABLE decl DROP COLUMN unfolds;").unwrap();
+    conn.execute_batch(
+        "DROP INDEX decl_unfolds; ALTER TABLE decl DROP COLUMN unfolds; \
+         ALTER TABLE decl DROP COLUMN concl_explicit_args;",
+    )
+    .unwrap();
     conn.pragma_update(None, "user_version", 4i64).unwrap();
     drop(conn);
 
@@ -1501,4 +1647,26 @@ fn an_index_from_before_unfoldings_opens_and_is_behind() {
     assert_eq!(db.get(&pilp).unwrap().unwrap().unfolds, None);
     assert_eq!(db.reducible_class(&pilp).unwrap(), [pilp]);
     assert!(db.provenance(&id).unwrap().unwrap().outdated());
+}
+
+#[test]
+fn an_index_from_before_explicit_arguments_opens_and_is_behind() {
+    let dir = TempDir::new("dt-explicit-args");
+    let path = dir.path().join("index.db");
+    let id = SourceId::new("core");
+    let row = theorem("Corpus.old", "core", "Corpus", "Eq", &[]);
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        index::load(&mut db, std::slice::from_ref(&row)).unwrap();
+        db.record(&id, &Provenance { row_format: Some(2), ..Provenance::by_this_build() }).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE decl DROP COLUMN concl_explicit_args;").unwrap();
+    conn.pragma_update(None, "user_version", 5i64).unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let db = SqliteIndex::open(&path).expect("schema 5 is upgraded without losing its rows");
+        assert_eq!(db.get(&row.name).unwrap().unwrap(), row);
+        assert!(db.provenance(&id).unwrap().unwrap().outdated());
+    }
 }

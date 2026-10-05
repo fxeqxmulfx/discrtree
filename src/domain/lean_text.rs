@@ -97,38 +97,9 @@ fn range_lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
 /// an attribute block with a docstring inside it. Reading those as syntax is
 /// how `@[to_additive /-- sums over ... -/]` would come to declare something.
 fn code_lines(text: &str) -> impl Iterator<Item = &str> {
-    let mut depth = 0usize;
-    text.lines().filter(move |l| {
-        let opened = depth;
-        depth = comment_depth(l, depth);
-        let t = l.trim_start();
-        // A line that opens a comment is the one the depth does not yet cover,
-        // and it is where a docstring starts. Nothing declares anything at a
-        // `/-`, so dropping the whole line costs nothing and keeps `/-- The
-        // Bochner integral -/` out of the answer.
-        opened == 0 && !t.starts_with("--") && !t.starts_with("/-")
-    })
-}
-
-/// The block comment nesting a line leaves behind. Lean's `/- -/` nests, and
-/// `/--` is a `/-` like any other.
-fn comment_depth(line: &str, mut depth: usize) -> usize {
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i + 1 < b.len() {
-        match (b[i], b[i + 1]) {
-            (b'/', b'-') => {
-                depth += 1;
-                i += 2;
-            }
-            (b'-', b'/') => {
-                depth = depth.saturating_sub(1);
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
-    depth
+    let (code, _) = syntax_only(text);
+    let visible: Vec<_> = code.lines().map(|l| !l.trim().is_empty()).collect();
+    text.lines().zip(visible).filter_map(|(line, visible)| visible.then_some(line))
 }
 
 /// Whether a slice of source declares `name` in particular.
@@ -233,21 +204,123 @@ pub fn first_code_line(text: &str) -> &str {
 /// The identifier a declaration header opens with, or `None` where the header
 /// goes straight into binders or the type — an anonymous instance.
 fn ident(rest: &str) -> Option<&str> {
-    let id = rest.trim_start().split([' ', '\t', '(', '{', '[', ':']).next()?;
+    let id = first_token(rest);
     (!id.is_empty()).then_some(id)
 }
 
 /// The modules a file imports. For a text corpus these are the only structural
 /// dependency information there is.
 pub fn imports(text: &str) -> Vec<ModuleName> {
-    text.lines()
-        .take_while(|l| {
-            let t = l.trim_start();
-            t.is_empty() || t.starts_with("import ") || t.starts_with("--") || t.starts_with("/-")
-        })
-        .filter_map(|l| l.trim().strip_prefix("import "))
-        .map(|m| ModuleName::new(m.trim()))
-        .collect()
+    let (code, _) = syntax_only(text);
+    let mut out = Vec::new();
+    for line in code.lines() {
+        let mut t = line.trim();
+        if t.is_empty() || t == "module" || t == "prelude" {
+            continue;
+        }
+        t = t.strip_prefix("public ").unwrap_or(t);
+        t = t.strip_prefix("meta ").unwrap_or(t);
+        let Some(rest) = t.strip_prefix("import ") else { break };
+        let rest = rest.strip_prefix("all ").unwrap_or(rest);
+        if let Some(module) = rest.split_whitespace().next() {
+            out.push(ModuleName::new(module));
+        }
+    }
+    out
+}
+
+/// Hide comments and literals without moving any line or byte position. A
+/// text corpus may contain declarations in documentation, or `sorry` and
+/// qualified names in strings; none of those are declaration/proof syntax.
+fn syntax_only(text: &str) -> (String, Vec<usize>) {
+    let mut code = text.as_bytes().to_vec();
+    let mut hide = |start: usize, end: usize| {
+        for b in &mut code[start..end] {
+            if !matches!(*b, b'\n' | b'\r') {
+                *b = b' ';
+            }
+        }
+    };
+    let mut chars = text.char_indices().peekable();
+    let (mut comment, mut quoted, mut line_comment) = (0usize, false, false);
+    let mut escaped_ident = false;
+    let (mut line, mut docs) = (0usize, Vec::new());
+    let mut prev = '\n';
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, c)| c);
+        if c == '\n' {
+            line_comment = false;
+            line += 1;
+        } else if line_comment {
+            hide(i, i + c.len_utf8());
+        } else if comment > 0 {
+            hide(i, i + c.len_utf8());
+            match (c, next) {
+                ('/', Some('-')) | ('-', Some('/')) => {
+                    if c == '/' {
+                        comment += 1;
+                    } else {
+                        comment -= 1;
+                    }
+                    let (at, n) = chars.next().unwrap();
+                    hide(at, at + n.len_utf8());
+                }
+                _ => {}
+            }
+        } else if escaped_ident {
+            if c == '»' {
+                escaped_ident = false;
+            }
+        } else if quoted {
+            hide(i, i + c.len_utf8());
+            if c == '\\' {
+                if let Some((at, n)) = chars.next() {
+                    hide(at, at + n.len_utf8());
+                    line += usize::from(n == '\n');
+                }
+            } else if c == '"' {
+                quoted = false;
+            }
+        } else {
+            match (c, next) {
+                ('«', _) => escaped_ident = true,
+                ('/', Some('-')) | ('-', Some('-')) => {
+                    if text[i..].starts_with("/--") {
+                        docs.push(line);
+                    }
+                    comment = usize::from(c == '/');
+                    line_comment = c == '-';
+                    let (at, n) = chars.next().unwrap();
+                    hide(i, at + n.len_utf8());
+                }
+                ('"', _) => {
+                    quoted = true;
+                    hide(i, i + 1);
+                }
+                ('\'', _) if !prev.is_alphanumeric() && prev != '_' && prev != '\'' => {
+                    // A character literal may itself contain a quote or a
+                    // slash. An apostrophe attached to a name stays syntax.
+                    let mut ahead = chars.clone();
+                    if let Some((_, n)) = ahead.next() {
+                        if n == '\\' {
+                            ahead.next();
+                        }
+                        if n != '\n'
+                            && let Some((last, '\'')) = ahead.next()
+                        {
+                            hide(i, last + 1);
+                            while chars.peek().is_some_and(|(at, _)| *at <= last) {
+                                chars.next();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        prev = c;
+    }
+    (String::from_utf8(code).expect("only whole characters were masked"), docs)
 }
 
 /// What a file turned out to contain.
@@ -266,24 +339,35 @@ pub struct Scan {
 /// Every declaration in a file.
 pub fn scan(text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
+    let (code, docs) = syntax_only(text);
+    let code_lines: Vec<&str> = code.lines().collect();
     let mut anonymous = 0usize;
     let mut out: Vec<Scanned> = Vec::new();
     let mut namespaces: Vec<String> = Vec::new();
+    let mut scopes: Vec<(String, bool)> = Vec::new();
     let mut i = 0;
 
     while i < lines.len() {
-        let line = lines[i];
-        if let Some(rest) = line.strip_prefix("namespace ") {
+        let line = code_lines[i].trim_end();
+        let structural = undecorated(line).unwrap_or("");
+        if let Some(rest) = structural.strip_prefix("namespace ") {
             namespaces.push(rest.trim().to_string());
-        } else if let Some(ended) = line.strip_prefix("end ") {
-            let ended = ended.trim();
-            if namespaces.last().map(String::as_str) == Some(ended) {
-                namespaces.pop();
+            scopes.push((rest.trim().to_string(), true));
+        } else if structural == "section" || structural.starts_with("section ") {
+            scopes.push((structural["section".len()..].trim().to_string(), false));
+        } else if structural == "end" || structural.starts_with("end ") {
+            let ended = structural["end".len()..].trim();
+            if scopes.last().is_some_and(|(name, _)| ended.is_empty() || name == ended) {
+                let (_, namespace) = scopes.pop().unwrap();
+                if namespace {
+                    namespaces.pop();
+                }
             }
         } else if let Some((kind, after)) = header(line) {
             let start = i;
-            let end = declaration_end(&lines, i);
+            let end = declaration_end(&lines, &code_lines, &docs, i);
             let body = lines[start..=end].join("\n");
+            let syntax = code_lines[start..=end].join("\n");
             let base = first_token(after);
             let name = qualify(&namespaces, base);
             if base.is_empty() {
@@ -293,10 +377,13 @@ pub fn scan(text: &str) -> Scan {
                 out.push(Scanned {
                     name,
                     kind: kind.to_string(),
-                    statement: statement_of(&body, after),
+                    statement: statement_of(
+                        &body,
+                        header(lines[start]).map_or(after, |(_, rest)| rest),
+                    ),
                     doc: docstring_above(&lines, start),
-                    idents: dotted_identifiers(&body),
-                    has_sorry: mentions_sorry(&body),
+                    idents: dotted_identifiers(&syntax),
+                    has_sorry: mentions_sorry(&syntax),
                     line_start: start as u32 + 1,
                     line_end: end as u32 + 1,
                 });
@@ -360,23 +447,25 @@ fn attribute(line: &str) -> Option<&str> {
 
 /// A declaration runs until the next line at column zero that starts something
 /// else, or the end of the file.
-fn declaration_end(lines: &[&str], start: usize) -> usize {
+fn declaration_end(lines: &[&str], code: &[&str], docs: &[usize], start: usize) -> usize {
     let mut end = start;
-    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+    for (i, line) in code.iter().enumerate().skip(start + 1) {
+        let structural = undecorated(line.trim_end()).unwrap_or("");
         let starts_something = !line.is_empty()
             && !line.starts_with(char::is_whitespace)
             && (header(line).is_some()
-                || line.starts_with("namespace ")
-                || line.starts_with("end ")
-                || line.starts_with("section")
+                || structural.starts_with("namespace ")
+                || structural == "end"
+                || structural.starts_with("end ")
+                || structural == "section"
+                || structural.starts_with("section ")
                 || line.starts_with("open ")
                 || line.starts_with("variable")
-                || line.starts_with("/--")
                 || line.starts_with("@["));
-        if starts_something {
+        if starts_something || (docs.contains(&i) && lines[i].starts_with("/--")) {
             break;
         }
-        if !line.trim().is_empty() {
+        if !lines[i].trim().is_empty() {
             end = i;
         }
     }
@@ -390,18 +479,24 @@ fn statement_of(body: &str, after_name: &str) -> String {
         Some(p) => &body[p + name_len..],
         None => body,
     };
-    // FLT delegates every proof to `p2m_exact_reverting`; Mathlib-style sources
-    // use `:= by`. Either way the statement ends at the first top-level `:=`.
-    let cut = [":= by", ":=\n", ":= ", "\n  where", ":= fun"]
-        .iter()
-        .filter_map(|m| from_name.find(m))
-        .min()
-        .unwrap_or(from_name.len());
+    let cut = body_start(from_name).unwrap_or(from_name.len());
     from_name[..cut].trim().to_string()
 }
 
 fn first_token(s: &str) -> &str {
-    s.trim_start().split(|c: char| c.is_whitespace() || "({[:".contains(c)).next().unwrap_or("")
+    let s = s.trim_start();
+    let mut quoted = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '«' => quoted = true,
+            '»' => quoted = false,
+            _ => {}
+        }
+        if !quoted && (c.is_whitespace() || "({[:⦃⟨".contains(c)) {
+            return &s[..i];
+        }
+    }
+    s
 }
 
 fn qualify(namespaces: &[String], name: &str) -> DeclName {
@@ -432,34 +527,44 @@ fn docstring_above(lines: &[&str], start: usize) -> Option<String> {
 /// variables, and a dependency list full of `x` and `hf` is worse than none.
 fn dotted_identifiers(body: &str) -> Vec<DeclName> {
     let mut out: Vec<DeclName> = Vec::new();
-    let mut cur = String::new();
-    let push = |cur: &mut String, out: &mut Vec<DeclName>| {
-        let t = std::mem::take(cur);
+    for t in identifiers(body) {
         let looks_qualified = t.contains('.') && !t.starts_with('.') && !t.ends_with('.');
-        let looks_global = t.chars().next().is_some_and(char::is_uppercase);
+        let looks_global = t.chars().next().is_some_and(char::is_uppercase) || t.starts_with('«');
         if (looks_qualified || looks_global) && !t.chars().all(|c| c.is_numeric() || c == '.') {
             let n = DeclName::new(t);
             if !n.is_internal() && !out.contains(&n) {
                 out.push(n);
             }
         }
-    };
-    for c in body.chars() {
-        if c.is_alphanumeric() || c == '.' || c == '_' || c == '\'' {
-            cur.push(c);
-        } else if !cur.is_empty() {
-            push(&mut cur, &mut out);
-        }
-    }
-    if !cur.is_empty() {
-        push(&mut cur, &mut out);
     }
     out.sort();
     out
 }
 
 fn mentions_sorry(body: &str) -> bool {
-    body.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == "sorry")
+    identifiers(body).contains(&"sorry")
+}
+
+fn identifiers(body: &str) -> Vec<&str> {
+    let (mut start, mut quoted) = (None, false);
+    let mut out = Vec::new();
+    for (i, c) in body.char_indices() {
+        if c == '«' {
+            quoted = true;
+        }
+        if quoted || c == '»' || c.is_alphanumeric() || "._'!?".contains(c) {
+            start.get_or_insert(i);
+        } else if let Some(at) = start.take() {
+            out.push(&body[at..i]);
+        }
+        if c == '»' {
+            quoted = false;
+        }
+    }
+    if let Some(at) = start {
+        out.push(&body[at..]);
+    }
+    out
 }
 
 /// A declaration's statement as its source spells it: the lines of `span`,
@@ -531,6 +636,13 @@ fn body_start(s: &str) -> Option<usize> {
             continue;
         }
         match (c, next) {
+            ('«', _) => {
+                for (_, c) in chars.by_ref() {
+                    if c == '»' {
+                        break;
+                    }
+                }
+            }
             ('/', Some('-')) => {
                 comment = 1;
                 chars.next();

@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(default)]
+    pub format: Option<i64>,
     pub name: String,
     pub source: String,
     pub module: String,
@@ -28,6 +30,8 @@ pub struct Row {
     pub concl: Option<String>,
     #[serde(default)]
     pub concl_args: Vec<String>,
+    #[serde(default)]
+    pub concl_explicit_args: Option<Vec<String>>,
     #[serde(default)]
     pub consts: Vec<String>,
     #[serde(default)]
@@ -59,6 +63,9 @@ impl From<Row> for Decl {
             shape: Shape::new(
                 r.concl.map(DeclName::new),
                 r.concl_args.iter().map(|a| ArgHead::parse(a)).collect(),
+            )
+            .with_explicit_args(
+                r.concl_explicit_args.map(|args| args.iter().map(|a| ArgHead::parse(a)).collect()),
             ),
             consts: r.consts.into_iter().map(DeclName::new).collect(),
             deps: r.deps.into_iter().map(DeclName::new).collect(),
@@ -77,6 +84,7 @@ impl From<Row> for Decl {
 impl From<&Decl> for Row {
     fn from(d: &Decl) -> Row {
         Row {
+            format: Some(DUMP_FORMAT),
             name: d.name.to_string(),
             source: d.source.to_string(),
             module: d.module.to_string(),
@@ -84,6 +92,11 @@ impl From<&Decl> for Row {
             ty: d.ty.clone(),
             concl: d.shape.concl.as_ref().map(DeclName::to_string),
             concl_args: d.shape.args.iter().map(|a| a.as_str().to_string()).collect(),
+            concl_explicit_args: d
+                .shape
+                .explicit_args
+                .as_ref()
+                .map(|args| args.iter().map(|a| a.as_str().to_string()).collect()),
             consts: d.consts.iter().map(DeclName::to_string).collect(),
             deps: d.deps.iter().map(DeclName::to_string).collect(),
             doc: d.doc.clone(),
@@ -97,7 +110,8 @@ impl From<&Decl> for Row {
 }
 
 /// What a dump holds, as a number that changes when `lean/dump.lean` writes
-/// something an older one did not: 2 is the first with `unfolds`.
+/// something an older one did not: 2 is the first with `unfolds`; 3 records
+/// explicit argument heads and keeps public `ofNat` constants.
 ///
 /// Read off the file rather than assumed from the build reading it, because a
 /// dump outlives the `dt` that wrote it: `dt index` loads whatever is on disk,
@@ -105,17 +119,20 @@ impl From<&Decl> for Row {
 /// new the `dt` that loaded them. Never more than
 /// [`ROW_FORMAT`](crate::application::ports::ROW_FORMAT), which rows from a
 /// current dump are in.
-pub const DUMP_FORMAT: i64 = 2;
+pub const DUMP_FORMAT: i64 = 3;
 
-/// The format of the dump at `path`, told by its first row: one written with
-/// an `unfolds` field, `null` or not, is current. A dump with no rows is
-/// missing nothing.
+/// The format of the dump at `path`, told by its first row. Before the explicit
+/// version, presence of `unfolds` distinguishes format 2 from format 1.
 pub fn dump_format(path: &Path) -> Result<i64> {
     let file =
         std::fs::File::open(path).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
     for line in BufReader::new(file).lines() {
         if let Ok(serde_json::Value::Object(row)) = serde_json::from_str(&line?) {
-            return Ok(if row.contains_key("unfolds") { DUMP_FORMAT } else { 1 });
+            return Ok(row
+                .get("format")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(if row.contains_key("unfolds") { 2 } else { 1 })
+                .min(DUMP_FORMAT));
         }
     }
     Ok(DUMP_FORMAT)
@@ -301,6 +318,22 @@ impl DeclRepo for JsonlRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_dumps_do_not_become_current_when_read_by_a_new_build() {
+        let path = tempdir().join("versioned.jsonl");
+        for (row, expected) in [
+            ("{}", 1),
+            ("{\"unfolds\":null}", 2),
+            ("{\"unfolds\":null,\"format\":3}", DUMP_FORMAT),
+            ("{\"unfolds\":null,\"format\":100}", DUMP_FORMAT),
+        ] {
+            std::fs::write(&path, row).unwrap();
+            assert_eq!(dump_format(&path).unwrap(), expected, "{row}");
+        }
+        std::fs::write(&path, serde_json::to_string(&Row::from(&decl())).unwrap()).unwrap();
+        assert_eq!(dump_format(&path).unwrap(), DUMP_FORMAT);
+    }
 
     fn decl() -> Decl {
         let mut d =

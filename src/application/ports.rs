@@ -210,7 +210,9 @@ pub struct Provenance {
 /// 2 is the first with `unfolds`, which only a dump can supply: rows loaded
 /// from an older dump are recorded in the format that dump was, so the source
 /// stays behind until it is dumped again.
-pub const ROW_FORMAT: i64 = 2;
+/// 3 preserves `ofNat` constants, records explicit argument heads, and carries
+/// its format explicitly.
+pub const ROW_FORMAT: i64 = 3;
 
 impl Provenance {
     /// The writer half, filled in by this build, with the rest left to the

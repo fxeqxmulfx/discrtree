@@ -11,7 +11,24 @@ pub struct DeclName(String);
 
 impl DeclName {
     pub fn new(s: impl Into<String>) -> Self {
-        DeclName(s.into())
+        let s = s.into();
+        let written = s.strip_prefix("_root_.").unwrap_or(&s);
+        if !written.contains('«') {
+            return DeclName(if written.len() == s.len() { s } else { written.to_string() });
+        }
+        // Lean's Name.toString drops quoting for ordinary identifier parts.
+        let parts = components(written).map(|part| {
+            match part.strip_prefix('«').and_then(|p| p.strip_suffix('»')) {
+                Some(p)
+                    if p.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                        && p.chars().all(|c| c.is_ascii_alphanumeric() || "_'!?".contains(c)) =>
+                {
+                    p
+                }
+                _ => part,
+            }
+        });
+        DeclName(parts.collect::<Vec<_>>().join("."))
     }
 
     pub fn as_str(&self) -> &str {
@@ -24,14 +41,14 @@ impl DeclName {
 
     /// `Real.exp_le_exp` → `Real`.
     pub fn namespace(&self) -> Option<&str> {
-        self.0.rsplit_once('.').map(|(ns, _)| ns)
+        separator_positions(&self.0).last().map(|i| &self.0[..i])
     }
 
     /// `Mathlib.Order.Filter.Basic.foo` → `Mathlib`, and a name with no
     /// namespace at all → itself. The outermost namespace rather than the
     /// innermost, because that is the part a corpus owns.
     pub fn namespace_root(&self) -> &str {
-        self.0.split_once('.').map_or(&self.0, |(root, _)| root)
+        separator_positions(&self.0).next().map_or(&self.0, |i| &self.0[..i])
     }
 
     /// The words of an argument that is several names the shell passed as
@@ -51,7 +68,7 @@ impl DeclName {
             }
             depth == 0 && c.is_whitespace()
         });
-        spaced.then(|| arg.split_whitespace().collect())
+        spaced.then(|| name_list(arg).collect())
     }
 
     /// Whether this name, as a query spells it, names `constant`: the same
@@ -70,9 +87,24 @@ impl DeclName {
         self.0.starts_with('.')
     }
 
+    /// Pretty printing can omit leading namespaces or an exported field's
+    /// owner, as `Std.PRange.succ` for `Std.PRange.UpwardEnumerable.succ`.
+    pub(crate) fn abbreviates(&self, constant: &DeclName) -> bool {
+        self == constant
+            || (self.base() == constant.base() && self.namespace().is_none())
+            || DeclName::new(format!(".{self}")).names(constant)
+            || (self.base() == constant.base()
+                && self.namespace().is_some_and(|ns| {
+                    constant.namespace().is_some_and(|actual| {
+                        actual == ns
+                            || actual.strip_prefix(ns).is_some_and(|rest| rest.starts_with('.'))
+                    })
+                }))
+    }
+
     /// `Real.exp_le_exp` → `exp_le_exp`.
     pub fn base(&self) -> &str {
-        self.0.rsplit_once('.').map_or(&self.0, |(_, b)| b)
+        separator_positions(&self.0).last().map_or(&self.0, |i| &self.0[i + 1..])
     }
 
     /// Names Lean generates and nobody searches for. The dump filters these
@@ -107,6 +139,45 @@ impl DeclName {
     }
 }
 
+/// Whitespace and dots inside `«…»` belong to a name component. The stored
+/// argument-head list uses spaces between names, so it needs the same rule.
+pub(crate) fn name_list(s: &str) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    s.split(move |c: char| {
+        match c {
+            '«' => quoted = true,
+            '»' => quoted = false,
+            _ => {}
+        }
+        !quoted && c.is_whitespace()
+    })
+    .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn components(s: &str) -> impl Iterator<Item = &str> {
+    let mut quoted = false;
+    s.split(move |c| {
+        match c {
+            '«' => quoted = true,
+            '»' => quoted = false,
+            _ => {}
+        }
+        !quoted && c == '.'
+    })
+}
+
+fn separator_positions(s: &str) -> impl Iterator<Item = usize> + '_ {
+    let mut quoted = false;
+    s.char_indices().filter_map(move |(i, c)| {
+        match c {
+            '«' => quoted = true,
+            '»' => quoted = false,
+            _ => {}
+        }
+        (!quoted && c == '.').then_some(i)
+    })
+}
+
 /// `foo.eq_1`, `foo.proof_3`, `foo.match_2`: Lean numbers what it generates.
 ///
 /// The number is the whole distinction. Matching the prefix alone also removes
@@ -132,7 +203,7 @@ impl From<&str> for DeclName {
 
 impl From<String> for DeclName {
     fn from(s: String) -> Self {
-        DeclName(s)
+        DeclName::new(s)
     }
 }
 
@@ -232,6 +303,19 @@ mod tests {
         let bare = DeclName::new("Nat");
         assert_eq!(bare.namespace(), None);
         assert_eq!(bare.base(), "Nat");
+    }
+
+    #[test]
+    fn dots_and_spaces_inside_escaped_components_do_not_split_names() {
+        let n = DeclName::new("Foo.«a.b c»");
+        assert_eq!(n.namespace(), Some("Foo"));
+        assert_eq!(n.base(), "«a.b c»");
+        assert_eq!(n.namespace_root(), "Foo");
+        assert_eq!(DeclName::new("«a.b».Foo").namespace_root(), "«a.b»");
+        assert_eq!(name_list("Foo.«a.b c» Nat").collect::<Vec<_>>(), ["Foo.«a.b c»", "Nat"]);
+        assert_eq!(DeclName::glued("Foo.«a b» Nat"), Some(vec!["Foo.«a b»", "Nat"]));
+        assert_eq!(DeclName::new("Foo.«ordinary»"), DeclName::new("Foo.ordinary"));
+        assert_eq!(DeclName::new("_root_.Foo.ordinary"), DeclName::new("Foo.ordinary"));
     }
 
     /// Field notation names a constant whose namespace is the receiver's

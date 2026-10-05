@@ -29,7 +29,7 @@ namespace Discrtree
 def generatedSuffixes : Array String :=
   #["rec", "recOn", "casesOn", "below", "brecOn", "binductionOn", "ibelow",
     "ndrec", "ndrecOn", "noConfusion", "noConfusionType", "toCtorIdx",
-    "injEq", "inj", "sizeOf_spec", "sizeOf_inst", "ofNat", "match_1",
+    "injEq", "inj", "sizeOf_spec", "sizeOf_inst", "match_1",
     "eq_def", "eq_1", "eq_2", "eq_3", "eq_4", "proof_1", "proof_2"]
 
 /-- Whether a declaration is worth a row. -/
@@ -43,9 +43,10 @@ def keep (n : Name) : Bool := Id.run do
   return true
 
 /-- Head symbol of an expression: the constant it applies, if any. -/
-def headSym (e : Expr) : Option Name :=
+partial def headSym (e : Expr) : Option Name :=
   match e.getAppFn with
   | .const n _ => some n
+  | .mdata _ b => headSym b
   | _ => none
 
 /-- The conclusion of a statement, with every binder stripped. Loose bound
@@ -64,6 +65,27 @@ def conclArgs (e : Expr) : Array String :=
     match headSym a with
     | some n => n.toString
     | none   => "_"
+
+/-- Unlike leading type parameters, instance arguments can occur between the
+arguments a reader writes. Keep their visibility from the constant's binders
+so surface queries need not guess where Lean inserted them. -/
+partial def explicitArgs (type : Expr) (args : List Expr)
+    (heads : Array String := #[]) : Array String :=
+  match args, type with
+  | [], _ => heads
+  | a :: rest, .forallE _ _ body info =>
+    let heads := if info == .default then
+      heads.push ((headSym a).map Name.toString |>.getD "_") else heads
+    explicitArgs (body.instantiate1 a) rest heads
+  | _, .mdata _ body => explicitArgs body args heads
+  | _, .letE _ _ value body _ => explicitArgs (body.instantiate1 value) args heads
+  | a :: rest, _ =>
+    explicitArgs type rest (heads.push ((headSym a).map Name.toString |>.getD "_"))
+
+def conclExplicitArgs (env : Environment) (e : Expr) : Option (Array String) := do
+  let name ← headSym e
+  let ci ← env.find? name
+  pure (explicitArgs ci.type e.getAppArgs.toList)
 
 /-- What a declaration is, in the words `dt find --kind` takes.
 
@@ -164,6 +186,7 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
   let deps := if withDeps then (value?.map depsOf).getD #[] else #[]
   let hasSorry := ci.type.hasSorry || (value?.map (·.hasSorry)).getD false
   pure <| Json.mkObj [
+    ("format",     Json.num 3),
     ("name",       Json.str name.toString),
     ("source",     Json.str source),
     ("module",     Json.str module.toString),
@@ -173,6 +196,9 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
                    | some n => Json.str n.toString
                    | none   => Json.null),
     ("concl_args", Json.arr ((conclArgs concl).map Json.str)),
+    ("concl_explicit_args", match conclExplicitArgs env concl with
+                           | some args => Json.arr (args.map Json.str)
+                           | none => Json.null),
     ("consts",     Json.arr ((depsOf ci.type).map Json.str)),
     ("deps",       Json.arr (deps.map Json.str)),
     ("doc",        match doc with

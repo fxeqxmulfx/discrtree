@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS decl (
   type        TEXT NOT NULL,
   concl       TEXT,
   concl_args  TEXT NOT NULL DEFAULT '',
+  concl_explicit_args TEXT,
   doc         TEXT,
   sorry       INTEGER NOT NULL DEFAULT 0,
   line_start  INTEGER,
@@ -110,7 +111,7 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// The one index the side tables have, and the one thing a load does not need.
 ///
@@ -155,9 +156,32 @@ const BULK_CACHE_KIB: i64 = -65_536;
 const REBUILD_SHARE: usize = 16;
 
 const FTS: &str = r#"
+CREATE VIEW IF NOT EXISTS decl_text AS
+  SELECT id, text_tokens(name) AS name, text_tokens(type) AS type, text_tokens(doc) AS doc FROM decl;
 CREATE VIRTUAL TABLE IF NOT EXISTS decl_fts
-  USING fts5(name, type, doc, content='decl', content_rowid='id', tokenize='unicode61');
+  USING fts5(name, type, doc, content='decl_text', content_rowid='id', tokenize='ascii');
 "#;
+
+fn init_fts(conn: &Connection) -> Result<()> {
+    let existing: Option<String> = conn
+        .query_row("SELECT sql FROM sqlite_master WHERE name = 'decl_fts'", [], |r| r.get(0))
+        .optional()?;
+    if existing.as_ref().is_some_and(|sql| !sql.contains("content='decl_text'")) {
+        // Only the disposable text index changes. Keep declarations and their
+        // dependencies, and upgrade old indexes atomically on opening them.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch("DROP TABLE decl_fts;")?;
+        tx.execute_batch(FTS)?;
+        tx.execute_batch("INSERT INTO decl_fts(decl_fts) VALUES('rebuild');")?;
+        tx.commit()?;
+    } else {
+        // SQLite can be built without FTS5; scalar text matching still works.
+        if conn.execute_batch(FTS).is_ok() && existing.is_none() {
+            conn.execute_batch("INSERT INTO decl_fts(decl_fts) VALUES('rebuild');")?;
+        }
+    }
+    Ok(())
+}
 
 /// Refuse a database written by a different build rather than silently reading
 /// it wrong. A file with no version and no tables is simply new.
@@ -191,20 +215,28 @@ fn check_version(conn: &Connection) -> Result<()> {
 /// so the sources keep the row format they were written with, and that is what
 /// tells `dt status` they are behind.
 fn migrate(conn: &Connection, found: i64) -> Result<bool> {
+    if !(2..=5).contains(&found) {
+        return Ok(false);
+    }
+    // Commit columns and their version together. A later text-index rebuild
+    // may fail or be interrupted; reopening must not add these columns again.
+    let tx = conn.unchecked_transaction()?;
     if found == 2 {
-        conn.execute_batch(
+        tx.execute_batch(
             "ALTER TABLE source ADD COLUMN writer TEXT; \
              ALTER TABLE source ADD COLUMN row_format INTEGER;",
         )?;
     }
     if found == 2 || found == 3 {
-        conn.execute_batch("ALTER TABLE decl ADD COLUMN statement TEXT;")?;
+        tx.execute_batch("ALTER TABLE decl ADD COLUMN statement TEXT;")?;
     }
     if (2..=4).contains(&found) {
-        conn.execute_batch("ALTER TABLE decl ADD COLUMN unfolds TEXT;")?;
-        return Ok(true);
+        tx.execute_batch("ALTER TABLE decl ADD COLUMN unfolds TEXT;")?;
     }
-    Ok(false)
+    tx.execute_batch("ALTER TABLE decl ADD COLUMN concl_explicit_args TEXT;")?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(true)
 }
 
 pub struct SqliteIndex {
@@ -259,10 +291,43 @@ impl SqliteIndex {
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
             heads_named,
         )?;
+        conn.create_scalar_function(
+            "arg_heads_match",
+            4,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            arg_heads_match,
+        )?;
+        // SQLite's built-in lower only folds ASCII. Lean identifiers also
+        // contain letters such as Γ, and --name follows Rust's Unicode rule.
+        conn.create_scalar_function(
+            "unicode_lower",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<String>(0)?.to_lowercase()),
+        )?;
+        conn.create_scalar_function(
+            "text_contains",
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                Ok(crate::domain::query::text_contains(
+                    &ctx.get::<String>(0)?,
+                    &ctx.get::<String>(1)?,
+                ))
+            },
+        )?;
+        conn.create_scalar_function(
+            "text_tokens",
+            1,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                Ok(crate::domain::query::text_tokens(
+                    ctx.get::<Option<String>>(0)?.as_deref().unwrap_or(""),
+                ))
+            },
+        )?;
         conn.execute_batch(SCHEMA)?;
-        // FTS5 is a compile-time option. Without it everything except free-text
-        // search still works, so a missing module is not fatal.
-        let _ = conn.execute_batch(FTS);
+        init_fts(&conn)?;
         // A run that died mid-load left the side index dropped. Creating it
         // here is what makes that self-healing.
         conn.execute_batch(SIDE_INDEXES)?;
@@ -342,7 +407,7 @@ impl SqliteIndex {
             // can still say what they were indexed under.
             self.conn.execute(
                 "INSERT INTO decl_fts(decl_fts, rowid, name, type, doc)
-                 SELECT 'delete', id, name, type, doc FROM decl WHERE source = ?1",
+                 SELECT 'delete', id, text_tokens(name), text_tokens(type), text_tokens(doc) FROM decl WHERE source = ?1",
                 params![source.as_str()],
             )?;
         }
@@ -410,6 +475,7 @@ impl SqliteIndex {
 fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
     let concl: Option<String> = r.get("concl")?;
     let args: String = r.get("concl_args")?;
+    let explicit_args: Option<String> = r.get("concl_explicit_args")?;
     let start: Option<u32> = r.get("line_start")?;
     let end: Option<u32> = r.get("line_end")?;
     Ok(Decl {
@@ -420,7 +486,11 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
         ty: r.get("type")?,
         shape: Shape::new(
             concl.map(DeclName::new),
-            args.split_whitespace().map(ArgHead::parse).collect(),
+            crate::domain::name::name_list(&args).map(ArgHead::parse).collect(),
+        )
+        .with_explicit_args(
+            explicit_args
+                .map(|args| crate::domain::name::name_list(&args).map(ArgHead::parse).collect()),
         ),
         consts: Vec::new(),
         deps: Vec::new(),
@@ -493,19 +563,27 @@ impl SqliteIndex {
         for (i, id) in ids.iter().enumerate() {
             at.entry(*id).or_default().push(i);
         }
-        let placeholders = vec!["?"; ids.len()].join(",");
-        for &(table, column) in tables {
-            let sql =
-                format!("SELECT decl_id, {column} FROM {table} WHERE decl_id IN ({placeholders})");
-            let mut stmt = self.conn.prepare(&sql)?;
-            let mut found = stmt.query(rusqlite::params_from_iter(&ids))?;
-            while let Some(row) = found.next()? {
-                let Some(idx) = at.get(&row.get::<_, i64>(0)?) else { continue };
-                let value = DeclName::new(row.get::<_, String>(1)?);
-                for i in idx {
-                    let d = &mut decls[*i];
-                    let list = if table == "uses" { &mut d.consts } else { &mut d.deps };
-                    list.push(value.clone());
+        let mut ids = ids;
+        ids.sort_unstable();
+        ids.dedup();
+        // A count involving unfoldings can read more rows than SQLite permits
+        // bound parameters in one statement. Keep list reads bounded too.
+        for ids in ids.chunks(512) {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            for &(table, column) in tables {
+                let sql = format!(
+                    "SELECT decl_id, {column} FROM {table} WHERE decl_id IN ({placeholders})"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let mut found = stmt.query(rusqlite::params_from_iter(ids))?;
+                while let Some(row) = found.next()? {
+                    let Some(idx) = at.get(&row.get::<_, i64>(0)?) else { continue };
+                    let value = DeclName::new(row.get::<_, String>(1)?);
+                    for i in idx {
+                        let d = &mut decls[*i];
+                        let list = if table == "uses" { &mut d.consts } else { &mut d.deps };
+                        list.push(value.clone());
+                    }
                 }
             }
         }
@@ -561,8 +639,9 @@ impl DeclRepo for SqliteIndex {
     /// names in Mathlib -- which costs a few rows and changes no answer,
     /// because what a head is called is decided again in `commonest_called`.
     fn heads_called(&self, word: &str) -> Result<Vec<DeclName>> {
-        let ends = format!("%.{word}");
-        let mentions = format!("%.{word}%");
+        let asked = DeclName::new(word);
+        let ends = format!("%.{}", asked.base());
+        let mentions = format!("%.{}%", asked.base());
         let mut stmt = self.conn.prepare_cached(
             "SELECT concl, concl_args, type FROM decl WHERE concl LIKE ?1 OR concl_args LIKE ?2",
         )?;
@@ -574,7 +653,7 @@ impl DeclRepo for SqliteIndex {
             let heads = concl.into_iter().map(DeclName::new);
             found.push((
                 row.get(2)?,
-                heads.chain(args.split_whitespace().map(DeclName::new)).collect(),
+                heads.chain(crate::domain::name::name_list(&args).map(DeclName::new)).collect(),
             ));
         }
         Ok(decl::commonest_called(
@@ -656,9 +735,8 @@ impl DeclRepo for SqliteIndex {
     }
 
     fn find(&self, query: &Query) -> Result<Vec<Decl>> {
-        // Argument shape is checked in the domain: it is positional matching
-        // with an alignment search, which SQL would express badly and slowly.
-        // Before anything is copied, which a row that fails it has no use for.
+        // Recheck the SQL argument filter with the domain's matching rule
+        // before copying any rows or loading their constant lists.
         let rows = self.with_matching(query, |rows| {
             rows.iter()
                 .filter(|(_, d)| query.shape.matches(&d.shape))
@@ -683,20 +761,12 @@ impl DeclRepo for SqliteIndex {
         Ok(decls.into_iter().filter(|d| query.answers_shape_and_uses(d)).collect())
     }
 
-    /// Counted in SQL, without reading a row. A shape is matched in the
-    /// domain, so a query that asks for one is counted by matching it: the
-    /// rows have to be read either way, and a count that ignored the shape
-    /// would be a different query's answer.
+    /// Count every match, independently of the search's result window.
     fn count(&self, query: &Query) -> Result<usize> {
         // Which rows may leave out a use is decided on the constants of each,
         // which only `find` reads.
         if !query.excusable().is_empty() {
-            return Ok(self.find(query)?.len());
-        }
-        if !query.shape.is_empty() {
-            return self.with_matching(query, |rows| {
-                rows.iter().filter(|(_, d)| query.shape.matches(&d.shape)).count()
-            });
+            return Ok(self.find(&Query { limit: usize::MAX, ..query.clone() })?.len());
         }
         let (filter, binds) = build_filter(query, self.has_fts());
         let mut stmt = self.conn.prepare(&format!("SELECT count(*) FROM decl d{filter}"))?;
@@ -736,10 +806,10 @@ impl DeclRepo for SqliteIndex {
             filter.push_str(" AND d.source = ?");
             binds.push(s.to_string());
         }
-        if let Some(m) = &within.module {
-            filter.push_str(" AND (d.module = ? OR d.module LIKE ?)");
+        if let Some(m) = within.module.as_ref().filter(|m| !m.is_empty()) {
+            filter.push_str(" AND (d.module = ? OR d.module GLOB ?)");
             binds.push(m.clone());
-            binds.push(format!("{m}.%"));
+            binds.push(format!("{}.*", glob_escaped(m)));
         }
         if !within.generated {
             filter.push_str(&format!(" AND {NOT_GENERATED}"));
@@ -816,12 +886,30 @@ const NOT_GENERATED: &str = "NOT (d.name LIKE '%.ctorIdx' OR d.name LIKE '%.ctor
 /// The test of a shape's heads, the conclusion's and its named arguments', if
 /// it has any, with its binds pushed.
 ///
-/// A subquery that hands back ids, because it reads only `decl_heads`: the
-/// heads are tested there, and a row is read once it has passed. The rows it
+/// A subquery that hands back ids: the heads are tested before a row is read,
+/// and scope conditions also apply before expensive argument checks. The rows it
 /// names come in order of id, which is what lets a shape query be read in the
 /// order the rows were indexed and still stop at its window.
 fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
+    if q.shape.is_empty() {
+        return None;
+    }
     let mut tests: Vec<String> = Vec::new();
+    // An uncorrelated subquery cannot inherit the outer query's scope. Without
+    // these filters, --in still compares arguments across the whole library.
+    if let Some(m) = q.module.as_ref().filter(|m| !m.is_empty()) {
+        tests.push("(module = ? OR module GLOB ?)".into());
+        binds.push(m.clone());
+        binds.push(format!("{}.*", glob_escaped(m)));
+    }
+    if let Some(s) = &q.source {
+        tests.push("source = ?".into());
+        binds.push(s.to_string());
+    }
+    if let Some(n) = q.name_asked() {
+        tests.push("unicode_lower(name) GLOB ?".into());
+        binds.push(format!("*{}*", glob_of(n.pieces())));
+    }
     if let Some(c) = &q.shape.concl {
         match c.is_field() {
             true => {
@@ -854,6 +942,31 @@ fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
         tests.push("heads_named(concl_args, ?)".into());
         binds.push(spaced(&names));
     }
+    if !q.shape.args.is_empty() {
+        // The unordered head tests above select candidates cheaply. Check
+        // their alignment before LIMIT so decoys cannot hide a later match.
+        let explicit = if q.shape.include_implicit { "NULL" } else { "concl_explicit_args" };
+        let anchored = q.shape.concl.as_ref().is_some_and(|c| !c.is_field());
+        let prefix = match (anchored, q.shape.include_implicit) {
+            (false, _) => "0",
+            (true, true) => "1",
+            (true, false) => "concl_explicit_args IS NOT NULL",
+        };
+        tests.push(format!("arg_heads_match(concl_args, ?, {explicit}, {prefix})"));
+        let args: Vec<Option<Vec<&str>>> = q
+            .shape
+            .args
+            .iter()
+            .map(|a| match a {
+                ArgHead::Any => None,
+                ArgHead::Named(n) => Some(vec![n.as_str()]),
+                ArgHead::Reducible { class, .. } => {
+                    Some(class.iter().map(DeclName::as_str).collect())
+                }
+            })
+            .collect();
+        binds.push(serde_json::to_string(&args).expect("strings serialize"));
+    }
     (!tests.is_empty())
         .then(|| format!("d.id IN (SELECT id FROM decl WHERE {})", tests.join(" AND ")))
 }
@@ -872,8 +985,35 @@ fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
 fn heads_named(ctx: &Context<'_>) -> rusqlite::Result<bool> {
     let names =
         ctx.get_or_create_aux(1, |v| -> rusqlite::Result<Names> { Ok(Names::read(v.as_str()?)) })?;
-    let heads = ctx.get_raw(0).as_bytes()?;
-    Ok(heads.split(|b| *b == b' ').any(|h| names.name(h)))
+    let heads = ctx.get_raw(0).as_str()?;
+    if heads.contains('«') {
+        return Ok(crate::domain::name::name_list(heads).any(|h| names.name(h.as_bytes())));
+    }
+    Ok(heads.as_bytes().split(|b| *b == b' ').any(|h| names.name(h)))
+}
+
+fn arg_heads_match(ctx: &Context<'_>) -> rusqlite::Result<bool> {
+    let args = ctx.get_or_create_aux(1, |v| -> rusqlite::Result<Vec<Option<Names>>> {
+        let args: Vec<Option<Vec<String>>> = serde_json::from_str(v.as_str()?)
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        Ok(args
+            .into_iter()
+            .map(|a| {
+                a.map(|names| Names::from_names(names.into_iter().map(DeclName::new).collect()))
+            })
+            .collect())
+    })?;
+    let explicit = ctx.get::<Option<String>>(2)?;
+    let heads = explicit.as_deref().unwrap_or(ctx.get_raw(0).as_str()?);
+    let heads: Vec<&str> = crate::domain::name::name_list(heads).collect();
+    let prefix = ctx.get::<bool>(3)?;
+    Ok(args.is_empty()
+        || (heads.len() >= args.len()
+            && heads.windows(args.len()).take(if prefix { 1 } else { usize::MAX }).any(|window| {
+                args.iter().zip(window).all(|(asked, head)| {
+                    asked.as_ref().is_none_or(|names| *head != "_" && names.name(head.as_bytes()))
+                })
+            })))
 }
 
 /// The names a [`heads_named`] call was given: the whole ones apart from the
@@ -885,8 +1025,11 @@ struct Names {
 
 impl Names {
     fn read(names: &str) -> Names {
-        let (fields, whole) =
-            names.split_whitespace().map(DeclName::new).partition(DeclName::is_field);
+        Self::from_names(crate::domain::name::name_list(names).map(DeclName::new).collect())
+    }
+
+    fn from_names(names: Vec<DeclName>) -> Names {
+        let (fields, whole) = names.into_iter().partition(DeclName::is_field);
         let bytes =
             |v: Vec<DeclName>| v.into_iter().map(|n| n.into_string().into_bytes().into()).collect();
         Names { whole: bytes(whole), fields: bytes(fields) }
@@ -910,7 +1053,7 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(n) = q.name_asked() {
-        where_clauses.push("lower(d.name) GLOB ?".into());
+        where_clauses.push("unicode_lower(d.name) GLOB ?".into());
         binds.push(format!("*{}*", glob_of(n.pieces())));
     }
     if let Some(heads) = heads_filter(q, &mut binds) {
@@ -940,10 +1083,10 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         where_clauses.push(format!("({uses} OR {heads})"));
         binds.extend(instead.iter().map(|names| spaced(names)));
     }
-    if let Some(m) = &q.module {
-        where_clauses.push("(d.module = ? OR d.module LIKE ?)".into());
+    if let Some(m) = q.module.as_ref().filter(|m| !m.is_empty()) {
+        where_clauses.push("(d.module = ? OR d.module GLOB ?)".into());
         binds.push(m.clone());
-        binds.push(format!("{m}.%"));
+        binds.push(format!("{}.*", glob_escaped(m)));
     }
     if let Some(s) = &q.source {
         where_clauses.push("d.source = ?".into());
@@ -968,18 +1111,23 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         binds.push(decl::GENERATED_ELIM.into());
     }
     if !q.text.is_empty() {
-        if has_fts {
+        let words: Vec<String> =
+            q.text.iter().filter(|t| t.chars().any(char::is_alphanumeric)).cloned().collect();
+        if has_fts && !words.is_empty() {
             // One MATCH for every word: FTS5 already ANDs the terms of a query,
             // so the words go into one expression rather than one subquery each.
             where_clauses
                 .push("d.id IN (SELECT rowid FROM decl_fts WHERE decl_fts MATCH ?)".into());
-            binds.push(fts_query(&q.text));
-        } else {
-            for t in &q.text {
+            binds.push(fts_query(&words));
+        }
+        for t in &q.text {
+            // FTS indexes words; `↔`, `^` and similar symbols have no
+            // tokens to MATCH. The domain rule also supplies the fallback
+            // when FTS5 is unavailable, including name and Unicode matching.
+            if !has_fts || !t.chars().any(char::is_alphanumeric) {
                 where_clauses
-                    .push("(lower(d.type) LIKE ? OR lower(coalesce(d.doc,'')) LIKE ?)".into());
-                binds.push(format!("%{}%", t.to_lowercase()));
-                binds.push(format!("%{}%", t.to_lowercase()));
+                    .push("(text_contains(d.name, ?) OR text_contains(d.type, ?) OR text_contains(coalesce(d.doc,''), ?))".into());
+                binds.extend([t.clone(), t.clone(), t.clone()]);
             }
         }
     }
@@ -997,8 +1145,11 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     // in the domain: cutting to `limit` here would drop better answers. The cap
     // is wider when the domain still has a shape to check, since an unknown
     // fraction of what comes back will fail it.
-    let cap =
-        if q.shape.args.is_empty() { (q.limit * 20).max(200) } else { (q.limit * 20).max(20_000) };
+    let cap = q
+        .limit
+        .saturating_mul(20)
+        .max(if q.shape.args.is_empty() { 200 } else { 20_000 })
+        .min(i64::MAX as usize);
     // Which rows the domain gets to rank, not what it ranks them as. `--name`
     // is a substring filter, and the row called exactly what was asked for can
     // sit anywhere among tens of thousands that merely contain it -- outside
@@ -1024,8 +1175,8 @@ fn build_sql(q: &Query, has_fts: bool) -> (String, Vec<String>) {
             binds.push(format!("{n}*"));
             let then = if by_id { ", d.id" } else { "" };
             format!(
-                " ORDER BY (lower(d.name) GLOB ?) DESC, (lower(d.name) GLOB ?) DESC, \
-                 (lower(d.name) GLOB ?) DESC, length(d.name){then}"
+                " ORDER BY (unicode_lower(d.name) GLOB ?) DESC, (unicode_lower(d.name) GLOB ?) DESC, \
+                 (unicode_lower(d.name) GLOB ?) DESC, length(d.name){then}"
             )
         }
         None if by_id => " ORDER BY d.id".into(),
@@ -1056,11 +1207,14 @@ fn glob_escaped(name: &str) -> String {
         .collect()
 }
 
-/// FTS5 treats bare punctuation as syntax. Quoting every term makes a search
-/// for `↔` or `Real.exp` do what the user meant instead of failing. Terms
-/// separated by a space are ANDed, which is what several `--text` mean.
+/// A term's word keys form one phrase; separate terms are ANDed. Symbol-only
+/// terms use `text_contains` instead.
 fn fts_query(words: &[String]) -> String {
-    words.iter().map(|t| format!("\"{}\"", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" ")
+    words
+        .iter()
+        .map(|t| format!("\"{}\"", crate::domain::query::text_tokens(t)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl DeclSink for SqliteIndex {
@@ -1098,8 +1252,8 @@ impl DeclSink for SqliteIndex {
             let mut insert = tx.prepare_cached(
                 "INSERT OR REPLACE INTO decl
                  (name, source, module, kind, type, concl, concl_args, doc, sorry,
-                  line_start, line_end, elaborated, unfolds)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                  line_start, line_end, elaborated, unfolds, concl_explicit_args)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             )?;
             // `OR IGNORE` because the side tables are keyed on (decl_id, value)
             // now. Both producers already deduplicate — the dumper because
@@ -1125,14 +1279,14 @@ impl DeclSink for SqliteIndex {
                 .then(|| {
                     tx.prepare_cached(
                         "INSERT INTO decl_fts(decl_fts, rowid, name, type, doc)
-                         VALUES ('delete', ?1, ?2, ?3, ?4)",
+                         VALUES ('delete', ?1, text_tokens(?2), text_tokens(?3), text_tokens(?4))",
                     )
                 })
                 .transpose()?;
             let mut fts_insert = maintain
                 .then(|| {
                     tx.prepare_cached(
-                        "INSERT INTO decl_fts(rowid, name, type, doc) VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO decl_fts(rowid, name, type, doc) VALUES (?1, text_tokens(?2), text_tokens(?3), text_tokens(?4))",
                     )
                 })
                 .transpose()?;
@@ -1161,6 +1315,11 @@ impl DeclSink for SqliteIndex {
                     }
                 }
                 let args: Vec<&str> = d.shape.args.iter().map(ArgHead::as_str).collect();
+                let explicit_args = d
+                    .shape
+                    .explicit_args
+                    .as_ref()
+                    .map(|args| args.iter().map(ArgHead::as_str).collect::<Vec<_>>().join(" "));
                 insert.execute(params![
                     d.name.as_str(),
                     d.source.as_str(),
@@ -1175,6 +1334,7 @@ impl DeclSink for SqliteIndex {
                     d.span.map(|s| s.end),
                     d.elaborated as i64,
                     d.unfolds.as_ref().map(DeclName::as_str),
+                    explicit_args,
                 ])?;
                 // A replaced row is deleted and re-inserted, so this id is
                 // always fresh and its side rows are always new. Clearing them
@@ -1224,6 +1384,91 @@ impl DeclSink for SqliteIndex {
 mod tests {
     use super::*;
 
+    #[test]
+    fn module_scoped_search_only_checks_argument_alignments_in_that_module() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let mut db = SqliteIndex::in_memory().unwrap();
+        let rows: Vec<_> = (0..2048)
+            .map(|i| {
+                let module = if i == 0 { "Picked.Child" } else { "PickedOther" };
+                let source = if i == 0 { "picked" } else { "core" };
+                let mut row = Decl::stub(&format!("Corpus.row{i}"), source, module);
+                row.shape =
+                    Shape::new(Some("Eq".into()), vec![ArgHead::parse("A"), ArgHead::parse("B")]);
+                row
+            })
+            .collect();
+        db.put(&rows).unwrap();
+        db.finish().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        db.conn
+            .create_scalar_function(
+                "arg_heads_match",
+                4,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                move |ctx| {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    arg_heads_match(ctx)
+                },
+            )
+            .unwrap();
+        let q =
+            Query { shape: rows[0].shape.clone(), module: Some("Picked".into()), ..Query::new() };
+        assert_eq!(db.find(&q).unwrap(), vec![rows[0].clone()]);
+        assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+        assert!(
+            calls.load(Ordering::Relaxed) <= 2,
+            "checked {} alignments outside the module",
+            calls.load(Ordering::Relaxed)
+        );
+        for q in [
+            Query { module: None, source: Some("picked".into()), ..q.clone() },
+            Query { module: None, name: Some("Corpus.row0".into()), ..q },
+        ] {
+            calls.store(0, Ordering::Relaxed);
+            assert_eq!(db.find(&q).unwrap(), vec![rows[0].clone()]);
+            assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+            assert!(
+                calls.load(Ordering::Relaxed) <= 2,
+                "checked {} alignments outside the scope",
+                calls.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    #[test]
+    fn maintained_unicode_words_stay_consistent_with_the_external_content() {
+        let mut db = SqliteIndex::in_memory().unwrap();
+        let mut rows: Vec<_> =
+            (0..320).map(|i| Decl::stub(&format!("Core.row{i}"), "core", "Core")).collect();
+        let mut edited = Decl::stub("Project.row", "project", "Project");
+        edited.doc = Some("café ς \u{e000}word".into());
+        rows.push(edited.clone());
+        db.put(&rows).unwrap();
+        db.finish().unwrap();
+        db.clear_source(&SourceId::new("project")).unwrap();
+        db.put(&[edited.clone()]).unwrap();
+        edited.doc = Some("cafe σ e\u{301}x".into());
+        db.put(&[edited.clone()]).unwrap();
+        db.finish().unwrap();
+        for term in ["cafe", "σ", "e x"] {
+            let q = Query { text: vec![term.into()], ..Query::new() };
+            assert_eq!(db.find(&q).unwrap().len(), 1, "{term}");
+        }
+        for term in ["café", "ς", "word"] {
+            let q = Query { text: vec![term.into()], ..Query::new() };
+            assert!(db.find(&q).unwrap().is_empty(), "{term}");
+        }
+        db.conn
+            .execute_batch("INSERT INTO decl_fts(decl_fts, rank) VALUES('integrity-check', 1);")
+            .unwrap();
+    }
+
     /// `heads_named` is [`DeclName::names`] over the heads a row keeps as
     /// text: a whole head, or for a field the end of one, by any of the names
     /// it is given. A name that is part of a head names nothing, and the
@@ -1247,5 +1492,32 @@ mod tests {
             assert!(!named(heads, names), "{names}");
         }
         assert!(!named("", "Real"));
+        assert!(named("Nat Foo.«a b.c» _", "Foo.«a b.c»"));
+        assert!(named("Nat Foo.«a b.c» _", ".«a b.c»"));
+        assert!(!named("Nat Foo.«a b.c» _", "Foo.«a b»"));
+        assert!(!named("Nat Foo.«a b.c» _", "b.c»"));
+    }
+
+    #[test]
+    fn text_search_without_fts_keeps_whole_words_names_and_literal_symbols() {
+        let mut db = SqliteIndex::in_memory().unwrap();
+        let mut row = Decl::stub("Corpus.Γ_result", "fixture", "Corpus");
+        row.ty = "Nat.succ n = n + 1 ↔ True".into();
+        row.doc = Some("Addition and symmetry.".into());
+        db.put(&[row.clone()]).unwrap();
+        db.finish().unwrap();
+        db.conn.execute_batch("DROP TABLE decl_fts").unwrap();
+        for term in ["result", "γ", "Nat.succ", "Addition and", "↔", "_"] {
+            let q = Query { text: vec![term.into()], ..Query::new() };
+            assert!(q.matches(&row), "{term}");
+            assert_eq!(db.find(&q).unwrap().len(), 1, "{term}");
+            assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1, "{term}");
+        }
+        for term in ["res", "sym", "%", "and addition"] {
+            let q = Query { text: vec![term.into()], ..Query::new() };
+            assert!(!q.matches(&row), "{term}");
+            assert!(db.find(&q).unwrap().is_empty(), "{term}");
+            assert_eq!(DeclRepo::count(&db, &q).unwrap(), 0, "{term}");
+        }
     }
 }

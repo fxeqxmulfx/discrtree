@@ -44,7 +44,7 @@ pub struct Query {
     pub source: Option<SourceId>,
     /// Any of these kinds; empty is every kind.
     pub kind: Vec<DeclKind>,
-    /// Free-text words over type and docstring. ANDed, like `uses`: the flag
+    /// Free-text words over name, type and docstring. ANDed, like `uses`: the flag
     /// repeats, and a `--text` given several words is those words, because
     /// that is what the text index does with them anyway.
     pub text: Vec<String>,
@@ -191,14 +191,15 @@ impl Query {
             }
         }
         if let Some(c) = &self.shape.concl {
-            let shape = Shape { concl: Some(c.clone()), args: Vec::new() };
+            let shape = Shape::new(Some(c.clone()), Vec::new());
             out.push((format!("--concl {c}"), one(Query { shape, ..Query::new() })));
         }
         // An argument head is written inside the pattern, not as a flag, so it
         // is named the way the user wrote it rather than the way it is stored.
         for a in &self.shape.args {
             if let Some(n) = a.name() {
-                let shape = Shape { concl: None, args: vec![a.clone()] };
+                let mut shape = Shape::new(None, vec![a.clone()]);
+                shape.include_implicit = self.shape.include_implicit;
                 out.push((format!("`{n}` in the pattern"), one(Query { shape, ..Query::new() })));
             }
         }
@@ -280,10 +281,10 @@ impl Query {
         // three columns of a row as one document, so a word in the type and a
         // word in the docstring is a match there and has to be one here.
         for t in &self.text {
-            let t = t.to_lowercase();
-            let in_type = d.ty.to_lowercase().contains(&t);
-            let in_doc = d.doc.as_deref().is_some_and(|s| s.to_lowercase().contains(&t));
-            if !in_type && !in_doc {
+            if !text_contains(d.name.as_str(), t)
+                && !text_contains(&d.ty, t)
+                && !d.doc.as_deref().is_some_and(|s| text_contains(s, t))
+            {
                 return false;
             }
         }
@@ -368,6 +369,44 @@ impl Query {
     }
 }
 
+/// Whole words, or consecutive words for a phrase. Dots and underscores
+/// separate words in Lean names, just as they do in the text index. A term
+/// made entirely of punctuation searches for the literal symbol instead.
+pub(crate) fn text_contains(text: &str, term: &str) -> bool {
+    let term = term.trim().to_lowercase();
+    if term.is_empty() {
+        return false;
+    }
+    let text = text.to_lowercase();
+    let wanted = text_words(&term);
+    if wanted.is_empty() {
+        return text.contains(&term);
+    }
+    text_words(&text).windows(wanted.len()).any(|w| w == wanted)
+}
+
+fn text_words(s: &str) -> Vec<&str> {
+    s.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect()
+}
+
+/// ASCII keys for the very same words the domain matches. Feeding these to
+/// FTS avoids its separate Unicode case, accent and word-boundary rules.
+pub(crate) fn text_tokens(text: &str) -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let lower = text.to_lowercase();
+    let mut tokens = String::new();
+    for word in text_words(&lower) {
+        if !tokens.is_empty() {
+            tokens.push(' ');
+        }
+        for byte in word.bytes() {
+            tokens.push(HEX[(byte >> 4) as usize] as char);
+            tokens.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    tokens
+}
+
 /// Equality on the conditions only: `limit` and the two boolean switches are
 /// presentation, not part of what is being asked. Used by the pattern tests.
 impl PartialEq for Query {
@@ -426,7 +465,9 @@ pub fn writes_powers(q: &Query, d: &Decl) -> bool {
         // so the statements that cannot answer are turned away before they are
         // read. See [`Power::signs_in`].
         || (q.powers.iter().all(|(_, p)| p.signs_in(&d.ty)) && {
-            let has = crate::domain::pattern::powers_in(&d.ty);
+            let has = crate::domain::pattern::powers_in_shape(
+                &d.ty, &d.shape, q.shape.include_implicit,
+            );
             q.powers.iter().all(|p| has.contains(p))
         })
 }

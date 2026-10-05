@@ -9,6 +9,7 @@ mod support;
 
 use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, SourceFiles};
+use discrtree::domain::lean_text;
 use discrtree::domain::name::{DeclName, ModuleName};
 use discrtree::domain::query::Query;
 use discrtree::domain::source::{SourceId, SourceKind, SourceMeta};
@@ -30,6 +31,100 @@ def helper (n : ℕ) : ℕ :=
 theorem unfinished : False := by
   sorry
 "#;
+
+#[test]
+fn comments_and_strings_cannot_create_search_results_or_mark_proofs_as_sorry() {
+    let text = r#"/- Copyright and example code.
+namespace Fake
+theorem ghost : False := by sorry
+/- A nested comment.
+theorem nested_ghost : False := by sorry
+-/
+-/
+import Mathlib.Analysis.Exp -- not an extra module
+/-- Documentation may mention sorry and Real.log. -/
+theorem real : Nat.succ 0 = 1 := by
+  -- sorry Real.sin
+  /- sorry Real.cos -/
+  rfl
+def prose : String := "sorry /- Real.exp
+theorem string_ghost : False := sorry"
+def quote : Char := '"'
+theorem after_string : True := by trivial
+theorem admitted : False := by sorry
+"#;
+    let rows = lean_text::scan(text).decls;
+    let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["real", "prose", "quote", "after_string", "admitted"]);
+    for row in &rows[..4] {
+        assert!(!row.has_sorry, "{}", row.name);
+        assert!(
+            !row.idents.iter().any(|n| n.as_str().starts_with("Real.")),
+            "{}: {:?}",
+            row.name,
+            row.idents
+        );
+    }
+    assert!(rows[4].has_sorry);
+    assert_eq!(rows[0].line_start, 10);
+    assert!(rows[0].doc.as_deref().unwrap().contains("Real.log"));
+    assert_eq!(lean_text::imports(text), [ModuleName::new("Mathlib.Analysis.Exp")]);
+}
+
+#[test]
+fn anonymous_ends_close_the_right_namespace_without_closing_sections_as_namespaces() {
+    let text = "namespace Outer\nsection Inner\ntheorem a : True := trivial\nend Inner\n\
+                theorem b : True := trivial\nend\ntheorem c : True := trivial\n\
+                section\nnamespace Other\ntheorem d : True := trivial\nend\nend\n\
+                theorem e : True := trivial\n";
+    let rows = lean_text::scan(text).decls;
+    let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["Outer.a", "Outer.b", "c", "Other.d", "e"]);
+    assert_eq!(rows[1].line_end, 5, "the namespace's end is not part of the declaration");
+}
+
+#[test]
+fn imports_survive_multiline_headers_and_module_modifiers() {
+    let text = "module\n/- license\nCopyright\n-/\npublic import Init -- header\n\
+                meta import Std\nimport all Lean\nnamespace T\nimport NotAHeader\n";
+    assert_eq!(
+        lean_text::imports(text),
+        [ModuleName::new("Init"), ModuleName::new("Std"), ModuleName::new("Lean")]
+    );
+}
+
+#[test]
+fn a_multiline_literal_keeps_its_range_and_a_default_argument_keeps_its_type() {
+    let text = "def prose : String := \"example\n/-- not documentation -/\n\
+                theorem not_code : False := sorry\"\n\
+                theorem tight (n : Nat := 1) : n = n:=rfl\n";
+    let rows = lean_text::scan(text).decls;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name.as_str(), "prose");
+    assert_eq!((rows[0].line_start, rows[0].line_end), (1, 3));
+    assert_eq!(rows[1].statement, "(n : Nat := 1) : n = n");
+    assert!(!rows[0].has_sorry);
+}
+
+#[test]
+fn escaped_identifiers_cannot_open_comments_or_shorten_declaration_names() {
+    let text = r#"namespace Names
+def «arrow → + /- sorry» (n : Nat) := n
+theorem «proof := sorry» (n : Nat) : Names.«arrow → + /- sorry» n = n := rfl
+theorem after : True := trivial
+end Names
+"#;
+    let rows = lean_text::scan(text).decls;
+    assert_eq!(
+        rows.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["Names.«arrow → + /- sorry»", "Names.«proof := sorry»", "Names.after",]
+    );
+    assert!(rows.iter().all(|d| !d.has_sorry));
+    assert_eq!(rows[0].statement, "(n : Nat)");
+    assert_eq!(rows[1].statement, "(n : Nat) : Names.«arrow → + /- sorry» n = n");
+    assert!(rows[1].idents.contains(&DeclName::new("Names.«arrow → + /- sorry»")));
+    assert!(lean_text::declares_name(text.lines().nth(2).unwrap(), &rows[1].name));
+}
 
 fn corpus() -> (TempDir, Files, SourceMeta) {
     let dir = TempDir::new("corpus");

@@ -298,6 +298,13 @@ WithLp.measurableSpace  instance  Mathlib.Analysis.Normed.Lp.MeasurableSpace
   (p : ENNReal) → (X : Type u_1) → [MeasurableSpace X] → MeasurableSpace (WithLp p X)
 ```
 
+Patterns address explicit arguments in order. `Nat = _` asks for `Nat` as an
+operand; it does not match numeric equalities merely because their implicit
+type is `Nat`. Write `@Eq Nat _ _` to include implicit arguments. Partially
+applied patterns fix the first arguments of their head. Array literals `#[…]`,
+quoted strings and characters, and decimal scientific literals are also read
+as Lean terms; operators inside a quoted literal do not affect the search.
+
 A statement about the name written ranks above one about another name for it.
 What is written inside the argument, the `Fin` of `EuclideanSpace ℝ (Fin 3)`,
 is asked only of a statement about the name written: unfolding is free to lose
@@ -511,13 +518,13 @@ file, and `dt` runs it with `status()` rather than `output()` — capturing a
 subprocess that emits 503 MB is the same mistake one level up.
 
 `--force` re-indexes everything without deleting the file. `--rebuild` deletes
-it, which is also what a schema change requires — the index carries a version,
-and a database written by a different build is refused rather than read wrong:
+it. Compatible older schemas are upgraded in place; an incompatible database
+is refused rather than read with the wrong schema:
 
 ```
 $ dt status
 dt: this index was written by a different version of dt (schema 1, this build
-    expects 2); run `dt index --rebuild`
+    expects 6); run `dt index --rebuild`
 ```
 
 ## What the index does not cover
@@ -612,6 +619,43 @@ dt index
 `dt dump` needs `elan` on `PATH` and runs `lake env lean` in the project root,
 because only the elaborator can read `.olean` files. Everything after that is
 one Rust binary.
+
+## Tests
+
+`cargo test --offline` checks search against a committed dump of the small Lean
+corpus in `tests/fixtures/SearchFixture.lean` and regression declarations from
+Lean's standard library in `tests/fixtures/core-search.jsonl` and
+`tests/fixtures/data-search.jsonl`. The latter covers numeric casts, machine
+integers, ranges, fields, record literals and local `let` bindings. It also checks
+quoted literals, array literals, explicit argument positions, the text scanner
+and agreement between SQLite, JSONL and the domain rules.
+These tests do not need Lean installed.
+
+The optional standard-library checks search every theorem with a constant
+conclusion head and no unrecognized notation in its printed type. One searches
+across `Init.Data.Nat`, `Init.Data.List`, `Init.Data.Option` and `Init.Data.Prod`;
+the extended check covers all of `Init.Data`, with each query scoped to its
+declaration's module.
+
+To compile the corpus and check the current dump script with the toolchain
+pinned in `tests/fixtures/lean-toolchain`:
+
+```
+cargo test --offline --test lean_search -- --ignored
+```
+
+`DISCRTREE_LEAN` overrides the compiler executable.
+`DISCRTREE_UPDATE_FIXTURES=1` regenerates `tests/fixtures/search.jsonl` after
+the live search checks pass.
+`DISCRTREE_UPDATE_CORE_FIXTURES=1` regenerates the standard-library fixture
+after its live search checks pass.
+`DISCRTREE_UPDATE_DATA_FIXTURES=1` regenerates the extended regression fixture.
+
+Dump format 3 preserves public `ofNat` constants and records explicit argument
+heads, including arguments separated by implicit instances. Run `dt dump` and
+`dt index` to supply these details for existing compiled sources. Older dumps
+remain readable and appear as outdated in `dt status`. The Unicode text index
+is rebuilt automatically when opening an older SQLite index.
 
 ## Layout
 

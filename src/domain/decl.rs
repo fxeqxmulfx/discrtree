@@ -176,11 +176,54 @@ impl ArgHead {
 pub struct Shape {
     pub concl: Option<DeclName>,
     pub args: Vec<ArgHead>,
+    /// The compiler's explicit arguments, with type and instance arguments
+    /// omitted wherever they occur. Older dumps and surface patterns have no
+    /// such view; `args` still permits queries written with `@`.
+    pub explicit_args: Option<Vec<ArgHead>>,
+    /// A query written with `@` addresses the full elaborated argument list.
+    pub include_implicit: bool,
 }
 
 impl Shape {
     pub fn new(concl: Option<DeclName>, args: Vec<ArgHead>) -> Self {
-        Shape { concl, args }
+        Shape { concl, args, explicit_args: None, include_implicit: false }
+    }
+
+    pub fn with_explicit_args(mut self, args: Option<Vec<ArgHead>>) -> Self {
+        self.explicit_args = args;
+        self
+    }
+
+    pub fn with_implicit_args(mut self) -> Self {
+        self.include_implicit = true;
+        self
+    }
+
+    /// The full position of each explicit argument, where its head makes the
+    /// position unambiguous. Earliest and latest subsequence alignments agree
+    /// exactly where repeated implicit heads cannot change its position.
+    pub fn explicit_positions(&self) -> Option<Vec<Option<usize>>> {
+        let visible = self.explicit_args.as_ref()?;
+        let mut earliest = Vec::with_capacity(visible.len());
+        let mut cursor = 0;
+        for head in visible {
+            let Some(at) = self.args[cursor..].iter().position(|a| a == head) else {
+                return Some(vec![None; visible.len()]);
+            };
+            cursor += at;
+            earliest.push(cursor);
+            cursor += 1;
+        }
+        let mut latest = vec![0; visible.len()];
+        cursor = self.args.len();
+        for (i, head) in visible.iter().enumerate().rev() {
+            let Some(at) = self.args[..cursor].iter().rposition(|a| a == head) else {
+                return Some(vec![None; visible.len()]);
+            };
+            latest[i] = at;
+            cursor = at;
+        }
+        Some(earliest.into_iter().zip(latest).map(|(a, b)| (a == b).then_some(a)).collect())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -196,12 +239,14 @@ impl Shape {
     /// Whether `self`, read as a pattern, matches `other`, read as a statement.
     ///
     /// Argument matching is positional but tolerant of arity: a pattern with
-    /// fewer arguments than the statement matches a prefix, because `Eq` and
-    /// the order classes carry leading type and instance arguments a user never
-    /// writes. A pattern with *more* arguments cannot match.
+    /// fewer arguments than the statement matches its prefix. Implicit
+    /// parameters are addressed only by `@`; they are not surface operands.
+    /// Unanchored argument probes and older dumps whose argument visibility is
+    /// unknown still try each contiguous alignment.
     pub fn matches(&self, other: &Shape) -> bool {
-        self.offsets(other)
-            .any(|off| self.args.iter().zip(&other.args[off..]).all(|(p, a)| p.matches(a)))
+        let (args, known) = self.arguments(other);
+        self.offsets(other, args.len(), known)
+            .any(|off| self.args.iter().zip(&args[off..]).all(|(p, a)| p.matches(a)))
     }
 
     /// The alignments at which `self` matches `other`, each as what every
@@ -212,24 +257,36 @@ impl Shape {
         &'a self,
         other: &'a Shape,
     ) -> impl Iterator<Item = Vec<Option<&'a DeclName>>> + 'a {
-        self.offsets(other).filter_map(move |off| {
-            let args = self.args.iter().zip(&other.args[off..]);
+        let (heads, known) = self.arguments(other);
+        self.offsets(other, heads.len(), known).filter_map(move |off| {
+            let args = self.args.iter().zip(&heads[off..]);
             args.clone()
                 .all(|(p, a)| p.matches(a))
                 .then(|| args.map(|(p, a)| if p.as_written(a) { None } else { a.name() }).collect())
         })
     }
 
+    fn arguments<'a>(&self, other: &'a Shape) -> (&'a [ArgHead], bool) {
+        if !self.include_implicit
+            && let Some(args) = &other.explicit_args
+        {
+            return (args, true);
+        }
+        (&other.args, self.include_implicit)
+    }
+
     /// Where the pattern's arguments can start among the statement's, once
-    /// the conclusion fits. Every alignment is tried, so `Real.exp _` matches
-    /// `@LE.le ℝ inst (Real.exp x) y` without the user having to write the
-    /// instance arguments out.
-    fn offsets(&self, other: &Shape) -> std::ops::Range<usize> {
+    /// the conclusion fits. An anchored application starts at its first
+    /// visible argument. A field's receiver may follow other explicit
+    /// parameters, so fields still try each alignment, as do argument probes
+    /// and legacy dumps whose visibility is unknown.
+    fn offsets(&self, other: &Shape, len: usize, known: bool) -> std::ops::Range<usize> {
         let concl = self.concl.as_ref().is_none_or(|c| {
             other.concl.as_ref().is_some_and(|o| keyed_as(c).iter().any(|k| k.names(o)))
         });
-        match concl && self.args.len() <= other.args.len() {
-            true => 0..other.args.len() - self.args.len() + 1,
+        match concl && self.args.len() <= len {
+            true if known && self.concl.as_ref().is_some_and(|c| !c.is_field()) => 0..1,
+            true => 0..len - self.args.len() + 1,
             false => 0..0,
         }
     }
@@ -394,8 +451,10 @@ pub fn commonest_called<'a>(
     word: &str,
 ) -> Vec<DeclName> {
     let mut count: std::collections::HashMap<&DeclName, usize> = std::collections::HashMap::new();
+    let asked = DeclName::new(word);
     for (ty, heads) in rows {
-        let mut called: Vec<&DeclName> = heads.into_iter().filter(|h| h.base() == word).collect();
+        let mut called: Vec<&DeclName> =
+            heads.into_iter().filter(|h| asked.abbreviates(h)).collect();
         called.sort();
         called.dedup();
         if called.is_empty() || !prints_bare(ty, word) {
@@ -694,6 +753,27 @@ mod tests {
             .collect();
         assert_eq!(found, [vec![Some("PiLp"), None], vec![None, None]]);
         assert_eq!(pattern.alignments(&shape("Ne", &["PiLp"])).count(), 0);
+    }
+
+    #[test]
+    fn explicit_arguments_skip_interleaved_instances_without_reordering() {
+        let stmt = shape("Class", &["PiLp", "inst", "B"])
+            .with_explicit_args(Some(vec![ArgHead::parse("PiLp"), ArgHead::parse("B")]));
+        assert!(shape("Class", &["PiLp", "B"]).matches(&stmt));
+        assert!(shape("Class", &["PiLp", "inst", "B"]).with_implicit_args().matches(&stmt));
+        assert!(!shape("Class", &["PiLp", "inst", "B"]).matches(&stmt));
+        assert!(!shape("Class", &["B"]).matches(&stmt));
+        assert!(!shape("Class", &["B", "PiLp"]).matches(&stmt));
+        assert!(!shape("Class", &["PiLp", "B", "inst"]).matches(&stmt));
+        let pattern = Shape::new(
+            Some("Class".into()),
+            vec![unfolding("EuclideanSpace"), ArgHead::parse("B")],
+        );
+        let alignments: Vec<_> = pattern
+            .alignments(&stmt)
+            .map(|args| args.into_iter().map(|a| a.map(DeclName::as_str)).collect::<Vec<_>>())
+            .collect();
+        assert_eq!(alignments, [vec![Some("PiLp"), None]]);
     }
 
     #[test]

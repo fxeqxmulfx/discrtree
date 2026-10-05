@@ -23,12 +23,20 @@ use crate::domain::query::{Power, Query, Spelling};
 const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("↔", "Iff", 20, false),
     ("∨", "Or", 30, false),
+    ("||", "Bool.or", 30, true),
     ("∧", "And", 35, false),
+    ("&&", "Bool.and", 35, true),
+    ("^^", "Bool.xor", 33, true),
+    ("¬", "Not", 40, false),
+    ("!", "Bool.not", 40, false),
     ("≤", "LE.le", 50, false),
     ("<", "LT.lt", 50, false),
     ("≥", "GE.ge", 50, false),
     (">", "GT.gt", 50, false),
     ("=", "Eq", 50, false),
+    ("==", "BEq.beq", 50, false),
+    ("!=", "bne", 50, false),
+    ("≍", "HEq", 50, false),
     ("≠", "Ne", 50, false),
     ("∈", "Membership.mem", 50, false),
     // Elaborated as `¬ (a ∈ s)`: see [`parse`], which says so.
@@ -40,6 +48,16 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("<+:", "List.IsPrefix", 50, false),
     ("<:+", "List.IsSuffix", 50, false),
     ("<:+:", "List.IsInfix", 50, false),
+    ("|||", "HOr.hOr", 55, true),
+    ("^^^", "HXor.hXor", 58, true),
+    ("<|>", "HOrElse.hOrElse", 20, false),
+    (">>=", "Bind.bind", 55, true),
+    (">>", "HAndThen.hAndThen", 60, false),
+    ("<*>", "Seq.seq", 60, true),
+    ("<*", "SeqLeft.seqLeft", 60, true),
+    ("*>", "SeqRight.seqRight", 60, true),
+    ("<$>", "Functor.map", 100, false),
+    ("&&&", "HAnd.hAnd", 60, true),
     ("+", "HAdd.hAdd", 65, true),
     ("-", "HSub.hSub", 65, true),
     // The same `-` with no term before it. See [`notation_at`].
@@ -57,7 +75,10 @@ const NOTATION: &[(&str, &str, u16, bool)] = &[
     ("∩", "Inter.inter", 70, true),
     ("\\", "SDiff.sdiff", 70, true),
     ("•", "HSMul.hSMul", 73, false),
-    ("^", "HPow.hPow", 75, false),
+    ("<<<", "HShiftLeft.hShiftLeft", 75, true),
+    (">>>", "HShiftRight.hShiftRight", 75, true),
+    ("^", "HPow.hPow", 80, false),
+    ("~~~", "Complement.complement", 100, false),
     // Mathlib's set notation. `×ˢ` is the class `SProd`, not `Set.prod`, and
     // is the same symbol for `Finset` and `Filter`: see [`lex`].
     ("⁻¹'", "Set.preimage", 80, false),
@@ -90,17 +111,49 @@ const MAX: u16 = 1024;
 /// The second of each pair is the token it becomes: `->` is `→` and `<=` is
 /// `≤`, because a keyboard has one and Lean prints the other.
 const COMPOUNDS: &[(&str, &str)] = &[
+    ("<...=", "<...="),
+    ("<...<", "<...<"),
+    ("<...*", "<...*"),
+    ("*...=", "*...="),
+    ("*...<", "*...<"),
+    ("*...*", "*...*"),
+    ("...=", "...="),
+    ("...<", "...<"),
+    ("...*", "...*"),
+    ("<...", "<..."),
+    ("*...", "*..."),
+    ("...", "..."),
     ("<:+:", "<:+:"),
+    ("<<<", "<<<"),
+    (">>>", ">>>"),
+    ("&&&", "&&&"),
+    ("|||", "|||"),
+    ("^^^", "^^^"),
+    ("~~~", "~~~"),
+    ("<|>", "<|>"),
+    (">>=", ">>="),
+    ("<*>", "<*>"),
+    ("<$>", "<$>"),
+    (">>", ">>"),
+    ("<*", "<*"),
+    ("*>", "*>"),
     ("<+:", "<+:"),
     ("<:+", "<:+"),
     ("<+", "<+"),
     ("++", "++"),
     ("::", "::"),
+    ("//", "//"),
+    ("#[", "#["),
+    (":=", ":="),
+    ("==", "=="),
+    ("&&", "&&"),
+    ("||", "||"),
+    ("^^", "^^"),
     ("->", "→"),
     ("=>", "=>"),
     ("<=", "≤"),
     (">=", "≥"),
-    ("!=", "≠"),
+    ("!=", "!="),
 ];
 
 /// Binders whose variables run up to a comma: `∀ x ∈ s,` and `∑ i ∈ s,`. The
@@ -126,6 +179,10 @@ const BRACKETS: &[(&str, &str, Option<&str>)] = &[
     ("⟪", "⟫", Some("Inner.inner")),
 ];
 
+/// Grouping syntax which has no fixed head: binder delimiters, list literals,
+/// set builders and anonymous constructors. Their contents are still nested.
+const GROUPS: &[(&str, &str)] = &[("{", "}"), ("[", "]"), ("⦃", "⦄"), ("⟨", "⟩")];
+
 /// Tokens that are punctuation rather than notation: they carry no head symbol
 /// and dropping one loses nothing.
 ///
@@ -134,7 +191,8 @@ const BRACKETS: &[(&str, &str, Option<&str>)] = &[
 /// are not what a statement is about. The list exists so that a symbol *not*
 /// on it can be reported rather than quietly ignored -- see [`unreadable`].
 const IGNORED: &[&str] = &[
-    ",", ":", ";", "∀", "∃", "⟨", "⟩", "{", "}", "[", "]", "⦃", "⦄", "↑", "⇑", "@", "✝", "!", "?",
+    ",", ":", ":=", ";", "//", "∀", "∃", "⟨", "⟩", "{", "}", "[", "]", "⦃", "⦄", "↑", "⇑", "@",
+    "✝", "⋯", "!", "?",
 ];
 
 /// Lambda syntax. A lambda is a binder, and [`crate::domain::decl::Shape`] is
@@ -147,6 +205,12 @@ const BINDERS: &[&str] = &["fun", "λ"];
 /// The arrow a lambda's binders end at. Lean writes one after `fun`, and a
 /// reader copying a goal back out sometimes writes one without it.
 const ARROWS: &[&str] = &["=>", "↦"];
+
+/// Universe sorts are Expr.sort, rather than applications of constants.
+const SORTS: &[&str] = &["Prop", "Type", "Sort"];
+
+/// Keywords of conditional syntax, rather than names of constants.
+const CONDITIONAL: &[&str] = &["if", "then", "else", "let", "have"];
 
 /// What a pattern resolved to, so the caller can tell the user what was
 /// understood. An empty search is much easier to debug when the tool says which
@@ -194,18 +258,33 @@ pub fn parse(pattern: &str) -> Parsed {
 }
 
 fn read(pattern: &str) -> Parsed {
-    let (lexemes, lambdas) = strip_lambdas(lex(pattern));
+    let (mut lexemes, lambdas) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
+    lexemes = group_prefixes(lexemes);
+    // Repeated factors retain their identity before explicit binders become
+    // wildcards: `∀ id : Nat, id * id` is still a square. Field receivers
+    // remain wildcards, as in patterns without an explicit binder.
+    let bound_powers = if lexemes.iter().any(|t| BINDER_PREFIXES.contains(&t.as_str())) {
+        let (tokens, receivers) = expand_postfix(lexemes.clone());
+        let tokens = without_receivers(tokens, &receivers);
+        let (_, concl) = split_on_arrows(&tokens);
+        Some(powers_of(concl))
+    } else {
+        None
+    };
+    let bound = mark_bound_variables(&mut lexemes);
     let (all, receivers) = expand_postfix(lexemes);
     // One word, one reading: the `xs` of `xs.length` is a variable, and so is
     // the `xs` of `xs ++ ys` beside it.
-    let all: Vec<String> =
-        all.into_iter().map(|t| if receivers.contains(&t) { "_".to_string() } else { t }).collect();
-    let variables =
-        dedup_strings(all.iter().filter(|t| is_variable(t)).cloned().chain(receivers).collect());
+    let mut all = without_receivers(all, &receivers);
+    normalize_not_equals(&mut all);
+    let variables = dedup_strings(
+        all.iter().filter(|t| is_variable(t)).cloned().chain(receivers).chain(bound).collect(),
+    );
     let unknown = unreadable(&all);
     let (hypotheses, tokens) = split_on_arrows(&all);
     let tokens = without_foralls(tokens);
-    let assumed = conditions_of(&hypotheses);
+    let assumed: Vec<DeclName> =
+        conditions_of(&hypotheses).into_iter().chain(let_conditions(&all)).collect();
     let mut query = Query::new();
     let mut operator = None;
     // The tokens each argument of the shape was read off.
@@ -226,13 +305,44 @@ fn read(pattern: &str) -> Parsed {
                     vec![ArgHead::Named(DeclName::new("Membership.mem"))],
                 );
                 query.uses = rest.chain(sides).collect();
+            } else if matches!(op, "¬" | "!") {
+                query.shape = Shape::new(
+                    notation(op).map(|(_, head, ..)| DeclName::new(head)),
+                    vec![right_head],
+                );
+                query.uses = rest.collect();
+                written = vec![rhs];
             } else {
                 let concl = notation(op).map(|(_, head, ..)| DeclName::new(head));
-                query.shape = Shape::new(concl, vec![left_head, right_head]);
+                let args = match op {
+                    "∈" => vec![right_head, left_head],
+                    // HEq's two implicit types surround its operands. Spell
+                    // the full list so legacy dumps need no visibility data.
+                    "≍" => vec![ArgHead::Any, left_head, ArgHead::Any, right_head],
+                    _ => vec![left_head, right_head],
+                };
+                query.shape = Shape::new(concl, args);
+                query.shape.include_implicit = op == "≍";
                 query.uses = rest.collect();
-                written = vec![lhs, rhs];
+                written = match op {
+                    "∈" => vec![rhs, lhs],
+                    "≍" => vec![&[], lhs, &[], rhs],
+                    _ => vec![lhs, rhs],
+                };
             }
             operator = Some(op.to_string());
+        }
+        None if tokens.first().is_some_and(|t| t == "∃") => {
+            // The predicate is a lambda in the elaborated term, so its body
+            // contributes constants but no argument heads.
+            query.shape = Shape::new(Some(DeclName::new("Exists")), Vec::new());
+            query.uses = constants(tokens).into_iter().chain(assumed).collect();
+        }
+        None if head_of(tokens).is_some() => {
+            // Notation applies outside any names written inside it:
+            // `Nat.succ x + y` is an addition, as `‖Real.exp x‖` is a norm.
+            query.shape = Shape::new(head_of(tokens), Vec::new());
+            query.uses = constants(tokens).into_iter().chain(assumed).collect();
         }
         None => match constants(tokens).split_first() {
             Some((head, rest)) => {
@@ -251,15 +361,6 @@ fn read(pattern: &str) -> Parsed {
                 query.shape = Shape::new(Some(head.clone()), args);
                 query.uses = rest.into_iter().chain(assumed).collect();
             }
-            // No name to key on, but notation is a name: `⟪x, y⟫_ℝ` says
-            // `Inner.inner` as plainly as `Real.exp x` says `Real.exp`. Which
-            // argument is which is another matter -- notation hides the
-            // implicit ones -- so the head is all this claims, and a head
-            // alone still matches.
-            None if head_of(tokens).is_some() => {
-                query.shape = Shape::new(head_of(tokens), Vec::new());
-                query.uses = assumed;
-            }
             None => {
                 // Nothing recognisable: fall back to free text rather than
                 // returning an unconstrained query.
@@ -277,7 +378,8 @@ fn read(pattern: &str) -> Parsed {
             }
         },
     }
-    query.powers = powers_of(tokens);
+    query.shape.include_implicit |= operator.is_none() && tokens.first().is_some_and(|t| t == "@");
+    query.powers = bound_powers.unwrap_or_else(|| powers_of(tokens));
     // What the shape does not already say. A head of it is in every type the
     // shape matches, and a condition that repeats it is one more to blame
     // when the search comes back empty, for no row it could rule out.
@@ -286,6 +388,188 @@ fn read(pattern: &str) -> Parsed {
     query.uses = dedup(std::mem::take(&mut query.uses).into_iter().chain(nested).collect());
     query.inside = inside(&all, &written, &query.uses);
     Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown }
+}
+
+/// Lean's `!=` returns Bool, while a standalone ASCII inequality has also
+/// historically stood for `≠` in search patterns. An enclosing equality or
+/// Boolean operator identifies the Boolean spelling, as printed Lean types
+/// do in `(a != b) = true`; retain the standalone compatibility spelling.
+fn normalize_not_equals(tokens: &mut [String]) {
+    let depth = depths(tokens);
+    let bool_context = |t: &str| matches!(t, "=" | "==" | "!" | "&&" | "||" | "^^");
+    for i in 0..tokens.len() {
+        if tokens[i] != "!=" {
+            continue;
+        }
+        let boolean = (0..i).rev().any(|j| {
+            if tokens[j] != "(" || depth[j] >= depth[i] {
+                return false;
+            }
+            let Some(close) =
+                (i + 1..tokens.len()).find(|&k| depth[k] == depth[j] && tokens[k] == ")")
+            else {
+                return false;
+            };
+            j.checked_sub(1).is_some_and(|k| bool_context(&tokens[k]))
+                || tokens.get(close + 1).is_some_and(|t| bool_context(t))
+        });
+        if !boolean {
+            tokens[i] = "≠".into();
+        }
+    }
+}
+
+/// A prefix's binding strength belongs to its operand. Its occurrence on the
+/// right of another operator does not make it the head of the whole formula:
+/// `(¬ p) = ¬ q` is an equality, while `¬ p = q` is a negation. Make that
+/// scope explicit before the top-level operator scans.
+fn group_prefixes(mut tokens: Vec<String>) -> Vec<String> {
+    for i in (0..tokens.len()).rev() {
+        let prec = match tokens[i].as_str() {
+            "¬" | "!" => 40,
+            "~~~" => 100,
+            "-" => {
+                let previous = tokens[..i].iter().rposition(|t| t != SPACE);
+                if previous.is_some_and(|j| ends_term(&tokens[j])) {
+                    continue;
+                }
+                75
+            }
+            _ => continue,
+        };
+        let depth = depths(&tokens);
+        let end = (i + 1..tokens.len())
+            .find(|&j| {
+                depth[j] < depth[i]
+                    || (depth[j] == depth[i]
+                        && (matches!(tokens[j].as_str(), "→" | "then" | "else")
+                            || (tokens[j] == "," && !binder_comma(&tokens, &depth, j))
+                            || notation(&tokens[j]).is_some_and(|(.., p, _)| p < prec)))
+            })
+            .unwrap_or(tokens.len());
+        // Two groups: one keeps this prefix as a single term, the other
+        // keeps its operand together, including comparisons and powers.
+        tokens.insert(end, ")".into());
+        tokens.insert(end, ")".into());
+        tokens.insert(i + 1, "(".into());
+        tokens.insert(i, "(".into());
+    }
+    tokens
+}
+
+fn without_receivers(tokens: Vec<String>, receivers: &[String]) -> Vec<String> {
+    tokens.into_iter().map(|t| if receivers.contains(&t) { "_".to_string() } else { t }).collect()
+}
+
+/// Explicit binders have priority over the heuristic for bare words. In
+/// `∀ id : Nat, id + id = id + id`, `id` is a variable even though a constant
+/// with that name exists. Limit each binding to its enclosing group, so a
+/// quantifier inside an argument cannot hide a constant outside it.
+fn mark_bound_variables(tokens: &mut [String]) -> Vec<String> {
+    let depth = depths(tokens);
+    let mut bindings = Vec::new();
+    let groups = lambda_depths(tokens);
+    for i in 0..tokens.len() {
+        if !matches!(tokens[i].as_str(), "let" | "have") {
+            continue;
+        }
+        let Some(at) = (i + 1..tokens.len()).find(|&j| tokens[j] != SPACE) else { continue };
+        let Some(end_value) =
+            (at + 1..tokens.len()).find(|&j| tokens[j] == ";" && groups[j] == groups[i])
+        else {
+            continue;
+        };
+        let end =
+            (end_value + 1..tokens.len()).find(|&j| groups[j] < groups[i]).unwrap_or(tokens.len());
+        if is_ident(&tokens[at]) {
+            bindings.push((at, tokens[at].clone(), end_value + 1, end));
+        }
+    }
+    for k in 0..tokens.len() {
+        if !BINDER_PREFIXES.contains(&tokens[k].as_str()) {
+            continue;
+        }
+        let Some(comma) =
+            (k + 1..tokens.len()).find(|i| tokens[*i] == "," && depth[*i] == depth[k])
+        else {
+            continue;
+        };
+        let end = (comma + 1..tokens.len()).find(|i| depth[*i] < depth[k]).unwrap_or(tokens.len());
+        let mut i = k + 1;
+        while i < comma {
+            let t = tokens[i].as_str();
+            if t == SPACE {
+                i += 1;
+                continue;
+            }
+            let close = match t {
+                "(" => Some(")"),
+                "{" => Some("}"),
+                "[" => Some("]"),
+                "⦃" => Some("⦄"),
+                _ => None,
+            };
+            if let Some(close) = close {
+                let Some(last) =
+                    (i + 1..comma).find(|j| tokens[*j] == close && depth[*j] == depth[i])
+                else {
+                    break;
+                };
+                // `[Inhabited α]` binds an unnamed instance, not two names.
+                if t != "[" || tokens[i + 1..last].iter().any(|t| t == ":") {
+                    for (j, t) in tokens.iter().enumerate().take(last).skip(i + 1) {
+                        if t == ":" {
+                            break;
+                        }
+                        if is_ident(t) {
+                            bindings.push((j, t.clone(), last + 1, end));
+                        }
+                    }
+                }
+                i = last + 1;
+            } else if is_ident(t) {
+                bindings.push((i, t.to_string(), comma + 1, end));
+                i += 1;
+            } else if t == "_" {
+                i += 1;
+            } else {
+                // A type ascription or the relation a bounded binder ranges
+                // with starts its domain, whose names are constants.
+                break;
+            }
+        }
+    }
+    for i in 0..tokens.len() {
+        if tokens[i] != "{" {
+            continue;
+        }
+        let Some(close) = (i + 1..tokens.len()).find(|&j| tokens[j] == "}" && depth[j] == depth[i])
+        else {
+            continue;
+        };
+        let Some(separator) =
+            (i + 1..close).find(|&j| tokens[j] == "//" && depth[j] == depth[i] + 1)
+        else {
+            continue;
+        };
+        if let Some(at) = (i + 1..separator).find(|&j| tokens[j] != SPACE)
+            && is_ident(&tokens[at])
+        {
+            bindings.push((at, tokens[at].clone(), separator + 1, close));
+        }
+    }
+    let variables = bindings.iter().map(|(_, name, _, _)| name.clone()).collect();
+    for (at, name, start, end) in bindings {
+        tokens[at] = "_".to_string();
+        for t in &mut tokens[start..end] {
+            if *t == name {
+                *t = "_".to_string();
+            } else if let Some(fields) = t.strip_prefix(&name).filter(|s| s.starts_with('.')) {
+                *t = format!("_{fields}");
+            }
+        }
+    }
+    variables
 }
 
 /// For each argument, the uses written inside it and nowhere else in the
@@ -331,7 +615,8 @@ fn strip_lambdas(mut tokens: Vec<String>) -> (Vec<String>, Vec<String>) {
     if !tokens.iter().any(begins) {
         return (tokens, Vec::new());
     }
-    let depth = depths(&tokens);
+    let depth = lambda_depths(&tokens);
+    let full_depth = depths(&tokens);
     // Where each lambda begins. `fun` and `λ` say so outright; an arrow says
     // so too, one group back, because the binders a lambda ends with are the
     // rest of that group. Without this, `(x => f x)` reads its `=>` as `Eq`
@@ -354,12 +639,46 @@ fn strip_lambdas(mut tokens: Vec<String>) -> (Vec<String>, Vec<String>) {
             i += 1;
             continue;
         }
-        let end = (i..tokens.len()).find(|j| depth[*j] < depth[i]).unwrap_or(tokens.len());
+        let end = (i + 1..tokens.len())
+            .find(|&j| {
+                depth[j] < depth[i]
+                    || (tokens[j] == ","
+                        && depth[j] == depth[i]
+                        && !binder_comma(&tokens, &full_depth, j))
+            })
+            .unwrap_or(tokens.len());
         found.push(tokens[i..end].concat().trim().to_string());
         out.push("_".to_string());
         i = end;
     }
     (out, found)
+}
+
+/// Lambda scope follows syntactic groups. A match branch's `|` is not an
+/// absolute-value delimiter and cannot hide the lambda's closing parenthesis.
+fn lambda_depths(tokens: &[String]) -> Vec<usize> {
+    let mut stack = Vec::new();
+    tokens
+        .iter()
+        .map(|t| {
+            if stack.last().is_some_and(|c: &&str| closes(t, c)) {
+                stack.pop();
+                stack.len()
+            } else {
+                let d = stack.len();
+                let closer = BRACKETS
+                    .iter()
+                    .filter(|(o, ..)| *o != "|")
+                    .find(|(o, ..)| *o == t)
+                    .map(|(_, c, _)| *c)
+                    .or_else(|| GROUPS.iter().find(|(o, _)| *o == t).map(|(_, c)| *c));
+                if let Some(c) = closer {
+                    stack.push(c);
+                }
+                d
+            }
+        })
+        .collect()
 }
 
 /// The pattern cut into names and symbols, with a [`SPACE`] wherever it had
@@ -373,6 +692,16 @@ fn lex(s: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut cs = s.chars().peekable();
     while let Some(c) = cs.next() {
+        if c == '«' {
+            cur.push(c);
+            for c in cs.by_ref() {
+                cur.push(c);
+                if c == '»' {
+                    break;
+                }
+            }
+            continue;
+        }
         // A name may have `?` and `!` in it, as in Lean: `List.head?` is one
         // name, and `GetElem?.getElem?` cut at each `?` was `GetElem` and a
         // `.getElem` nothing declares. Only after a name, so that `_` stays a
@@ -385,6 +714,49 @@ fn lex(s: &str) -> Vec<String> {
             cs.next();
             out.push("''".to_string());
             continue;
+        }
+        // A quoted literal is one term. Its contents cannot introduce names,
+        // binders, operators or delimiters into the surrounding expression.
+        if c == '"' {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            out.push(read_quoted(&mut cs, c));
+            continue;
+        }
+        if c == '\'' && cur.is_empty() {
+            let mut ahead = cs.clone();
+            let literal = read_quoted(&mut ahead, c);
+            if is_char_literal(&literal) {
+                cs = ahead;
+                out.push(literal);
+                continue;
+            }
+        }
+        // The sign of a scientific exponent belongs to its literal, as in
+        // `1.25e-3`; it is neither subtraction nor unary negation.
+        if matches!(c, '+' | '-')
+            && cs.peek().is_some_and(char::is_ascii_digit)
+            && cur.strip_suffix(['e', 'E']).is_some_and(scientific_mantissa)
+        {
+            cur.push(c);
+            continue;
+        }
+        // Ellipses delimit ranges even when touching the bound's identifier.
+        if c == '.' && cs.peek() == Some(&'.') {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            if let Some((written, token)) = COMPOUNDS.iter().find(|(w, _)| {
+                let mut ahead = std::iter::once(c).chain(cs.clone());
+                w.starts_with("...") && w.chars().all(|c| ahead.next() == Some(c))
+            }) {
+                for _ in 1..written.chars().count() {
+                    cs.next();
+                }
+                out.push((*token).to_string());
+                continue;
+            }
         }
         if c.is_alphanumeric() || c == '.' || c == '_' || c == '\'' || in_name {
             cur.push(c);
@@ -469,7 +841,116 @@ fn lex(s: &str) -> Vec<String> {
     if !cur.is_empty() {
         out.push(cur);
     }
+    for t in &mut out {
+        if t == "forall" {
+            *t = "∀".to_string();
+        }
+    }
     out
+}
+
+fn read_quoted(cs: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char) -> String {
+    let mut literal = String::from(quote);
+    let mut escaped = false;
+    for c in cs.by_ref() {
+        literal.push(c);
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            break;
+        }
+    }
+    literal
+}
+
+/// Lean expands `#[a, b]` to `List.toArray [a, b]`. Expand inside out, before
+/// interpreting list brackets as postfix indexes.
+fn expand_arrays(mut tokens: Vec<String>) -> Vec<String> {
+    while let Some(start) = tokens.iter().rposition(|t| t == "#[") {
+        let mut depth = 0;
+        let end = (start + 1..tokens.len()).find(|&i| match tokens[i].as_str() {
+            "[" => {
+                depth += 1;
+                false
+            }
+            "]" if depth == 0 => true,
+            close if depth > 0 && closes(close, "]") => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        });
+        let Some(end) = end else { break };
+        let mut expanded =
+            vec!["(".to_string(), "List.toArray".to_string(), SPACE.to_string(), "[".to_string()];
+        expanded.extend_from_slice(&tokens[start + 1..end]);
+        expanded.extend(["]".to_string(), ")".to_string()]);
+        tokens.splice(start..=end, expanded);
+    }
+    tokens
+}
+
+/// The nine polymorphic range constructors, including alternate open-upper
+/// spellings. Their bounds run to the end of the surrounding syntactic group.
+fn expand_ranges(mut tokens: Vec<String>) -> Vec<String> {
+    const RANGES: &[(&str, &str, bool, bool)] = &[
+        ("...", "Std.Rco.mk", true, true),
+        ("...<", "Std.Rco.mk", true, true),
+        ("...=", "Std.Rcc.mk", true, true),
+        ("...*", "Std.Rci.mk", true, false),
+        ("<...", "Std.Roo.mk", true, true),
+        ("<...<", "Std.Roo.mk", true, true),
+        ("<...=", "Std.Roc.mk", true, true),
+        ("<...*", "Std.Roi.mk", true, false),
+        ("*...", "Std.Rio.mk", false, true),
+        ("*...<", "Std.Rio.mk", false, true),
+        ("*...=", "Std.Ric.mk", false, true),
+        ("*...*", "Std.Rii.mk", false, false),
+    ];
+    while let Some((at, (_, head, left, right))) = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(i, t)| RANGES.iter().find(|(symbol, ..)| *symbol == t).map(|range| (i, range)))
+    {
+        let depth = lambda_depths(&tokens);
+        let start = if *left {
+            let Some(last) = (0..at).rev().find(|&i| tokens[i] != SPACE) else { break };
+            if depth[last] < depth[last.saturating_sub(1)] {
+                (0..last).rev().find(|&i| depth[i] == depth[last]).unwrap_or(last)
+            } else {
+                last
+            }
+        } else {
+            at
+        };
+        let end = if *right {
+            (at + 1..tokens.len())
+                .find(|&i| {
+                    depth[i] < depth[at]
+                        || (depth[i] == depth[at]
+                            && matches!(
+                                tokens[i].as_str(),
+                                ")" | "]" | "}" | "⟩" | "⦄" | "," | "then" | "else"
+                            ))
+                })
+                .unwrap_or(tokens.len())
+        } else {
+            at + 1
+        };
+        let mut expanded = vec!["(".to_string(), (*head).to_string(), SPACE.to_string()];
+        if *left {
+            expanded.extend_from_slice(&tokens[start..at]);
+            expanded.push(SPACE.to_string());
+        }
+        if *right {
+            expanded.extend_from_slice(&tokens[at + 1..end]);
+        }
+        expanded.push(")".to_string());
+        tokens.splice(start..end, expanded);
+    }
+    tokens
 }
 
 /// What whitespace lexes to. It is dropped once the postfix notation, the one
@@ -566,7 +1047,7 @@ fn expand_postfix(lexemes: Vec<String>) -> (Vec<String>, Vec<String>) {
 /// Each field applied in turn to the term from `start` to the end:
 /// `l.reverse.length` is `(.length (.reverse l))`.
 fn apply_fields(out: &mut Vec<String>, start: usize, fields: &str) {
-    for f in fields.split('.').filter(|f| !f.is_empty()) {
+    for f in crate::domain::name::components(fields).filter(|f| !f.is_empty()) {
         let head = if is_numeral(f) { "_".to_string() } else { format!(".{f}") };
         out.splice(start..start, ["(".to_string(), head]);
         out.push(")".to_string());
@@ -593,18 +1074,16 @@ fn is_receiver(word: &str) -> bool {
 fn term_start(tokens: &[String]) -> Option<usize> {
     let last = tokens.len().checked_sub(1)?;
     match tokens[last].as_str() {
-        ")" => {
-            let mut depth = 0;
-            (0..=last).rev().find(|j| {
-                match tokens[*j].as_str() {
-                    ")" => depth += 1,
-                    "(" => depth -= 1,
-                    _ => {}
-                }
-                depth == 0
+        ")" | "]" | "}" | "⟩" | "⦄" => {
+            let depth = depths(tokens);
+            let close = tokens[last].as_str();
+            (0..last).rev().find(|&j| {
+                depth[j] == depth[last]
+                    && (BRACKETS.iter().any(|(o, c, _)| *o == tokens[j] && *c == close)
+                        || GROUPS.iter().any(|(o, c)| *o == tokens[j] && *c == close))
             })
         }
-        t if t == "_" || is_ident(t) => Some(last),
+        t if t == "_" || is_ident(t) || is_literal(t) => Some(last),
         _ => None,
     }
 }
@@ -613,7 +1092,7 @@ fn term_start(tokens: &[String]) -> Option<usize> {
 /// it is written on. See [`expand_postfix`].
 fn is_ident(t: &str) -> bool {
     let name = t.strip_prefix('.').unwrap_or(t);
-    name != "_" && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+    name != "_" && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '«')
 }
 
 /// A numeric literal, which every elaborated statement spells the same way.
@@ -622,7 +1101,53 @@ fn is_ident(t: &str) -> bool {
 /// anywhere in a pattern is that head symbol and never a name to look up --
 /// `Nat.zero_lt_one` is stored as `LT.lt` over two `OfNat.ofNat`s.
 fn is_numeral(t: &str) -> bool {
-    !t.is_empty() && t.chars().all(|c| c.is_numeric())
+    (!t.is_empty() && t.chars().all(|c| c.is_numeric()))
+        || t.strip_prefix("0x").is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit())
+        })
+}
+
+fn is_char_literal(t: &str) -> bool {
+    let Some(content) = t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else {
+        return false;
+    };
+    if let Some(escape) = content.strip_prefix('\\') {
+        return matches!(escape, "\\" | "\"" | "'" | "r" | "n" | "t")
+            || escape
+                .strip_prefix('x')
+                .is_some_and(|hex| hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+            || escape
+                .strip_prefix('u')
+                .is_some_and(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    content.chars().count() == 1
+}
+
+fn is_string_literal(t: &str) -> bool {
+    t.len() >= 2 && t.starts_with('"') && t.ends_with('"')
+}
+
+fn scientific_mantissa(t: &str) -> bool {
+    let (whole, fraction) = t.split_once('.').map_or((t, None), |(a, b)| (a, Some(b)));
+    !whole.is_empty()
+        && whole.chars().all(|c| c.is_ascii_digit())
+        && fraction.is_none_or(|s| s.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_scientific(t: &str) -> bool {
+    match t.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => {
+            let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+            scientific_mantissa(mantissa)
+                && !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit())
+        }
+        None => t.contains('.') && scientific_mantissa(t),
+    }
+}
+
+fn is_literal(t: &str) -> bool {
+    is_numeral(t) || is_scientific(t) || is_char_literal(t) || is_string_literal(t)
 }
 
 /// What a numeral is in an elaborated statement.
@@ -646,14 +1171,50 @@ fn of_nat() -> DeclName {
 /// what they mention is in the type, so they become `--uses` conditions — see
 /// [`conditions_of`].
 fn split_on_arrows(tokens: &[String]) -> (Vec<&[String]>, &[String]) {
-    let mut parts: Vec<&[String]> = tokens.split(|t| t == "→").collect();
-    let concl = parts.pop().unwrap_or_default();
-    // A pattern that is nothing but arrows, or ends in one, has no conclusion
-    // to read; the parts before it are all there is, so nothing is split off.
-    if concl.is_empty() {
-        return (Vec::new(), tokens);
+    let mut hypotheses = Vec::new();
+    let mut concl = conclusion_tokens(tokens);
+    while let Some(at) = outer_arrow(concl) {
+        let after = conclusion_tokens(&concl[at + 1..]);
+        // An unfinished implication still asks about what was written.
+        if after.is_empty() {
+            break;
+        }
+        if at > 0 {
+            hypotheses.push(&concl[..at]);
+        }
+        concl = after;
     }
-    (parts.into_iter().filter(|p| !p.is_empty()).collect(), concl)
+    (hypotheses, concl)
+}
+
+/// Lean's implication has precedence 25, so an unparenthesized `↔` (20)
+/// contains the arrow rather than becoming one of its hypotheses.
+fn outer_arrow(tokens: &[String]) -> Option<usize> {
+    let depth = depths(tokens);
+    if outermost(tokens).is_some_and(|(i, _)| {
+        notation_at(tokens, &depth, i).is_some_and(|(_, _, prec, _)| prec < 25)
+    }) {
+        return None;
+    }
+    (0..tokens.len()).find(|i| tokens[*i] == "→" && depth[*i] == 0)
+}
+
+/// Peel off grouping and universal binders repeatedly: `(∀ x, (p → q))`
+/// has the same conclusion as `p → q`.
+fn conclusion_tokens(mut tokens: &[String]) -> &[String] {
+    loop {
+        let mut inner = without_foralls(ungrouped(tokens));
+        if inner.first().is_some_and(|t| matches!(t.as_str(), "let" | "have")) {
+            let depth = lambda_depths(inner);
+            if let Some(end) = (1..inner.len()).find(|&i| inner[i] == ";" && depth[i] == 0) {
+                inner = &inner[end + 1..];
+            }
+        }
+        if inner.len() == tokens.len() {
+            return tokens;
+        }
+        tokens = inner;
+    }
 }
 
 /// The conclusion with the `∀ …,` in front of it taken off, because a
@@ -689,6 +1250,26 @@ fn conditions_of(hypotheses: &[&[String]]) -> Vec<DeclName> {
         .collect()
 }
 
+fn let_conditions(tokens: &[String]) -> Vec<DeclName> {
+    let depth = lambda_depths(tokens);
+    let mut names = Vec::new();
+    for i in 0..tokens.len() {
+        if !matches!(tokens[i].as_str(), "let" | "have") {
+            continue;
+        }
+        let Some(end) = (i + 1..tokens.len()).find(|&j| tokens[j] == ";" && depth[j] == depth[i])
+        else {
+            continue;
+        };
+        let Some(value) = (i + 1..end).find(|&j| tokens[j] == ":=") else {
+            continue;
+        };
+        names.extend(constants(&tokens[value + 1..end]));
+        names.extend(notation_in(&tokens[value + 1..end]));
+    }
+    names
+}
+
 /// Whether a constant the pattern's notation names can be a `--uses`
 /// condition. `⊆` is `LE.le` in a `Set` lemma and `HasSubset.Subset` in a
 /// `List` one, and a condition can name only one of them: as a head it is
@@ -706,15 +1287,14 @@ fn is_condition(n: &DeclName) -> bool {
 /// Everything this looser than [`RELATION`] associates to the right or not at
 /// all, so of equals the first is the outermost.
 fn split_on_operator(tokens: &[String]) -> Option<(&[String], &str, &[String])> {
-    let depth = depths(tokens);
-    let (i, _) = tokens
-        .iter()
-        .zip(&depth)
-        .enumerate()
-        .filter(|(_, (_, d))| **d == 0)
-        .filter_map(|(i, (t, _))| notation(t).map(|(.., prec, _)| (i, prec)))
-        .filter(|(_, prec)| *prec <= RELATION)
-        .min_by_key(|(_, prec)| *prec)?;
+    let tokens = ungrouped(tokens);
+    if tokens.first().is_some_and(|t| t == "∃") {
+        return None;
+    }
+    let (i, _) = outermost(tokens)?;
+    if notation(&tokens[i]).is_none_or(|(.., prec, _)| prec > RELATION) {
+        return None;
+    }
     Some((&tokens[..i], &tokens[i], &tokens[i + 1..]))
 }
 
@@ -734,8 +1314,9 @@ fn notation_at(
     depth: &[usize],
     i: usize,
 ) -> Option<(&'static str, &'static str, u16, bool)> {
-    let negates =
-        tokens[i] == "-" && !(i > 0 && depth[i] <= depth[i - 1] && ends_term(&tokens[i - 1]));
+    let previous = tokens[..i].iter().rposition(|t| t != SPACE);
+    let negates = tokens[i] == "-"
+        && !previous.is_some_and(|j| depth[i] <= depth[j] && ends_term(&tokens[j]));
     match negates {
         true => NOTATION.iter().find(|(_, head, ..)| *head == "Neg.neg").copied(),
         false => notation(&tokens[i]),
@@ -753,11 +1334,17 @@ fn is_postfix(t: &str) -> bool {
 /// which can see it opened.
 fn ends_term(t: &str) -> bool {
     t == "_"
-        || is_ident(t)
-        || is_numeral(t)
+        || (is_ident(t) && !CONDITIONAL.contains(&t) && !BINDERS.contains(&t))
+        || is_literal(t)
         || is_postfix(t)
-        || ["]", "}", "⟩", "⦄"].contains(&t)
-        || BRACKETS.iter().any(|(_, close, _)| t.starts_with(close))
+        || GROUPS.iter().any(|(_, close)| closes(t, close))
+        || BRACKETS.iter().any(|(_, close, _)| closes(t, close))
+}
+
+fn closes(token: &str, delimiter: &str) -> bool {
+    token == delimiter
+        || (delimiter == "⟫" && token.starts_with("⟫_"))
+        || (delimiter == "]" && INDEXES.iter().any(|(close, _)| *close == token))
 }
 
 /// The constants the notation among these tokens stands for, wherever in them
@@ -773,8 +1360,17 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
     let depth = depths(tokens);
     // The innermost group each token is in, by where it opened.
     let opener = |i: usize| (0..i).rfind(|j| depth[*j] < depth[i]);
-    (0..tokens.len())
+    let mut names: Vec<DeclName> = (0..tokens.len())
         .filter_map(|i| {
+            if tokens[i] == "if" {
+                return Some(DeclName::new(conditional_head(tokens, i)));
+            }
+            if tokens[i] == "[" && !in_binder_header(tokens, &depth, i) {
+                return list_head(&tokens[i..]);
+            }
+            if tokens[i] == "{" && subtype(&tokens[i..]) {
+                return Some(DeclName::new("Subtype"));
+            }
             // A pair is notation too, spelled with the parentheses that
             // otherwise only group.
             if tokens[i] == "("
@@ -789,7 +1385,7 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
                 let opens = depth.get(i + 1).is_some_and(|d| *d > depth[i]);
                 let closed = (i + 1..tokens.len())
                     .find(|k| depth[*k] <= depth[i])
-                    .is_some_and(|k| tokens[k].starts_with(close));
+                    .is_some_and(|k| closes(&tokens[k], close));
                 return (opens && closed).then(|| DeclName::new(*head));
             }
             let (_, head, prec, _) = notation_at(tokens, &depth, i)?;
@@ -800,7 +1396,11 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
                 && opener(i).is_some_and(|j| BINDER_PREFIXES.contains(&tokens[j].as_str()));
             (!ranges).then(|| DeclName::new(head))
         })
-        .collect()
+        .collect();
+    if tokens.iter().any(|t| t == "∉") {
+        names.push(DeclName::new("Not"));
+    }
+    names
 }
 
 /// One side of a relation: its head symbol, and the identifiers left over.
@@ -811,15 +1411,44 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
 /// with `Real.exp` demoted to a `uses` condition.
 fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     let mut rest = constants(tokens);
+    let grouped = ungrouped(tokens);
+    if grouped.first().is_some_and(|t| matches!(t.as_str(), "∀" | "let" | "have"))
+        || outer_arrow(grouped).is_some()
+    {
+        // Function types and universal propositions are forallE, whose head
+        // is not a constant. Their domains and bodies still mention names.
+        return (ArgHead::Any, rest);
+    }
+    if grouped.first().is_some_and(|t| matches!(t.as_str(), "↑" | "⇑"))
+        && outermost(grouped).is_none()
+    {
+        // A coercion's head depends on the operand and target types. Preserve
+        // constants inside it, but do not mistake its operand for that head.
+        return (ArgHead::Any, rest);
+    }
+    if (grouped.first().is_some_and(|t| t == "⟨") || record_literal(grouped))
+        && outermost(grouped).is_none()
+    {
+        // Anonymous constructors and record literals need an expected type
+        // to choose their constructor; field labels are not constants.
+        return (ArgHead::Any, rest);
+    }
     if let Some(head) = head_of(tokens) {
         return (ArgHead::Named(head), rest);
     }
-    match tokens.iter().find(|t| *t == "_" || is_ident(t) || is_numeral(t)) {
+    match tokens.iter().find(|t| *t == "_" || is_ident(t) || is_literal(t)) {
         Some(t) if is_numeral(t) => (ArgHead::Named(of_nat()), rest),
+        Some(t) if is_scientific(t) => {
+            (ArgHead::Named(DeclName::new("OfScientific.ofScientific")), rest)
+        }
+        Some(t) if is_char_literal(t) => (ArgHead::Named(DeclName::new("Char.ofNat")), rest),
+        Some(t) if is_string_literal(t) => (ArgHead::Any, rest),
         // The head of this side is a bound variable or a `_` -- the `p.1` of
         // `p.1 x` is one -- so the side constrains nothing, which is what `_`
         // already means.
-        Some(t) if t == "_" || is_variable(t) => (ArgHead::Any, rest),
+        Some(t) if t == "_" || is_variable(t) || SORTS.contains(&t.as_str()) => {
+            (ArgHead::Any, rest)
+        }
         Some(t) => {
             if let Some(i) = rest.iter().position(|c| c.as_str() == t.as_str()) {
                 rest.remove(i);
@@ -869,7 +1498,67 @@ fn head_of(tokens: &[String]) -> Option<DeclName> {
             None => head_of(inside),
         };
     }
-    outermost(tokens).map(|(_, head)| DeclName::new(head))
+    if tokens.first().is_some_and(|t| t == "∃") {
+        return Some(DeclName::new("Exists"));
+    }
+    if tokens.first().is_some_and(|t| t == "if") {
+        return Some(DeclName::new(conditional_head(tokens, 0)));
+    }
+    if subtype(tokens) {
+        return Some(DeclName::new("Subtype"));
+    }
+    outermost(tokens)
+        .map(|(i, head)| DeclName::new(if tokens[i] == "∉" { "Not" } else { head }))
+        .or_else(|| list_head(tokens))
+}
+
+fn subtype(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|t| t == "{")
+        && tokens.iter().zip(depths(tokens)).any(|(t, d)| t == "//" && d == 1)
+}
+
+fn record_literal(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|t| t == "{")
+        && tokens.iter().zip(depths(tokens)).any(|(t, d)| t == ":=" && d == 1)
+}
+
+/// `if h : p` elaborates to `dite`; ordinary conditionals to `ite`.
+fn conditional_head(tokens: &[String], at: usize) -> &'static str {
+    let header: Vec<&str> = tokens[at + 1..]
+        .iter()
+        .filter(|t| t.as_str() != SPACE)
+        .take(2)
+        .map(String::as_str)
+        .collect();
+    if header.get(1) == Some(&":") { "dite" } else { "ite" }
+}
+
+fn list_head(tokens: &[String]) -> Option<DeclName> {
+    if tokens.first().is_none_or(|t| t != "[") {
+        return None;
+    }
+    let depth = depths(tokens);
+    let close = (1..tokens.len()).find(|&i| depth[i] == 0 && tokens[i] == "]")?;
+    let empty = tokens[1..close].iter().all(|t| t == SPACE);
+    Some(DeclName::new(if empty { "List.nil" } else { "List.cons" }))
+}
+
+fn in_binder_header(tokens: &[String], depth: &[usize], at: usize) -> bool {
+    (0..at).rev().any(|i| {
+        BINDER_PREFIXES.contains(&tokens[i].as_str())
+            && depth[i] < depth[at]
+            && (i + 1..tokens.len())
+                .find(|&j| tokens[j] == "," && depth[j] == depth[i])
+                .is_some_and(|comma| at < comma)
+    })
+}
+
+fn binder_comma(tokens: &[String], depth: &[usize], at: usize) -> bool {
+    (0..at).rev().any(|i| {
+        BINDER_PREFIXES.contains(&tokens[i].as_str())
+            && depth[i] == depth[at]
+            && (i + 1..tokens.len()).find(|&j| tokens[j] == "," && depth[j] == depth[i]) == Some(at)
+    })
 }
 
 /// An infix notation written among some tokens: which one it is, and the
@@ -907,9 +1596,15 @@ fn outermost(tokens: &[String]) -> Option<Written> {
 /// power, and how: the two sides of a relation, or the terms the head of a
 /// prefix pattern is applied to, numbered as the shape has them.
 fn powers_of(tokens: &[String]) -> Vec<(usize, Power)> {
+    if tokens.first().is_some_and(|t| t == "∃") {
+        return Vec::new();
+    }
     let args: Vec<&[String]> = match split_on_operator(tokens) {
         // A negated membership, whose sides are no arguments of its shape.
         Some((_, "∉", _)) => Vec::new(),
+        Some((_, "¬" | "!", rhs)) => vec![rhs],
+        Some((lhs, "∈", rhs)) => vec![rhs, lhs],
+        Some((lhs, "≍", rhs)) => vec![&[], lhs, &[], rhs],
         Some((lhs, _, rhs)) => vec![lhs, rhs],
         None => match constants(tokens).first() {
             Some(head) => arguments(tokens, head),
@@ -991,10 +1686,61 @@ fn ungrouped(mut tokens: &[String]) -> &[String] {
 /// pattern has `_` for it: a statement names its variables, and `s.card *
 /// s.card` is a square in one.
 pub fn powers_in(statement: &str) -> Vec<(usize, Power)> {
+    power_view_in(statement).0
+}
+
+/// Read a statement's powers in the argument view used by the query. Notation
+/// normally prints explicit operands, while `@` and HEq's two types use the
+/// full positions. Interleaved instances cannot be handled by a single offset.
+pub fn powers_in_shape(
+    statement: &str,
+    shape: &Shape,
+    include_implicit: bool,
+) -> Vec<(usize, Power)> {
+    let (powers, printed_full, surface_arity) = power_view_in(statement);
+    if powers.is_empty() || printed_full == include_implicit {
+        return powers;
+    }
+    let positions = shape.explicit_positions().or_else(|| {
+        // Legacy dumps do not carry visibility. The standard relations have
+        // known operand positions; ordinary notation puts its operands last.
+        if shape.concl.as_ref().is_some_and(|c| c.as_str() == "HEq") {
+            return Some(vec![Some(1), Some(3)]);
+        }
+        let arity = surface_arity.or_else(|| {
+            shape
+                .concl
+                .as_ref()
+                .and_then(|c| matches!(c.as_str(), "Eq" | "Ne" | "Iff").then_some(2))
+        })?;
+        let start = shape.args.len().checked_sub(arity)?;
+        Some((start..shape.args.len()).map(Some).collect())
+    });
+    let Some(positions) = positions else { return Vec::new() };
+    powers
+        .into_iter()
+        .filter_map(|(i, p)| {
+            let at = if include_implicit {
+                positions.get(i).copied().flatten()
+            } else {
+                positions.iter().position(|at| *at == Some(i))
+            }?;
+            Some((at, p))
+        })
+        .collect()
+}
+
+fn power_view_in(statement: &str) -> (Vec<(usize, Power)>, bool, Option<usize>) {
     let (lexemes, _) = strip_lambdas(lex(statement));
     let (tokens, _) = expand_postfix(lexemes);
     let (_, concl) = split_on_arrows(without_foralls(&tokens));
-    powers_of(without_foralls(concl))
+    let concl = without_foralls(concl);
+    let operator = split_on_operator(concl).map(|(_, op, _)| op);
+    let full = concl.first().is_some_and(|t| t == "@") || operator == Some("≍");
+    let arity = operator
+        .filter(|op| !matches!(*op, "≍" | "∉"))
+        .map(|op| if matches!(op, "¬" | "!") { 1 } else { 2 });
+    (powers_of(concl), full, arity)
 }
 
 /// The arguments the head of a prefix pattern is applied to, each as the
@@ -1008,7 +1754,10 @@ pub fn powers_in(statement: &str) -> Vec<(usize, Power)> {
 /// `(f a) b` is `f a b`, and a field is written that way: `l.Sublist l'` is
 /// `(.Sublist l) l'`, and `.Sublist` takes both.
 fn arguments<'a>(tokens: &'a [String], head: &DeclName) -> Vec<&'a [String]> {
-    let Some(at) = tokens.iter().position(|t| t.as_str() == head.as_str()) else {
+    let Some(at) = tokens
+        .iter()
+        .position(|t| t.as_str() == head.as_str() || (is_ident(t) && DeclName::new(t) == *head))
+    else {
         return Vec::new();
     };
     let depth = depths(tokens);
@@ -1041,8 +1790,15 @@ fn terms(tokens: &[String]) -> Vec<&[String]> {
     let mut i = 0;
     while i < tokens.len() {
         let t = tokens[i].as_str();
-        let opens = BRACKETS.iter().any(|(o, ..)| *o == t)
-            && depth.get(i + 1).is_some_and(|d| *d > depth[i]);
+        let closer = BRACKETS
+            .iter()
+            .find(|(o, ..)| *o == t)
+            .map(|(_, c, _)| *c)
+            .or_else(|| GROUPS.iter().find(|(o, _)| *o == t).map(|(_, c)| *c));
+        let opens = closer.is_some_and(|close| {
+            depth.get(i + 1).is_some_and(|d| *d > depth[i])
+                || tokens.get(i + 1).is_some_and(|next| closes(next, close))
+        });
         let end = match () {
             // Where a binder prefix ranges, up to its comma.
             _ if depth[i] > 0 => None,
@@ -1051,7 +1807,7 @@ fn terms(tokens: &[String]) -> Vec<&[String]> {
                     .find(|k| depth[*k] <= depth[i])
                     .map_or(tokens.len(), |k| k + 1),
             ),
-            _ if t == "_" || is_ident(t) || is_numeral(t) => Some(i + 1),
+            _ if t == "_" || is_ident(t) || is_literal(t) => Some(i + 1),
             _ => None,
         };
         match end {
@@ -1081,17 +1837,43 @@ fn terms(tokens: &[String]) -> Vec<&[String]> {
 /// deeper, which is what a reader who typed one means anyway.
 fn depths(tokens: &[String]) -> Vec<usize> {
     let mut out = Vec::with_capacity(tokens.len());
-    let mut open: Vec<&str> = Vec::new();
+    // A comma closes a binder's header. For ∀ and ∃ its body then occupies
+    // the rest of the enclosing group; an empty closer records that scope.
+    // Sum/product notation only brackets its header, since a relation after
+    // its body belongs to the surrounding expression.
+    let mut open: Vec<(&str, bool)> = Vec::new();
     for t in tokens {
-        if open.last().is_some_and(|close| t.starts_with(close)) {
-            open.pop();
+        if open.last().is_some_and(|(close, _)| close.is_empty())
+            && open
+                .iter()
+                .rev()
+                .find(|(close, _)| !close.is_empty())
+                .is_some_and(|(close, _)| closes(t, close) || (t == "," && *close != ","))
+        {
+            while open.last().is_some_and(|(close, _)| close.is_empty()) {
+                open.pop();
+            }
+        }
+        if open.last().is_some_and(|(close, _)| !close.is_empty() && closes(t, close)) {
+            let (_, body) = open.pop().unwrap();
             out.push(open.len());
+            if body {
+                open.push(("", false));
+            }
         } else if BINDER_PREFIXES.contains(&t.as_str()) {
             out.push(open.len());
-            open.push(",");
+            open.push((",", matches!(t.as_str(), "∀" | "∃" | "∃!")));
+        } else if t == "if" {
+            // The condition and both branches are terms belonging to the
+            // conditional. Their operators cannot head its surrounding term.
+            out.push(open.len());
+            open.push(("", false));
         } else if let Some((_, close, _)) = BRACKETS.iter().find(|(o, ..)| *o == t.as_str()) {
             out.push(open.len());
-            open.push(close);
+            open.push((close, false));
+        } else if let Some((_, close)) = GROUPS.iter().find(|(o, _)| *o == t.as_str()) {
+            out.push(open.len());
+            open.push((close, false));
         } else {
             out.push(open.len());
         }
@@ -1105,7 +1887,7 @@ fn enclosing(tokens: &[String]) -> Option<(Option<&'static str>, &[String])> {
     let (first, rest) = tokens.split_first()?;
     let (_, close, head) = BRACKETS.iter().find(|(o, ..)| *o == first.as_str())?;
     let (last, inside) = rest.split_last()?;
-    if !last.starts_with(close) {
+    if !closes(last, close) {
         return None;
     }
     // `|a| + |b|` opens and closes before the end: the group the first token
@@ -1125,7 +1907,7 @@ fn unreadable(tokens: &[String]) -> Vec<String> {
     let known = |t: &String| {
         t == "_"
             || is_ident(t)
-            || is_numeral(t)
+            || is_literal(t)
             || t == "→"
             || IGNORED.contains(&t.as_str())
             || notation(t).is_some()
@@ -1156,8 +1938,16 @@ fn is_variable(t: &str) -> bool {
 fn constants(tokens: &[String]) -> Vec<DeclName> {
     tokens
         .iter()
-        .filter(|t| is_ident(t) && !is_variable(t))
-        .map(|t| DeclName::new(t.clone()))
+        .enumerate()
+        .filter(|(i, t)| {
+            is_ident(t)
+                && !is_variable(t)
+                && !SORTS.contains(&t.as_str())
+                && !CONDITIONAL.contains(&t.as_str())
+                && !tokens.get(i + 1).is_some_and(|next| next == ":=")
+        })
+        .map(|(_, t)| DeclName::new(t.clone()))
+        .filter(|n| !n.is_internal())
         .collect()
 }
 
@@ -1386,7 +2176,7 @@ mod tests {
 
     #[test]
     fn an_unparseable_pattern_falls_back_to_text_not_to_everything() {
-        let p = parse("!!!");
+        let p = parse("§§§");
         assert!(!p.query.text.is_empty());
         assert!(!p.query.is_empty(), "the fallback must still constrain the search");
     }
@@ -1631,7 +2421,7 @@ mod tests {
         // A bracket with a space before it is a list, as in Lean.
         let p = parse("List.sum [a] = _");
         assert_eq!(p.query.shape.args[0], arg("List.sum"));
-        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+        assert_eq!(p.query.uses, vec![DeclName::new("List.cons")]);
     }
 
     /// The constant an index stands for could not be written instead: cut at

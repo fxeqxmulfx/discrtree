@@ -214,18 +214,43 @@ const SYMMETRIC: &[&str] = &["Eq", "Iff", "Ne"];
 /// is one of [`SYMMETRIC`] and trading them changes the question.
 fn turned(query: &Query) -> Option<Query> {
     let shape = &query.shape;
-    let symmetric = shape.concl.as_ref().is_some_and(|c| SYMMETRIC.contains(&c.as_str()));
-    if !symmetric || shape.args.len() != 2 || shape.args[0] == shape.args[1] {
+    let concl = shape.concl.as_ref()?.as_str();
+    if !SYMMETRIC.contains(&concl) {
+        return None;
+    }
+    // `@Eq` and `@Ne` put their type before the operands. A partial explicit
+    // application containing only the type and left operand cannot be turned.
+    let (left, right) = if shape.include_implicit && concl != "Iff" {
+        if shape.args.len() != 3 {
+            return None;
+        }
+        (1, 2)
+    } else {
+        if shape.args.len() != 2 {
+            return None;
+        }
+        (0, 1)
+    };
+    let power = |at| query.powers.iter().find(|(i, _)| *i == at).map(|(_, p)| p);
+    if shape.args[left] == shape.args[right]
+        && power(left) == power(right)
+        && query.inside.get(left).map(Vec::as_slice).unwrap_or_default()
+            == query.inside.get(right).map(Vec::as_slice).unwrap_or_default()
+    {
         return None;
     }
     let mut out = query.clone();
-    out.shape.args.reverse();
+    out.shape.args.swap(left, right);
     // And so does what was written inside a side.
     out.inside.resize(out.shape.args.len(), Vec::new());
-    out.inside.reverse();
+    out.inside.swap(left, right);
     // A power stays with the side it is written on.
     for (i, _) in &mut out.powers {
-        *i = 1 - *i;
+        if *i == left {
+            *i = right;
+        } else if *i == right {
+            *i = left;
+        }
     }
     Some(out)
 }
@@ -294,6 +319,9 @@ struct Reading {
     /// Each bare word Lean prints for a constant, and the constants it could
     /// be, commonest first.
     called: Vec<(String, Vec<DeclName>)>,
+    /// A method written on a constant receiver, e.g. `Ordering.lt.swap`.
+    /// The receiver and intermediate fields remain conditions on the type.
+    field_uses: Vec<(String, Vec<DeclName>)>,
     /// Words in lower case that name nothing: no row is called that, mentions
     /// it, or prints it for a constant of another name.
     ///
@@ -354,8 +382,44 @@ fn qualified(query: &Query, reading: &Reading) -> Option<Query> {
     for held in &mut out.inside {
         held.retain(|u| !variable(u));
     }
+    for (word, uses) in &reading.field_uses {
+        out.uses.extend(uses.iter().cloned());
+        out.pattern_uses.extend(uses.iter().cloned());
+        out.inside.resize(out.shape.args.len(), Vec::new());
+        for (i, held) in out.inside.iter_mut().enumerate() {
+            if query.shape.args.get(i).and_then(ArgHead::name).is_some_and(|n| n.as_str() == word)
+                || query.inside.get(i).is_some_and(|names| names.iter().any(|n| n.as_str() == word))
+            {
+                held.extend(uses.iter().cloned());
+            }
+        }
+    }
     any |= out.uses.len() != before;
     any.then_some(out)
+}
+
+/// Qualified names can be known only through statements when their defining
+/// module is outside this corpus, or a JSONL subset contains just theorems.
+fn qualified_names(repo: &dyn DeclRepo, word: &DeclName) -> Result<Vec<DeclName>> {
+    let suffix = DeclName::new(format!(".{word}"));
+    let names = repo.ending_in(&suffix)?;
+    if !names.is_empty() {
+        return Ok(names);
+    }
+    let refs = repo.find(&Query {
+        uses: vec![DeclName::new(format!(".{}", word.base()))],
+        generated: true,
+        limit: usize::MAX,
+        ..Query::new()
+    })?;
+    Ok(refs
+        .into_iter()
+        .filter(|d| crate::domain::decl::prints_bare(&d.ty, word.as_str()))
+        .flat_map(|d| d.consts)
+        .filter(|name| word.abbreviates(name))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 impl Find<'_> {
@@ -525,7 +589,7 @@ impl Find<'_> {
         for word in query.shape.heads().chain(&query.pattern_uses) {
             // A word written twice -- `exp _ ≤ exp _` -- is one word to
             // resolve and one line to report.
-            if word.as_str().contains('.') || seen.contains(&word.as_str()) {
+            if word.is_field() || seen.contains(&word.as_str()) {
                 continue;
             }
             seen.push(word.as_str());
@@ -536,10 +600,55 @@ impl Find<'_> {
             if self.repo.is_constant(word)? {
                 continue;
             }
+            // A printed namespace abbreviation is still a constant. Resolve
+            // the whole name before trying to read its prefix as a receiver:
+            // `Grind.ToInt.LT` denotes `Lean.Grind.ToInt.LT`, not a method on
+            // a value called `Grind.ToInt`.
             let called = self.repo.heads_called(word.as_str())?;
+            let called = if called.is_empty() && word.namespace().is_some() {
+                qualified_names(self.repo, word)?
+            } else {
+                called
+            };
             if !called.is_empty() {
-                out.called.push((word.as_str().to_owned(), called));
-            } else if word.as_str().starts_with(char::is_lowercase) {
+                out.called.push((word.to_string(), called));
+                continue;
+            }
+            let parts: Vec<&str> = crate::domain::name::components(word.as_str()).collect();
+            let mut receiver = None;
+            for at in (1..parts.len()).rev() {
+                let prefix = DeclName::new(parts[..at].join("."));
+                let known = if self.repo.is_constant(&prefix)? {
+                    Some(prefix.clone())
+                } else if prefix.namespace().is_some() {
+                    match self.repo.heads_called(prefix.as_str())?.into_iter().next() {
+                        Some(name) => Some(name),
+                        None => qualified_names(self.repo, &prefix)?.into_iter().next(),
+                    }
+                } else {
+                    None
+                };
+                let Some(prefix) = known else { continue };
+                let is_type = self
+                    .repo
+                    .get(&prefix)?
+                    .is_some_and(|d| matches!(d.kind, DeclKind::Inductive | DeclKind::Structure));
+                if !is_type {
+                    receiver = Some((at, prefix));
+                    break;
+                }
+            }
+            if let Some((at, prefix)) = receiver {
+                let field = DeclName::new(format!(".{}", parts.last().expect("qualified name")));
+                let mut uses = vec![prefix];
+                uses.extend(
+                    parts[at..parts.len() - 1].iter().map(|p| DeclName::new(format!(".{p}"))),
+                );
+                out.field_uses.push((word.to_string(), uses));
+                out.called.push((word.to_string(), vec![field]));
+                continue;
+            }
+            if !word.as_str().contains('.') && word.as_str().starts_with(char::is_lowercase) {
                 out.variables.push(word.as_str().to_owned());
             }
         }
@@ -801,7 +910,7 @@ impl Find<'_> {
     /// with one argument left out.
     fn no_such_shape(&self, shape: &Shape) -> Result<Empty> {
         let hit = |args: Vec<ArgHead>| -> Result<bool> {
-            let shape = Shape { concl: shape.concl.clone(), args };
+            let shape = Shape { args, ..shape.clone() };
             Ok(!self.repo.find(&Query { shape, limit: 1, ..Query::new() })?.is_empty())
         };
         let mut rev = shape.args.clone();
@@ -834,7 +943,7 @@ impl Find<'_> {
         if shape.concl.is_none() || !shape.args.iter().any(|a| a.name().is_some()) {
             return Ok(Vec::new());
         }
-        let free = Shape { concl: None, args: shape.args.clone() };
+        let free = Shape { concl: None, ..shape.clone() };
         let rows = self.repo.find(&Query { shape: free, limit: SPREAD, ..Query::new() })?;
         let mut counts: BTreeMap<DeclName, usize> = BTreeMap::new();
         for d in rows {
