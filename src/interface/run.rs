@@ -308,38 +308,32 @@ impl App {
                  stripped, so a lambda matches any argument"
             );
         }
-        if self.verbose {
-            if let Some((p, parsed)) = args.pattern.as_deref().zip(parsed) {
-                eprintln!(
-                    "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}",
-                    parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
-                    parsed.query.shape.args.len(),
-                    parsed.operator.map_or(String::new(), |o| format!(", operator `{o}`")),
-                    match parsed.variables.is_empty() {
-                        true => String::new(),
-                        false => format!(", `{}` as `_`", parsed.variables.join("`, `")),
-                    },
-                    match parsed.hypotheses {
-                        0 => String::new(),
-                        n => format!(", {n} hypothesis/es read as conditions"),
-                    },
-                    // What the shape cannot hold is searched for all the same,
-                    // and a reader checking the read should see where it went.
-                    match parsed.query.uses.is_empty() {
-                        true => String::new(),
-                        false => format!(
-                            ", --uses {}",
-                            parsed
-                                .query
-                                .uses
-                                .iter()
-                                .map(|u| u.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        ),
-                    },
-                );
-            }
+        if self.verbose
+            && let Some((p, parsed)) = args.pattern.as_deref().zip(parsed)
+        {
+            eprintln!(
+                "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}",
+                parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
+                parsed.query.shape.args.len(),
+                parsed.operator.map_or(String::new(), |o| format!(", operator `{o}`")),
+                match parsed.variables.is_empty() {
+                    true => String::new(),
+                    false => format!(", `{}` as `_`", parsed.variables.join("`, `")),
+                },
+                match parsed.hypotheses {
+                    0 => String::new(),
+                    n => format!(", {n} hypothesis/es read as conditions"),
+                },
+                // What the shape cannot hold is searched for all the same,
+                // and a reader checking the read should see where it went.
+                match parsed.query.uses.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        ", --uses {}",
+                        parsed.query.uses.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(" ")
+                    ),
+                },
+            );
         }
         let mut repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);

@@ -8,7 +8,9 @@
 
 use crate::domain::decl::{ArgHead, Shape};
 use crate::domain::name::DeclName;
+use crate::domain::numeral::{self, Scientific};
 use crate::domain::query::{Power, Query, Spelling};
+use crate::domain::term::Term;
 
 /// Notation to head symbol, with Lean's own binding strength and whether it
 /// associates to the left: the loosest notation on a side is its outermost
@@ -272,6 +274,11 @@ fn read(pattern: &str) -> Parsed {
         None
     };
     let bound = mark_bound_variables(&mut lexemes);
+    for token in &mut lexemes {
+        if let Some(name) = type_alias(token) {
+            *token = name.to_string();
+        }
+    }
     let (all, receivers) = expand_postfix(lexemes);
     // One word, one reading: the `xs` of `xs.length` is a variable, and so is
     // the `xs` of `xs ++ ys` beside it.
@@ -285,6 +292,7 @@ fn read(pattern: &str) -> Parsed {
     let tokens = without_foralls(tokens);
     let assumed: Vec<DeclName> =
         conditions_of(&hypotheses).into_iter().chain(let_conditions(&all)).collect();
+    let assumed_names = assumed.clone();
     let mut query = Query::new();
     let mut operator = None;
     // The tokens each argument of the shape was read off.
@@ -386,6 +394,30 @@ fn read(pattern: &str) -> Parsed {
     let nested: Vec<DeclName> =
         notation_in(&all).into_iter().filter(|n| !query.shape.heads().any(|h| h == n)).collect();
     query.uses = dedup(std::mem::take(&mut query.uses).into_iter().chain(nested).collect());
+    // Ascriptions and literals belong to their term, not to any occurrence
+    // elsewhere in the declaration. A numeral's head alone cannot tell zero
+    // from one. Lambda bodies have already been read as wildcards.
+    let type_depth = depths(tokens);
+    let ascribed =
+        tokens.iter().enumerate().any(|(i, t)| t == ":" && is_ascription(tokens, &type_depth, i));
+    if ascribed || tokens.iter().any(|t| is_numeral(t) || is_scientific(t)) {
+        let mut term = term_of(tokens);
+        if ascribed || term.has_numeric_literals() {
+            for (i, power) in &query.powers {
+                if let Some(arg) = term.args.get_mut(*i) {
+                    arg.power = Some(power.exponent);
+                }
+            }
+            if ascribed {
+                // Type parameters can specialize to names absent from the
+                // original declaration. Literal queries keep the existing
+                // constant conditions of their surrounding pattern.
+                let positioned = term.names();
+                query.uses.retain(|n| !positioned.contains(n) || assumed_names.contains(n));
+            }
+            query.term = Some(term);
+        }
+    }
     query.inside = inside(&all, &written, &query.uses);
     Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown }
 }
@@ -941,11 +973,15 @@ fn expand_ranges(mut tokens: Vec<String>) -> Vec<String> {
         };
         let mut expanded = vec!["(".to_string(), (*head).to_string(), SPACE.to_string()];
         if *left {
+            expanded.push("(".to_string());
             expanded.extend_from_slice(&tokens[start..at]);
+            expanded.push(")".to_string());
             expanded.push(SPACE.to_string());
         }
         if *right {
+            expanded.push("(".to_string());
             expanded.extend_from_slice(&tokens[at + 1..end]);
+            expanded.push(")".to_string());
         }
         expanded.push(")".to_string());
         tokens.splice(start..end, expanded);
@@ -1929,8 +1965,218 @@ fn unreadable(tokens: &[String]) -> Vec<String> {
 /// same pattern mean different things in different projects, and the one
 /// project where something is called `a` is the one where that is a typo.
 fn is_variable(t: &str) -> bool {
+    if type_alias(t).is_some() {
+        return false;
+    }
     let mut cs = t.chars();
     cs.next().is_some_and(char::is_alphabetic) && cs.all(|c| c.is_numeric() || "'_!?".contains(c))
+}
+
+/// Common type notation is a constant even though its spelling is one letter.
+fn type_alias(t: &str) -> Option<&'static str> {
+    match t {
+        "ℕ" => Some("Nat"),
+        "ℤ" => Some("Int"),
+        "ℚ" => Some("Rat"),
+        "ℝ" => Some("Real"),
+        "ℂ" => Some("Complex"),
+        _ => None,
+    }
+}
+
+/// Binder annotations do not ascribe the enclosing term.
+fn is_ascription(tokens: &[String], depth: &[usize], at: usize) -> bool {
+    if in_binder_header(tokens, depth, at) {
+        return false;
+    }
+    if let Some(open) = (0..at).rfind(|i| depth[*i] < depth[at])
+        && tokens[open] == "{"
+        && subtype(&tokens[open..])
+        && !(open + 1..at).any(|i| tokens[i] == "//" && depth[i] == depth[at])
+    {
+        return false;
+    }
+    true
+}
+
+/// Surface syntax with nested applications and positioned ascriptions.
+fn term_of(tokens: &[String]) -> Term {
+    let tokens = ungrouped(tokens);
+    let depth = depths(tokens);
+    if tokens.first().is_some_and(|t| t == "if") {
+        let branch = |keyword: &str| {
+            tokens.iter().enumerate().position(|(i, t)| t == keyword && depth[i] == 1)
+        };
+        if let Some((then, otherwise)) = branch("then").zip(branch("else")) {
+            let head = conditional_head(tokens, 0);
+            let condition = term_of(&tokens[1..then]);
+            // Dependent branches elaborate to lambdas, which the search
+            // deliberately treats as wildcards.
+            let branches = if head == "dite" {
+                vec![Term::default(), Term::default()]
+            } else {
+                vec![term_of(&tokens[then + 1..otherwise]), term_of(&tokens[otherwise + 1..])]
+            };
+            return Term::named(head, std::iter::once(condition).chain(branches).collect());
+        }
+    }
+    if let Some(i) = tokens.iter().enumerate().position(|(i, t)| t == ":" && depth[i] == 0) {
+        let mut term = term_of(&tokens[..i]);
+        term.ty = Some(Box::new(term_of(&tokens[i + 1..])));
+        return term;
+    }
+    if let Some(i) = outer_arrow(tokens) {
+        return Term::named("$forall", vec![term_of(&tokens[..i]), term_of(&tokens[i + 1..])]);
+    }
+    if subtype(tokens) {
+        let split = tokens.iter().enumerate().position(|(i, t)| t == "//" && depth[i] == 1);
+        let colon = tokens.iter().enumerate().position(|(i, t)| t == ":" && depth[i] == 1);
+        if let Some((colon, split)) = colon.zip(split) {
+            let mut term =
+                Term::named("Subtype", vec![term_of(&tokens[colon + 1..split]), Term::default()]);
+            term.implicit = true;
+            return term;
+        }
+    }
+    if let Some((i, head)) = outermost(tokens) {
+        let (lhs, rhs) = (&tokens[..i], &tokens[i + 1..]);
+        if tokens[i] == "∉" {
+            return Term::named(
+                "Not",
+                vec![Term::named("Membership.mem", vec![term_of(rhs), term_of(lhs)])],
+            );
+        }
+        if tokens[i] == "≍" {
+            let mut term = Term::named(
+                "HEq",
+                vec![Term::default(), term_of(lhs), Term::default(), term_of(rhs)],
+            );
+            term.implicit = true;
+            return term;
+        }
+        let args = match tokens[i].as_str() {
+            "∈" => vec![term_of(rhs), term_of(lhs)],
+            "¬" | "!" => vec![term_of(rhs)],
+            "⁻¹" => vec![term_of(lhs)],
+            "-" if head == "Neg.neg" => vec![term_of(rhs)],
+            _ => vec![term_of(lhs), term_of(rhs)],
+        };
+        return Term::named(head, args);
+    }
+    if tokens.first().is_some_and(|t| matches!(t.as_str(), "↑" | "⇑")) {
+        return Term { args: vec![term_of(&tokens[1..])], ..Term::default() };
+    }
+    if let Some((None, inside)) = enclosing(tokens)
+        && is_tuple(inside)
+    {
+        let mut components = comma_terms(inside).into_iter().rev();
+        let last = components.next().unwrap_or_default();
+        return components.fold(last, |tail, component| Term::named(PAIR, vec![component, tail]));
+    }
+    if tokens.first().is_some_and(|t| t == "⟨") && tokens.last().is_some_and(|t| t == "⟩") {
+        return Term { args: comma_terms(&tokens[1..tokens.len() - 1]), ..Term::default() };
+    }
+    if let Some(head) = list_head(tokens) {
+        if head.as_str() == "List.nil" {
+            return Term::named("List.nil", Vec::new());
+        }
+        let inside = &tokens[1..tokens.len() - 1];
+        let d = depths(inside);
+        let mut start = 0;
+        let mut elements = Vec::new();
+        for i in 0..inside.len() {
+            if inside[i] == "," && d[i] == 0 {
+                elements.push(term_of(&inside[start..i]));
+                start = i + 1;
+            }
+        }
+        elements.push(term_of(&inside[start..]));
+        return elements
+            .into_iter()
+            .rev()
+            .fold(Term::named("List.nil", Vec::new()), |tail, element| {
+                Term::named("List.cons", vec![element, tail])
+            });
+    }
+    if let Some((Some(head), inside)) = enclosing(tokens) {
+        let args = if head == "Inner.inner" {
+            let d = depths(inside);
+            let comma = inside.iter().enumerate().position(|(i, t)| t == "," && d[i] == 0);
+            let mut args = Vec::new();
+            if let Some(field) = tokens.last().and_then(|t| t.strip_prefix("⟫_")) {
+                args.push(Term::named(type_alias(field).unwrap_or(field), Vec::new()));
+            } else {
+                args.push(Term::default());
+            }
+            if let Some(i) = comma {
+                args.extend([term_of(&inside[..i]), term_of(&inside[i + 1..])]);
+            }
+            args
+        } else {
+            vec![term_of(inside)]
+        };
+        return Term::named(head, args);
+    }
+    let pieces = terms(tokens);
+    let Some(first) = pieces.first() else { return Term::default() };
+    // Parenthesized functions still apply to the terms that follow them.
+    if first.len() > 1 && first.first().is_some_and(|t| t == "(") {
+        let mut term = term_of(first);
+        term.args.extend(pieces.iter().skip(1).map(|p| term_of(p)));
+        return term;
+    }
+    let Some(word) = first.iter().find(|t| t.as_str() != "@") else { return Term::default() };
+    if let Some(literal) = numeral::natural(word) {
+        return Term { literal: Some(literal), ..Term::default() };
+    }
+    if is_scientific(word)
+        && let Some(value) = Scientific::parse(word)
+    {
+        return Term::named(
+            "OfScientific.ofScientific",
+            vec![
+                Term { literal: Some(value.mantissa), ..Term::default() },
+                Term::named(if value.negative { "Bool.true" } else { "Bool.false" }, Vec::new()),
+                Term { literal: Some(value.exponent), ..Term::default() },
+            ],
+        );
+    }
+    if word.as_str() == "_" || is_variable(word) {
+        return Term {
+            args: pieces.iter().skip(1).map(|p| term_of(p)).collect(),
+            ..Term::default()
+        };
+    }
+    if word.as_str() == "Sort" {
+        return Term::named("$sort", Vec::new());
+    }
+    if matches!(word.as_str(), "Type" | "Prop") {
+        return Term { head: Some("$sort".into()), literal: Some(word.clone()), ..Term::default() };
+    }
+    if !is_ident(word)
+        || is_variable(word)
+        || word.as_str() == "_"
+        || SORTS.contains(&word.as_str())
+    {
+        return Term::default();
+    }
+    let mut term = Term::named(word.clone(), pieces.iter().skip(1).map(|p| term_of(p)).collect());
+    term.implicit = tokens.first().is_some_and(|t| t == "@");
+    term
+}
+
+fn comma_terms(tokens: &[String]) -> Vec<Term> {
+    let depth = depths(tokens);
+    let mut start = 0;
+    let mut terms = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if token == "," && depth[i] == 0 && !binder_comma(tokens, &depth, i) {
+            terms.push(term_of(&tokens[start..i]));
+            start = i + 1;
+        }
+    }
+    terms.push(term_of(&tokens[start..]));
+    terms
 }
 
 /// The identifiers that name a declaration, which is every identifier that is
@@ -2667,8 +2913,8 @@ mod tests {
     fn a_constant_written_inside_an_argument_is_said_to_be_there() {
         let p = parse("MeasurableSpace (EuclideanSpace ℝ (Fin 3))");
         assert_eq!(p.query.shape.args, vec![arg("EuclideanSpace")]);
-        assert_eq!(p.query.uses, vec![DeclName::new("Fin")]);
-        assert_eq!(p.query.inside, vec![vec![DeclName::new("Fin")]]);
+        assert_eq!(p.query.uses, vec![DeclName::new("Fin"), DeclName::new("Real")]);
+        assert_eq!(p.query.inside, vec![vec![DeclName::new("Fin"), DeclName::new("Real")]]);
         let p = parse("Real.exp (Real.log x) = x");
         assert_eq!(p.query.inside, vec![vec![DeclName::new("Real.log")], Vec::new()]);
     }
@@ -2678,7 +2924,7 @@ mod tests {
     #[test]
     fn a_constant_written_outside_an_argument_too_is_not_only_inside_it() {
         let p = parse("Fin 3 → MeasurableSpace (EuclideanSpace ℝ (Fin 3))");
-        assert_eq!(p.query.uses, vec![DeclName::new("Fin")]);
-        assert_eq!(p.query.inside, vec![Vec::<DeclName>::new()]);
+        assert_eq!(p.query.uses, vec![DeclName::new("Fin"), DeclName::new("Real")]);
+        assert_eq!(p.query.inside, vec![vec![DeclName::new("Real")]]);
     }
 }

@@ -32,6 +32,19 @@ pub trait DeclRepo {
     /// 315 430 against 148 610 constants for the `Eq` rows of Mathlib with a
     /// product. Ask [`DeclRepo::get_many`] for a row with everything.
     fn find(&self, query: &Query) -> Result<Vec<Decl>>;
+    /// Sources whose otherwise matching rows have no nested expression. A
+    /// type or literal query must ask for a refresh instead of omitting them.
+    fn missing_term_sources(&self, query: &Query) -> Result<Vec<SourceId>> {
+        let probe = Query { term: None, limit: usize::MAX, ..query.clone() };
+        Ok(self
+            .find(&probe)?
+            .into_iter()
+            .filter(|d| d.term.is_none())
+            .map(|d| d.source)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
     /// How many rows match, which is not the same question as which rows do:
     /// a diagnosis asks how big the scope a search narrowed to is, and the
     /// rows themselves are not wanted. The default answers by listing them,
@@ -212,7 +225,8 @@ pub struct Provenance {
 /// stays behind until it is dumped again.
 /// 3 preserves `ofNat` constants, records explicit argument heads, and carries
 /// its format explicitly.
-pub const ROW_FORMAT: i64 = 3;
+/// 4 records nested conclusion expressions with inferred argument types.
+pub const ROW_FORMAT: i64 = 4;
 
 impl Provenance {
     /// The writer half, filled in by this build, with the rest left to the

@@ -87,6 +87,7 @@ fn to_decl(
         // No elaborator, so no conclusion head symbol. Leaving this empty is
         // what keeps shape search from silently returning text rows.
         shape: Shape::default(),
+        term: None,
         consts: s.idents,
         deps,
         doc: s.doc,

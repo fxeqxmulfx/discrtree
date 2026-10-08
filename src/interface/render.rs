@@ -298,10 +298,8 @@ pub fn find(hits: &Hits, long: bool) -> String {
         if !ty.is_empty() {
             out.push_str(&format!("  {ty}\n"));
         }
-        if long {
-            if let Some(s) = d.summary() {
-                out.push_str(&format!("  -- {}\n", first_line(s, 200)));
-            }
+        if long && let Some(s) = d.summary() {
+            out.push_str(&format!("  -- {}\n", first_line(s, 200)));
         }
     }
     // Saying only the count leaves the reader unable to tell a complete answer

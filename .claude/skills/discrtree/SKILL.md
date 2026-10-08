@@ -18,9 +18,9 @@ session and beyond what is imported.
 
 Not guessable:
 
-- Write a pattern as Lean prints it: `_` is anything, and so are a one-letter
-  name (`a`, `x`) and a lambda; `A → B` searches for `B` with the hypotheses
-  as `--uses`. A pattern implies `--elaborated`: a text row has no shape.
+- Patterns use Lean notation: `_`, a letter, or a lambda is any term.
+  ℕ ℤ ℚ ℝ ℂ are types; `(_ : ℂ)` fixes the type. Numerals match values.
+  `A → B` adds `A` as `--uses`. A pattern implies `--elaborated`.
 - A row marked `[text]` was read by a scanner, not Lean: no shape, guessed deps.
 - Lean core (`Init`, `Std`, `Lean`) is a source you add yourself:
   `kind = "core"`, no path or root. Without it `List.head?` is `no match`.

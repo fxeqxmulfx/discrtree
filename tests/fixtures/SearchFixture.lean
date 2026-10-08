@@ -159,4 +159,40 @@ theorem interleaved_powers (n : Nat) : InterleavedValues (n ^ 2) (n * n) := infe
 theorem pow_exponents (n m : Nat) (h : n ^ 3 = m ^ 2) : n ^ 3 = m ^ 2 := h
 theorem pow_heq (n : Nat) : (n ^ 2) ≍ (n * n) := heq_of_eq (Nat.pow_two n)
 
+def TypedValue {α : Type} (value : α) : α := value
+theorem typed_nat (n : Nat) : TypedValue n = n := rfl
+theorem typed_int (n : Int) : TypedValue n = n := rfl
+theorem typed_nat_mentions_int (n : Nat) (_z : Int) : TypedValue n = n := rfl
+theorem typed_generic {α : Type} (value : α) : TypedValue value = value := rfl
+theorem typed_list_nat (ns : List Nat) : TypedValue ns = ns := rfl
+theorem typed_list_int (zs : List Int) : TypedValue zs = zs := rfl
+theorem typed_function (f : Nat → Nat) : TypedValue f = f := rfl
+theorem typed_higher_type {F : Type → Type} (value : F Nat) : TypedValue value = value := rfl
+
+def SameArgs {α : Type} (_x _y : α) : Prop := True
+theorem typed_same_generic {α : Type} (x y : α) : SameArgs x y := trivial
+theorem typed_same_nat (n m : Nat) : SameArgs n m := trivial
+
+theorem numeral_zero : TypedValue (0 : Nat) = 0 := rfl
+theorem numeral_one : TypedValue (1 : Nat) = 1 := rfl
+theorem numeral_two : TypedValue (2 : Nat) = 2 := rfl
+theorem numeral_zero_mentions_one (n : Nat) (_h : n = 1) : TypedValue (0 : Nat) = 0 := rfl
+theorem numeral_one_reversed : 1 = TypedValue (1 : Nat) := rfl
+theorem numeral_nested_one (n : Nat) : TypedValue (n + 1) = n + 1 := rfl
+theorem numeral_nested_two (n : Nat) : TypedValue (n + 2) = n + 2 := rfl
+theorem numeral_negative_one : TypedValue (-1 : Int) = -1 := rfl
+theorem numeral_negative_two : TypedValue (-2 : Int) = -2 := rfl
+theorem numeral_large :
+    TypedValue (340282366920938463463374607431768211456 : Nat) =
+      340282366920938463463374607431768211456 := rfl
+theorem numeral_hex : TypedValue (0xff : Nat) = 255 := rfl
+theorem numeral_scientific : TypedValue (1.25 : Float) = 1.25 := rfl
+theorem numeral_scientific_other : TypedValue (1.5 : Float) = 1.5 := rfl
+theorem numeral_scientific_positive_exponent : TypedValue (1.25e3 : Float) = 1.25e3 := rfl
+theorem numeral_scientific_negative_exponent : TypedValue (1.25e-3 : Float) = 1.25e-3 := rfl
+theorem numeral_scientific_trailing_zeroes : TypedValue (1.2500 : Float) = 1.2500 := rfl
+theorem numeral_scientific_zero : TypedValue (0.00e30 : Float) = 0.00e30 := rfl
+theorem numeral_fin_three : TypePred (Fin 3) := ⟨⟨0, by decide⟩⟩
+theorem numeral_fin_four : TypePred (Fin 4) := ⟨⟨0, by decide⟩⟩
+
 end SearchFixture

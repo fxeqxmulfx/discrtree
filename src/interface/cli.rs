@@ -298,6 +298,12 @@ pub enum Command {
     /// become --uses conditions rather than being dropped. A field is its name
     /// in any namespace: `l.length` is `.length` applied to `_`. `-v` prints
     /// what the pattern was read as.
+    /// `(_ : ℂ)` constrains that argument's type. ℕ ℤ ℚ ℝ ℂ are type
+    /// notation, not variables. Polymorphic parameters specialize consistently;
+    /// this does not run typeclass synthesis. Older dumps need `dt refresh`.
+    /// Numeric literals fix their value: '= 1' excludes '= 0', including in
+    /// nested arguments. Decimal, hexadecimal and scientific spellings agree
+    /// when they express the same value. `_` matches any value.
     ///
     /// Conditions combine with AND, and a pattern may be mixed with any flag.
     /// Asking for a shape implies --elaborated: a text row has no conclusion

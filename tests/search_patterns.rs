@@ -3,6 +3,46 @@ use discrtree::domain::name::DeclName;
 use discrtree::domain::pattern;
 
 #[test]
+fn numeric_values_are_distinct_positioned_constraints() {
+    let one = pattern::parse("ENNReal.ofReal _ = 1").query;
+    let zero = pattern::parse("ENNReal.ofReal _ = 0").query;
+    assert_eq!(one.shape, zero.shape);
+    assert_ne!(one, zero, "caches must distinguish numeric values");
+    assert_eq!(one.term.as_ref().unwrap().args[1].literal.as_deref(), Some("1"));
+    assert!(pattern::parse("ENNReal.ofReal _ = _").query.term.is_none());
+    assert_eq!(pattern::parse("0xff = _").query, pattern::parse("255 = _").query);
+    assert_eq!(pattern::parse("0001 = _").query, pattern::parse("1 = _").query);
+    assert_eq!(pattern::parse("1.2500 = _").query, pattern::parse("125e-2 = _").query);
+    assert_eq!(pattern::parse("1.25e+3 = _").query, pattern::parse("125e1 = _").query);
+    assert_eq!(pattern::parse("1.25e-3 = _").query, pattern::parse("0.00125 = _").query);
+    assert_eq!(
+        pattern::parse("1.0e999999999999999999999999999999999999 = _").query,
+        pattern::parse("10e999999999999999999999999999999999998 = _").query
+    );
+    assert_eq!(
+        pattern::parse("1.25e-999999999999999999999999999999999999 = _").query,
+        pattern::parse("125e-1000000000000000000000000000000000001 = _").query
+    );
+    let negative = pattern::parse("_ = -2").query.term.unwrap();
+    assert_eq!(negative.args[1].head.as_deref(), Some("Neg.neg"));
+    assert_eq!(negative.args[1].args[0].literal.as_deref(), Some("2"));
+}
+
+#[test]
+fn type_notation_and_ascriptions_are_positioned_constraints() {
+    let unicode = pattern::parse("inner ℝ (_ : ℂ) _ = _");
+    let names = pattern::parse("inner Real (_ : Complex) _ = _");
+    assert_eq!(unicode.query, names.query);
+    assert!(unicode.variables.is_empty());
+    assert!(unicode.query.uses.is_empty(), "polymorphic lemmas need not name Complex");
+    let term = unicode.query.term.as_ref().expect("ascription retained");
+    assert_eq!(term.args[0].head.as_deref(), Some("inner"));
+    assert_eq!(term.args[0].args[0].head.as_deref(), Some("Real"));
+    assert_eq!(term.args[0].args[1].ty.as_ref().unwrap().head.as_deref(), Some("Complex"));
+    assert_ne!(unicode.query, pattern::parse("inner _ _ _ = _").query);
+}
+
+#[test]
 fn empty_groups_are_prefix_arguments_in_their_written_position() {
     let p = pattern::parse("List.Lex r [] (a :: l)");
     assert_eq!(

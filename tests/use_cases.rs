@@ -877,9 +877,25 @@ fn an_equation_found_only_the_other_way_round_is_answered_with_it() {
 /// their heads, for a reader who spells the power the other way from the
 /// lemma they want, or its relation the other way round.
 fn powers() -> FakeRepo {
+    // The numeric matcher needs the elaborated tree. These rows came from
+    // Mathlib and NumeralPowerFixture.lean, rather than from the surface parser.
+    let compiled: Vec<discrtree::infrastructure::jsonl::Row> =
+        include_str!("fixtures/powers-search.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
     let row = |name: &str, concl: &str, args: &[&str], consts: &[&str], ty: &str| {
         let mut d = shaped_as(name, "M", concl, args, consts);
+        if args.contains(&"Real") {
+            d.consts.push(DeclName::new("Real"));
+        }
         d.ty = ty.into();
+        d.term = compiled
+            .iter()
+            .find(|r| r.name == name || r.name == format!("NumeralPowerFixture.{name}"))
+            .unwrap_or_else(|| panic!("missing compiled power fixture {name}"))
+            .term
+            .clone();
         d
     };
     let over = "∀ {F : Type u_3} [inst : SeminormedAddCommGroup F] \

@@ -285,11 +285,11 @@ does not say which type it is about, so it matches either, and a `⊆` anywhere
 but the head is no `--uses` condition. `≤` is not widened the other way: on a
 list it is an order, not a sublist.
 
-An argument is matched through the reducible definitions it is written with,
+An argument head is matched through the reducible definitions it is written with,
 as Lean's own discrimination tree matches it. `EuclideanSpace` is an `abbrev`
 of `PiLp`, and `PiLp` one of `WithLp`, so instance synthesis finds
-`WithLp.measurableSpace` for `EuclideanSpace ℝ (Fin 3)`, and a pattern written
-at any of the three finds it too:
+`WithLp.measurableSpace` for `EuclideanSpace ℝ (Fin 3)`. Patterns with wildcard
+parameters find it under any of the three heads:
 
 ```
 $ dt find 'MeasurableSpace (EuclideanSpace _ _)'
@@ -305,8 +305,27 @@ applied patterns fix the first arguments of their head. Array literals `#[…]`,
 quoted strings and characters, and decimal scientific literals are also read
 as Lean terms; operators inside a quoted literal do not affect the search.
 
+Numeric literals constrain their value at the position where they are written:
+`dt find 'ENNReal.ofReal _ = 1'` finds `ENNReal.ofReal_one`, and excludes
+`ENNReal.ofReal_zero`. This also applies to nested arguments and exponents.
+Decimal and hexadecimal integers share a value (`255` and `0xff`), as do
+equivalent scientific spellings (`1.2500` and `125e-2`). Literals use the
+expression recorded by Lean; an older dump needs `dt refresh` to search their
+values. `_` continues to match any value. Values are checked in the recorded
+expression; for an alias that rewrites its arguments, use `_` to search just
+its head.
+
+Type ascriptions constrain the argument where they are written:
+`dt find 'inner ℝ (_ : ℂ) _ = _'` finds `Complex.inner`, and excludes
+`Real.inner_apply` and inner products on quaternions. The type notation `ℕ`,
+`ℤ`, `ℚ`, `ℝ`, and `ℂ` names `Nat`, `Int`, `Rat`, `Real`, and `Complex`.
+Polymorphic declarations can specialize their type parameters, consistently
+throughout the matched expression. This does not run typeclass synthesis.
+Argument types come from Lean, so an older dump needs `dt refresh` before it
+can answer an ascribed pattern; re-indexing the old dump alone is insufficient.
+
 A statement about the name written ranks above one about another name for it.
-What is written inside the argument, the `Fin` of `EuclideanSpace ℝ (Fin 3)`,
+What is written inside the argument, the `Fin` of `EuclideanSpace ℝ (Fin _)`,
 is asked only of a statement about the name written: unfolding is free to lose
 it, and this instance does not mention it. What a definition unfolds to is
 recorded when its source is dumped, so an index from before 0.61.0 matches as

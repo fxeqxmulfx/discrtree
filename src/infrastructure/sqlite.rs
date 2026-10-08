@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS decl (
   concl       TEXT,
   concl_args  TEXT NOT NULL DEFAULT '',
   concl_explicit_args TEXT,
+  term        TEXT,
   doc         TEXT,
   sorry       INTEGER NOT NULL DEFAULT 0,
   line_start  INTEGER,
@@ -111,7 +112,7 @@ CREATE TABLE IF NOT EXISTS source (
 /// and rebuilding costs minutes, which is what it would have cost to notice.
 ///
 /// Bump this whenever `SCHEMA` changes in a way an existing file cannot satisfy.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// The one index the side tables have, and the one thing a load does not need.
 ///
@@ -215,7 +216,7 @@ fn check_version(conn: &Connection) -> Result<()> {
 /// so the sources keep the row format they were written with, and that is what
 /// tells `dt status` they are behind.
 fn migrate(conn: &Connection, found: i64) -> Result<bool> {
-    if !(2..=5).contains(&found) {
+    if !(2..=6).contains(&found) {
         return Ok(false);
     }
     // Commit columns and their version together. A later text-index rebuild
@@ -233,7 +234,10 @@ fn migrate(conn: &Connection, found: i64) -> Result<bool> {
     if (2..=4).contains(&found) {
         tx.execute_batch("ALTER TABLE decl ADD COLUMN unfolds TEXT;")?;
     }
-    tx.execute_batch("ALTER TABLE decl ADD COLUMN concl_explicit_args TEXT;")?;
+    if found <= 5 {
+        tx.execute_batch("ALTER TABLE decl ADD COLUMN concl_explicit_args TEXT;")?;
+    }
+    tx.execute_batch("ALTER TABLE decl ADD COLUMN term TEXT;")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(true)
@@ -285,6 +289,25 @@ impl SqliteIndex {
 
     fn init(conn: Connection) -> Result<SqliteIndex> {
         check_version(&conn)?;
+        conn.create_scalar_function(
+            "term_matches",
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| {
+                // Cache the query expression, not each declaration expression.
+                let pattern = ctx.get_or_create_aux(
+                    1,
+                    |v| -> std::result::Result<
+                        crate::domain::term::Term,
+                        Box<dyn std::error::Error + Send + Sync>,
+                    > { Ok(serde_json::from_str(v.as_str()?)?) },
+                )?;
+                let actual = ctx.get::<Option<String>>(0)?;
+                Ok(actual
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .is_some_and(|t| pattern.matches(&t)))
+            },
+        )?;
         conn.create_scalar_function(
             "heads_named",
             2,
@@ -493,6 +516,7 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
                 .map(|args| crate::domain::name::name_list(&args).map(ArgHead::parse).collect()),
         ),
         consts: Vec::new(),
+        term: r.get::<_, Option<String>>("term")?.and_then(|s| serde_json::from_str(&s).ok()),
         deps: Vec::new(),
         doc: r.get("doc")?,
         has_sorry: r.get::<_, i64>("sorry")? != 0,
@@ -779,6 +803,20 @@ impl DeclRepo for SqliteIndex {
         self.provenance_of(source)
     }
 
+    fn missing_term_sources(&self, query: &Query) -> Result<Vec<SourceId>> {
+        let probe = Query { term: None, ..query.clone() };
+        let (filter, binds) = build_filter(&probe, self.has_fts());
+        let join = if filter.is_empty() { " WHERE" } else { " AND" };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT d.source FROM decl d{filter}{join} d.term IS NULL ORDER BY d.source"
+        ))?;
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        Ok(stmt
+            .query_map(bind.as_slice(), |r| Ok(SourceId::new(r.get::<_, String>(0)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     fn located_in(
         &self,
         source: &SourceId,
@@ -1059,6 +1097,10 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
     if let Some(heads) = heads_filter(q, &mut binds) {
         where_clauses.push(heads);
     }
+    if let Some(term) = &q.term {
+        where_clauses.push("term_matches(d.term, ?)".into());
+        binds.push(serde_json::to_string(term).expect("terms serialize"));
+    }
     // A field is a suffix, and still a seek: the key is `(decl_id, const)`,
     // so the `GLOB` runs over one row's constants and never over the table.
     //
@@ -1252,8 +1294,8 @@ impl DeclSink for SqliteIndex {
             let mut insert = tx.prepare_cached(
                 "INSERT OR REPLACE INTO decl
                  (name, source, module, kind, type, concl, concl_args, doc, sorry,
-                  line_start, line_end, elaborated, unfolds, concl_explicit_args)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                  line_start, line_end, elaborated, unfolds, concl_explicit_args, term)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             )?;
             // `OR IGNORE` because the side tables are keyed on (decl_id, value)
             // now. Both producers already deduplicate — the dumper because
@@ -1335,6 +1377,11 @@ impl DeclSink for SqliteIndex {
                     d.elaborated as i64,
                     d.unfolds.as_ref().map(DeclName::as_str),
                     explicit_args,
+                    d.term
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .expect("terms serialize"),
                 ])?;
                 // A replaced row is deleted and re-inserted, so this id is
                 // always fresh and its side rows are always new. Clearing them

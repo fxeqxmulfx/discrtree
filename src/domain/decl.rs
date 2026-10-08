@@ -369,6 +369,8 @@ pub struct Decl {
     /// text sources.
     pub ty: String,
     pub shape: Shape,
+    /// The conclusion with argument types and telescope parameter identities.
+    pub term: Option<crate::domain::term::Term>,
     /// Constants appearing in the type.
     pub consts: Vec<DeclName>,
     /// Dependencies. Exact (proof term) for compiled sources, approximated from
@@ -398,6 +400,7 @@ impl Decl {
             kind: DeclKind::Theorem,
             ty: String::new(),
             shape: Shape::default(),
+            term: None,
             consts: Vec::new(),
             deps: Vec::new(),
             doc: None,

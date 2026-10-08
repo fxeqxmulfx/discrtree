@@ -6,9 +6,11 @@ pub mod decl;
 pub mod lean_core;
 pub mod lean_text;
 pub mod name;
+mod numeral;
 pub mod pattern;
 pub mod query;
 pub mod source;
+pub mod term;
 pub mod vendor;
 
 pub use decl::{ArgHead, Decl, DeclKind, Shape, Span};

@@ -8,6 +8,7 @@
 use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
 use crate::domain::name::DeclName;
 use crate::domain::source::SourceId;
+use crate::domain::term::Term;
 
 #[derive(Debug, Clone, Default)]
 pub struct Query {
@@ -16,6 +17,9 @@ pub struct Query {
     pub name: Option<String>,
     /// Shape: conclusion head symbol and argument head symbols.
     pub shape: Shape,
+    /// Nested argument, type and literal constraints. Old rows without an elaborated
+    /// expression cannot answer these; their source needs a fresh dump.
+    pub term: Option<Term>,
     /// Constants the type must mention. Conditions combine with AND, because
     /// `--uses Real.exp,Finset.sum` means both.
     pub uses: Vec<DeclName>,
@@ -145,6 +149,7 @@ impl Query {
     pub fn is_empty(&self) -> bool {
         self.name_asked().is_none()
             && self.shape.is_empty()
+            && self.term.is_none()
             && self.uses.is_empty()
             && self.module.is_none()
             && self.source.is_none()
@@ -211,6 +216,17 @@ impl Query {
             };
             out.push((label, one(Query { uses: vec![c.clone()], ..Query::new() })));
         }
+        if let Some(term) = &self.term {
+            out.push((
+                if term.has_type_constraints() {
+                    "type constraints in the pattern"
+                } else {
+                    "numeric literals in the pattern"
+                }
+                .into(),
+                one(Query { term: Some(term.clone()), ..Query::new() }),
+            ));
+        }
         if let Some(m) = &self.module {
             out.push((format!("--in {m}"), one(Query { module: Some(m.clone()), ..Query::new() })));
         }
@@ -240,7 +256,7 @@ impl Query {
     /// implies it: a text row has no conclusion head symbol, so including it
     /// would silently drop the condition.
     pub fn needs_shape(&self) -> bool {
-        !self.shape.is_empty()
+        !self.shape.is_empty() || self.term.is_some()
     }
 
     pub fn matches(&self, d: &Decl) -> bool {
@@ -295,6 +311,11 @@ impl Query {
     /// use written inside an argument is excused where that argument matched
     /// only once unfolded. See [`Query::inside`].
     pub fn answers_shape_and_uses(&self, d: &Decl) -> bool {
+        if let Some(term) = &self.term
+            && !d.term.as_ref().is_some_and(|actual| term.matches(actual))
+        {
+            return false;
+        }
         if !self.unfolds() {
             return self.shape.matches(&d.shape) && self.uses.iter().all(|c| mentions(d, c));
         }
@@ -413,6 +434,7 @@ impl PartialEq for Query {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.shape == other.shape
+            && self.term == other.term
             && self.uses == other.uses
             && self.module == other.module
             && self.source == other.source

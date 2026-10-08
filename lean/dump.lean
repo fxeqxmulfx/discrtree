@@ -87,6 +87,70 @@ def conclExplicitArgs (env : Environment) (e : Expr) : Option (Array String) := 
   let ci ← env.find? name
   pure (explicitArgs ci.type e.getAppArgs.toList)
 
+/-- Full argument positions corresponding to the arguments of surface syntax. -/
+partial def explicitPositions (type : Expr) (args : List Expr)
+    (position : Nat := 0) (positions : Array Nat := #[]) : Array Nat :=
+  match args, type with
+  | [], _ => positions
+  | a :: rest, .forallE _ _ body info =>
+    explicitPositions (body.instantiate1 a) rest (position + 1)
+      (if info == .default then positions.push position else positions)
+  | _, .mdata _ body => explicitPositions body args position positions
+  | _, .letE _ _ value body _ => explicitPositions (body.instantiate1 value) args position positions
+  | _ :: rest, _ => explicitPositions type rest (position + 1) (positions.push position)
+
+/-- A nested conclusion expression and the types of its explicit subterms.
+Implicit instance proof trees are kept as leaves. Types do not carry their own
+types recursively. Telescope variables retain their identity for consistent
+specialization of polymorphic declarations. -/
+partial def termJson (e : Expr) (vars : Array Expr) (withTypes : Bool := true)
+    (descend : Bool := true) : MetaM Json := do
+  let e ← instantiateMVars e
+  match e with
+  | .mdata _ body => return ← termJson body vars withTypes descend
+  | .letE _ _ value body _ => return ← termJson (body.instantiate1 value) vars withTypes descend
+  | .forallE name domain body info =>
+    let dom ← termJson domain vars false
+    let cod ← withLocalDecl name info domain fun x =>
+      termJson (body.instantiate1 x) (vars.push x) false
+    let mut fields := [("head", Json.str "$forall"), ("args", Json.arr #[dom, cod])]
+    if withTypes then
+      fields := fields ++ [("ty", ← termJson (← inferType e) vars false)]
+    return Json.mkObj fields
+  | _ => pure ()
+  let fn := e.getAppFn
+  let mut fields : List (String × Json) := []
+  match fn with
+  | .const n _ => fields := fields ++ [("head", Json.str n.toString)]
+  | .fvar _ =>
+    if let some i := vars.findIdx? (· == fn) then
+      fields := fields ++ [("variable", Json.num i)]
+  | .lit (.natVal n) => fields := fields ++ [("literal", Json.str (toString n))]
+  | .sort u => fields := fields ++ [("head", Json.str "$sort"),
+      ("literal", Json.str (if u == .zero then "Prop" else "Type"))]
+  | _ => pure ()
+  if descend then
+    let args := e.getAppArgs
+    let positions := explicitPositions (← inferType fn) args.toList
+    if !args.isEmpty then
+      let children ← args.mapIdxM fun i a => do
+        let typeArg := (← inferType a).isSort
+        termJson a vars (withTypes && positions.contains i) (positions.contains i || typeArg)
+      fields := fields ++ [("args", Json.arr children),
+        ("explicit", Json.arr (positions.map fun (i : Nat) => Json.num i))]
+    -- Numeral elaboration inserts an OfNat application, while type expressions
+    -- such as Fin 3 carry a Nat literal directly. Keep their common value.
+    if headSym e == some ``OfNat.ofNat && args.size >= 2 then
+      if let .lit (.natVal n) := args[1]! then
+        fields := [("literal", Json.str (toString n))]
+  if withTypes then
+    let ty ← termJson (← inferType e) vars false
+    fields := fields ++ [("ty", ty)]
+  return Json.mkObj fields
+
+def conclusionTerm (type : Expr) : MetaM Json :=
+  forallTelescope type fun vars concl => termJson concl vars
+
 /-- What a declaration is, in the words `dt find --kind` takes.
 
 `instance` is an attribute rather than a `ConstantInfo` constructor: every
@@ -180,13 +244,14 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
   let env ← getEnv
   let ppType ← try (do pure (toString (← ppExpr ci.type))) catch _ => pure ""
   let concl := conclusion ci.type
+  let term ← conclusionTerm ci.type
   let range ← rangesIn moduleIdx name
   let doc ← findDocString? env name
   let value? := ci.value? (allowOpaque := true)
   let deps := if withDeps then (value?.map depsOf).getD #[] else #[]
   let hasSorry := ci.type.hasSorry || (value?.map (·.hasSorry)).getD false
   pure <| Json.mkObj [
-    ("format",     Json.num 3),
+    ("format",     Json.num 4),
     ("name",       Json.str name.toString),
     ("source",     Json.str source),
     ("module",     Json.str module.toString),
@@ -199,6 +264,7 @@ def rowOf (source : String) (withDeps : Bool) (name : Name) (ci : ConstantInfo)
     ("concl_explicit_args", match conclExplicitArgs env concl with
                            | some args => Json.arr (args.map Json.str)
                            | none => Json.null),
+    ("term",       term),
     ("consts",     Json.arr ((depsOf ci.type).map Json.str)),
     ("deps",       Json.arr (deps.map Json.str)),
     ("doc",        match doc with

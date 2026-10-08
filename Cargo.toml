@@ -1,8 +1,8 @@
 [package]
 name = "discrtree"
-version = "0.64.0"
+version = "0.65.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99"
 license = "MIT"
 description = "Find Lean declarations by shape and lift them into a proof"
 repository = "https://github.com/fxeqxmulfx/discrtree"

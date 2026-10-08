@@ -10,6 +10,7 @@ use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
+use crate::domain::term::Term;
 use crate::error::{Error, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ pub struct Row {
     pub concl_args: Vec<String>,
     #[serde(default)]
     pub concl_explicit_args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<Term>,
     #[serde(default)]
     pub consts: Vec<String>,
     #[serde(default)]
@@ -68,6 +71,7 @@ impl From<Row> for Decl {
                 r.concl_explicit_args.map(|args| args.iter().map(|a| ArgHead::parse(a)).collect()),
             ),
             consts: r.consts.into_iter().map(DeclName::new).collect(),
+            term: r.term,
             deps: r.deps.into_iter().map(DeclName::new).collect(),
             doc: r.doc,
             has_sorry: r.has_sorry,
@@ -98,6 +102,7 @@ impl From<&Decl> for Row {
                 .as_ref()
                 .map(|args| args.iter().map(|a| a.as_str().to_string()).collect()),
             consts: d.consts.iter().map(DeclName::to_string).collect(),
+            term: d.term.clone(),
             deps: d.deps.iter().map(DeclName::to_string).collect(),
             doc: d.doc.clone(),
             has_sorry: d.has_sorry,
@@ -111,7 +116,8 @@ impl From<&Decl> for Row {
 
 /// What a dump holds, as a number that changes when `lean/dump.lean` writes
 /// something an older one did not: 2 is the first with `unfolds`; 3 records
-/// explicit argument heads and keeps public `ofNat` constants.
+/// explicit argument heads and keeps public `ofNat` constants; 4 adds nested
+/// expressions and their argument types.
 ///
 /// Read off the file rather than assumed from the build reading it, because a
 /// dump outlives the `dt` that wrote it: `dt index` loads whatever is on disk,
@@ -119,7 +125,7 @@ impl From<&Decl> for Row {
 /// new the `dt` that loaded them. Never more than
 /// [`ROW_FORMAT`](crate::application::ports::ROW_FORMAT), which rows from a
 /// current dump are in.
-pub const DUMP_FORMAT: i64 = 3;
+pub const DUMP_FORMAT: i64 = 4;
 
 /// The format of the dump at `path`, told by its first row. Before the explicit
 /// version, presence of `unfolds` distinguishes format 2 from format 1.
@@ -325,7 +331,8 @@ mod tests {
         for (row, expected) in [
             ("{}", 1),
             ("{\"unfolds\":null}", 2),
-            ("{\"unfolds\":null,\"format\":3}", DUMP_FORMAT),
+            ("{\"unfolds\":null,\"format\":3}", 3),
+            ("{\"unfolds\":null,\"format\":4}", DUMP_FORMAT),
             ("{\"unfolds\":null,\"format\":100}", DUMP_FORMAT),
         ] {
             std::fs::write(&path, row).unwrap();

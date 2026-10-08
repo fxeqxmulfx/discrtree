@@ -1323,7 +1323,8 @@ fn an_index_written_by_an_older_dt_opens_and_says_so() {
     conn.execute_batch(
         "ALTER TABLE source DROP COLUMN writer; ALTER TABLE source DROP COLUMN row_format; \
          ALTER TABLE decl DROP COLUMN statement; DROP INDEX decl_unfolds; \
-         ALTER TABLE decl DROP COLUMN unfolds; ALTER TABLE decl DROP COLUMN concl_explicit_args;",
+         ALTER TABLE decl DROP COLUMN unfolds; ALTER TABLE decl DROP COLUMN concl_explicit_args; \
+         ALTER TABLE decl DROP COLUMN term;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 2i64).unwrap();
@@ -1541,8 +1542,8 @@ fn the_index_unfolds_a_name_into_the_class_the_domain_does() {
 }
 
 /// What the three searches of the todo have to answer, asked of the index the
-/// way `dt find` asks it: the instance Lean finds for `EuclideanSpace ℝ (Fin
-/// 3)`, which is stated for `WithLp` -- two unfoldings from the name written,
+/// way `dt find` asks it: the head of `EuclideanSpace ℝ (Fin
+/// _)`, which is stated for `WithLp` -- two unfoldings from the name written,
 /// one from `PiLp`. `Fin` is written inside the argument that was unfolded,
 /// and the instance does not mention it; written outside it too, it is asked.
 #[test]
@@ -1580,7 +1581,7 @@ fn a_pattern_finds_the_instance_stated_for_what_its_argument_unfolds_to() {
     for (pattern, written) in [
         ("MeasurableSpace (EuclideanSpace _ _)", "EuclideanSpace"),
         ("MeasurableSpace (PiLp _ _)", "PiLp"),
-        ("MeasurableSpace (EuclideanSpace ℝ (Fin 3))", "EuclideanSpace"),
+        ("MeasurableSpace (EuclideanSpace ℝ (Fin _))", "EuclideanSpace"),
     ] {
         assert_eq!(
             find(pattern),
@@ -1593,8 +1594,8 @@ fn a_pattern_finds_the_instance_stated_for_what_its_argument_unfolds_to() {
         (vec!["WithLp.measurableSpace".into()], vec![]),
         "found as written, and nothing to say about it"
     );
-    let outside = "Fin 3 → MeasurableSpace (EuclideanSpace ℝ (Fin 3))";
-    let written = pattern::parse("MeasurableSpace (EuclideanSpace ℝ (Fin 3))").query;
+    let outside = "Fin _ → MeasurableSpace (EuclideanSpace ℝ (Fin _))";
+    let written = pattern::parse("MeasurableSpace (EuclideanSpace ℝ (Fin _))").query;
     assert_eq!(pattern::parse(outside).query.shape, written.shape);
     let (names, _) = find(outside);
     assert!(names.is_empty(), "`Fin` written outside the argument is asked: {names:?}");
@@ -1636,7 +1637,7 @@ fn an_index_from_before_unfoldings_opens_and_is_behind() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "DROP INDEX decl_unfolds; ALTER TABLE decl DROP COLUMN unfolds; \
-         ALTER TABLE decl DROP COLUMN concl_explicit_args;",
+         ALTER TABLE decl DROP COLUMN concl_explicit_args; ALTER TABLE decl DROP COLUMN term;",
     )
     .unwrap();
     conn.pragma_update(None, "user_version", 4i64).unwrap();
@@ -1661,11 +1662,36 @@ fn an_index_from_before_explicit_arguments_opens_and_is_behind() {
         db.record(&id, &Provenance { row_format: Some(2), ..Provenance::by_this_build() }).unwrap();
     }
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("ALTER TABLE decl DROP COLUMN concl_explicit_args;").unwrap();
+    conn.execute_batch(
+        "ALTER TABLE decl DROP COLUMN concl_explicit_args; ALTER TABLE decl DROP COLUMN term;",
+    )
+    .unwrap();
     conn.pragma_update(None, "user_version", 5i64).unwrap();
     drop(conn);
     for _ in 0..2 {
         let db = SqliteIndex::open(&path).expect("schema 5 is upgraded without losing its rows");
+        assert_eq!(db.get(&row.name).unwrap().unwrap(), row);
+        assert!(db.provenance(&id).unwrap().unwrap().outdated());
+    }
+}
+
+#[test]
+fn an_index_from_before_argument_types_preserves_rows_and_requests_a_refresh() {
+    let dir = TempDir::new("dt-argument-types");
+    let path = dir.path().join("index.db");
+    let id = SourceId::new("mathlib");
+    let row = theorem("Corpus.old", "mathlib", "Corpus", "Eq", &[]);
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        index::load(&mut db, std::slice::from_ref(&row)).unwrap();
+        db.record(&id, &Provenance { row_format: Some(3), ..Provenance::by_this_build() }).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE decl DROP COLUMN term;").unwrap();
+    conn.pragma_update(None, "user_version", 6i64).unwrap();
+    drop(conn);
+    for _ in 0..2 {
+        let db = SqliteIndex::open(&path).expect("schema 6 is migrated without dropping rows");
         assert_eq!(db.get(&row.name).unwrap().unwrap(), row);
         assert!(db.provenance(&id).unwrap().unwrap().outdated());
     }

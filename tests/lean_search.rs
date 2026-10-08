@@ -215,6 +215,308 @@ fn compiled_lean_statements_are_found_in_sqlite_and_in_memory() {
 }
 
 #[test]
+fn ascriptions_check_the_argument_type_in_every_repository() {
+    let rows = fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        let find = |text: &str| {
+            let q = Query { limit: 1000, ..pattern::parse(text).query };
+            let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+            let count = repo.count(&q).unwrap();
+            assert_eq!(count, hits.rows.len(), "{text}");
+            hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+        };
+        let nat = find("SearchFixture.TypedValue (_ : ℕ) = _");
+        assert!(nat.contains(&"SearchFixture.typed_nat".into()), "{nat:?}");
+        assert!(nat.contains(&"SearchFixture.typed_generic".into()), "{nat:?}");
+        assert!(!nat.contains(&"SearchFixture.typed_int".into()), "{nat:?}");
+        let int = find("SearchFixture.TypedValue (_ : ℤ) = _");
+        assert!(int.contains(&"SearchFixture.typed_int".into()), "{int:?}");
+        assert!(int.contains(&"SearchFixture.typed_generic".into()), "{int:?}");
+        assert!(!int.contains(&"SearchFixture.typed_nat_mentions_int".into()), "{int:?}");
+        let list = find("SearchFixture.TypedValue (_ : List ℕ) = _");
+        assert!(list.contains(&"SearchFixture.typed_list_nat".into()), "{list:?}");
+        assert!(list.contains(&"SearchFixture.typed_higher_type".into()), "{list:?}");
+        assert!(!list.contains(&"SearchFixture.typed_list_int".into()), "{list:?}");
+        let any_head = find("_ (_ : Int) = _");
+        assert!(any_head.contains(&"SearchFixture.typed_int".into()), "{any_head:?}");
+        assert!(!any_head.contains(&"SearchFixture.typed_nat_mentions_int".into()), "{any_head:?}");
+        let fun = find("SearchFixture.TypedValue (_ : Nat → Nat) = _");
+        assert!(fun.contains(&"SearchFixture.typed_function".into()), "{fun:?}");
+        assert!(find("SearchFixture.SameArgs (_ : Nat) (_ : Int)").is_empty());
+        let same = find("SearchFixture.SameArgs (_ : Nat) (_ : Nat)");
+        assert!(same.contains(&"SearchFixture.typed_same_generic".into()), "{same:?}");
+    }
+}
+
+#[test]
+fn numeric_literals_match_values_at_their_position_in_every_repository() {
+    let rows = fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        let find = |text: &str| {
+            let q = Query { limit: 1000, ..pattern::parse(text).query };
+            let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+            hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+        };
+        for (pattern, wanted, excluded) in [
+            ("SearchFixture.TypePred (Fin 3)", "numeral_fin_three", "numeral_fin_four"),
+            ("SearchFixture.TypedValue _ = 1", "numeral_one", "numeral_zero"),
+            ("SearchFixture.TypedValue _ = 2", "numeral_two", "numeral_one"),
+            ("SearchFixture.TypedValue (_ + 1) = _", "numeral_nested_one", "numeral_nested_two"),
+            ("SearchFixture.TypedValue (-1) = _", "numeral_negative_one", "numeral_negative_two"),
+            ("SearchFixture.TypedValue _ = 0xff", "numeral_hex", "numeral_two"),
+            ("SearchFixture.TypedValue _ = 1.25", "numeral_scientific", "numeral_scientific_other"),
+            (
+                "SearchFixture.TypedValue _ = 125e1",
+                "numeral_scientific_positive_exponent",
+                "numeral_scientific",
+            ),
+            (
+                "SearchFixture.TypedValue _ = 0.00125",
+                "numeral_scientific_negative_exponent",
+                "numeral_scientific",
+            ),
+            ("SearchFixture.TypedValue _ = 0.0", "numeral_scientific_zero", "numeral_scientific"),
+            (
+                "SearchFixture.TypedValue _ = 0x100000000000000000000000000000000",
+                "numeral_large",
+                "numeral_hex",
+            ),
+        ] {
+            let names = find(pattern);
+            assert!(names.contains(&format!("SearchFixture.{wanted}")), "{pattern}: {names:?}");
+            assert!(!names.contains(&format!("SearchFixture.{excluded}")), "{pattern}: {names:?}");
+        }
+        let names = find("SearchFixture.TypedValue _ = 1");
+        assert!(!names.contains(&"SearchFixture.numeral_zero_mentions_one".into()));
+        let names = find("SearchFixture.TypedValue _ = 1.25");
+        assert!(names.contains(&"SearchFixture.numeral_scientific_trailing_zeroes".into()));
+        let names = find("SearchFixture.TypedValue _ = _");
+        for name in ["numeral_zero", "numeral_one", "numeral_two", "numeral_hex"] {
+            assert!(names.contains(&format!("SearchFixture.{name}")), "{names:?}");
+        }
+    }
+}
+
+#[test]
+fn numeric_constraints_move_with_swapped_operands() {
+    let rows = fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &db] {
+        let q = Query {
+            name: Some("numeral_one_reversed".into()),
+            ..pattern::parse("SearchFixture.TypedValue _ = 1").query
+        };
+        let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+        assert!(hits.swapped, "{hits:?}");
+        assert_eq!(hits.rows.len(), 1);
+        assert_eq!(hits.rows[0].name.as_str(), "SearchFixture.numeral_one_reversed");
+    }
+}
+
+#[test]
+fn numeric_values_filter_before_the_sql_window_and_survive_reopening() {
+    let rows = fixture();
+    let mut wrong =
+        rows.iter().find(|d| d.name.as_str() == "SearchFixture.numeral_zero").unwrap().clone();
+    let wanted =
+        rows.iter().find(|d| d.name.as_str() == "SearchFixture.numeral_one").unwrap().clone();
+    let dir = TempDir::new("numeral-window");
+    let path = dir.path().join("index.db");
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        let mut decoys = Vec::new();
+        for i in 0..20_001 {
+            wrong.name = format!("Decoy.row{i}").into();
+            decoys.push(wrong.clone());
+        }
+        decoys.push(wanted.clone());
+        index::load(&mut db, &decoys).unwrap();
+        db.finish().unwrap();
+    }
+    let db = SqliteIndex::open(&path).unwrap();
+    let q = Query { limit: 1, ..pattern::parse("SearchFixture.TypedValue _ = 1").query };
+    let found = db.find(&q).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, wanted.name);
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+}
+
+#[test]
+fn numeric_queries_require_refreshing_old_rows_instead_of_ignoring_values() {
+    for (name, pattern) in [
+        ("numeral_zero", "SearchFixture.TypedValue _ = 1"),
+        ("numeral_one_reversed", "SearchFixture.TypedValue _ = 1"),
+        ("mul_nonneg", "0 ≤ _ ^ 2"),
+    ] {
+        let mut row = fixture()
+            .into_iter()
+            .find(|d| d.name.as_str() == format!("SearchFixture.{name}"))
+            .unwrap();
+        row.term = None;
+        let fake = FakeRepo { decls: vec![row.clone()] };
+        let db = database(&[row]);
+        for repo in [&fake as &dyn DeclRepo, &db] {
+            let err = Find { repo, build: &NoBuild }
+                .run(&pattern::parse(pattern).query)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("numeric literal values were not recorded"), "{err}");
+            assert!(err.contains("dt refresh fixture"), "{err}");
+            let unbounded = Query { name: Some(format!("SearchFixture.{name}")), ..Query::new() };
+            assert!(!Find { repo, build: &NoBuild }.run(&unbounded).unwrap().rows.is_empty());
+        }
+    }
+}
+
+#[test]
+fn of_real_equal_one_excludes_zero_and_unspecialized_numerals() {
+    // Real Mathlib declarations dumped by lean/dump.lean, including ofNat's
+    // symbolic numeral and the ofReal_eq_one equivalence.
+    let rows: Vec<Decl> = include_str!("fixtures/numeral-search.jsonl")
+        .lines()
+        .map(|line| Decl::from(serde_json::from_str::<Row>(line).unwrap()))
+        .collect();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        let q = Query { limit: 15, ..pattern::parse("ENNReal.ofReal _ = 1").query };
+        let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+        assert_eq!(hits.rows.len(), 1, "{hits:?}");
+        assert_eq!(hits.rows[0].name.as_str(), "ENNReal.ofReal_one");
+        assert_eq!(repo.count(&q).unwrap(), 1);
+        let hits = Find { repo, build: &NoBuild }
+            .run(&pattern::parse("ENNReal.ofReal _ = 0").query)
+            .unwrap();
+        assert!(hits.rows.iter().any(|d| d.name.as_str() == "ENNReal.ofReal_zero"));
+        assert!(hits.rows.iter().any(|d| d.name.as_str() == "ENNReal.ofReal_of_nonpos"));
+        assert!(!hits.rows.iter().any(|d| d.name.as_str() == "ENNReal.ofReal_one"));
+        let hits = Find { repo, build: &NoBuild }
+            .run(&pattern::parse("ENNReal.ofReal _ = 1 ↔ _ = 1").query)
+            .unwrap();
+        assert_eq!(hits.rows.len(), 1, "{hits:?}");
+        assert_eq!(hits.rows[0].name.as_str(), "ENNReal.ofReal_eq_one");
+    }
+}
+
+/// Compiled with Lean 4.34.1 and dumped by lean/dump.lean, importing
+/// Mathlib.Analysis.InnerProductSpace.Basic and Mathlib.Analysis.Quaternion.
+fn inner_fixture() -> Vec<Decl> {
+    include_str!("fixtures/inner-search.jsonl")
+        .lines()
+        .map(|line| Decl::from(serde_json::from_str::<Row>(line).unwrap()))
+        .collect()
+}
+
+#[test]
+fn real_inner_on_complex_arguments_excludes_other_carriers_and_inconsistent_specializations() {
+    let rows = inner_fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        for text in
+            ["inner ℝ (_ : ℂ) _ = _", "Inner.inner Real (_ : Complex) _ = _", "⟪(_ : ℂ), _⟫_ℝ = _"]
+        {
+            let q = Query { limit: 100, ..pattern::parse(text).query };
+            let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+            let has = |name: &str| hits.rows.iter().any(|d| d.name.as_str() == name);
+            assert!(has("Complex.inner"), "{text}: {hits:?}");
+            assert!(has("real_inner_comm"), "{text}: {hits:?}");
+            assert!(has("inner_zero_right"), "{text}: {hits:?}");
+            for wrong in [
+                "Real.inner_apply",
+                "Quaternion.inner_def",
+                "Quaternion.inner_self",
+                "PUnit.inner_eq_zero",
+                "RCLike.inner_apply",
+                "RCLike.inner_apply'",
+            ] {
+                assert!(!has(wrong), "{text}: incorrectly included {wrong}");
+            }
+        }
+    }
+}
+
+#[test]
+fn type_constraints_filter_before_the_sql_result_window_and_survive_reopening() {
+    let rows = fixture();
+    let mut wrong = rows
+        .iter()
+        .find(|d| d.name.as_str() == "SearchFixture.typed_nat_mentions_int")
+        .unwrap()
+        .clone();
+    let wanted =
+        rows.iter().find(|d| d.name.as_str() == "SearchFixture.typed_int").unwrap().clone();
+    let dir = TempDir::new("typed-window");
+    let path = dir.path().join("index.db");
+    {
+        let mut db = SqliteIndex::open(&path).unwrap();
+        let mut decoys = Vec::new();
+        for i in 0..20_001 {
+            wrong.name = format!("Decoy.row{i}").into();
+            decoys.push(wrong.clone());
+        }
+        decoys.push(wanted.clone());
+        index::load(&mut db, &decoys).unwrap();
+        db.finish().unwrap();
+    }
+    let db = SqliteIndex::open(&path).unwrap();
+    let q = Query { limit: 1, ..pattern::parse("SearchFixture.TypedValue (_ : Int) = _").query };
+    let found = db.find(&q).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, wanted.name);
+    assert_eq!(found[0].term, wanted.term);
+    assert_eq!(DeclRepo::count(&db, &q).unwrap(), 1);
+}
+
+#[test]
+fn typed_queries_require_refreshing_rows_written_without_argument_types() {
+    let mut rows = inner_fixture();
+    for row in &mut rows {
+        row.term = None;
+    }
+    let fake = FakeRepo { decls: rows.clone() };
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &db] {
+        let q = pattern::parse("inner ℝ (_ : ℂ) _ = _").query;
+        let err = Find { repo, build: &NoBuild }.run(&q).unwrap_err().to_string();
+        assert!(err.contains("argument types were not recorded"), "{err}");
+        assert!(err.contains("dt refresh mathlib"), "{err}");
+        assert!(
+            !Find { repo, build: &NoBuild }
+                .run(&pattern::parse("inner _ _ _ = _").query)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn power_retries_keep_the_type_constraints_inside_each_factor() {
+    let rows = inner_fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &db] {
+        let q = pattern::parse("inner ℝ (_ : ℂ) _ ^ 2 ≤ _").query;
+        let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+        assert!(
+            hits.rows.iter().any(|d| d.name.as_str() == "real_inner_mul_inner_self_le"),
+            "{hits:?}"
+        );
+        assert!(!hits.respelled.is_empty(), "{hits:?}");
+    }
+}
+
+#[test]
 fn copying_a_printed_lean_statement_finds_its_declaration() {
     let rows = fixture();
     let db = database(&rows);
@@ -702,6 +1004,7 @@ fn live_lean_search() {
         for (actual, expected) in rows.iter().zip(golden) {
             assert_eq!(actual.name, expected.name);
             assert_eq!(actual.shape, expected.shape, "{}", actual.name);
+            assert_eq!(actual.term, expected.term, "{}", actual.name);
             assert_eq!(actual.consts, expected.consts, "{}", actual.name);
             assert_eq!(actual.kind, expected.kind, "{}", actual.name);
             assert_eq!(actual.has_sorry, expected.has_sorry, "{}", actual.name);

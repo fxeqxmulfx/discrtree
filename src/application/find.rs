@@ -233,6 +233,7 @@ fn turned(query: &Query) -> Option<Query> {
     };
     let power = |at| query.powers.iter().find(|(i, _)| *i == at).map(|(_, p)| p);
     if shape.args[left] == shape.args[right]
+        && query.term.as_ref().is_none_or(|t| t.args.get(left) == t.args.get(right))
         && power(left) == power(right)
         && query.inside.get(left).map(Vec::as_slice).unwrap_or_default()
             == query.inside.get(right).map(Vec::as_slice).unwrap_or_default()
@@ -241,6 +242,9 @@ fn turned(query: &Query) -> Option<Query> {
     }
     let mut out = query.clone();
     out.shape.args.swap(left, right);
+    if let Some(term) = &mut out.term {
+        term.args.swap(left, right);
+    }
     // And so does what was written inside a side.
     out.inside.resize(out.shape.args.len(), Vec::new());
     out.inside.swap(left, right);
@@ -345,6 +349,16 @@ fn qualified(query: &Query, reading: &Reading) -> Option<Query> {
     let variable = |n: &DeclName| reading.variables.iter().any(|v| v == n.as_str());
     let mut out = query.clone();
     let mut any = false;
+    if let Some(term) = &mut out.term {
+        for (word, choices) in &reading.called {
+            if let Some(name) = choices.first() {
+                term.rename(word, Some(name.as_str()));
+            }
+        }
+        for word in &reading.variables {
+            term.rename(word, None);
+        }
+    }
     if let Some(c) = &out.shape.concl {
         if let Some(resolved) = top(c) {
             out.shape.concl = Some(resolved);
@@ -451,6 +465,7 @@ impl Find<'_> {
             }
         }
         let mut text_as_uses = Vec::new();
+        self.require_terms(&asked)?;
         if rows.is_empty() && !asked.text.is_empty() {
             let mut retry = asked.clone();
             for t in &asked.text {
@@ -480,6 +495,7 @@ impl Find<'_> {
         let mut respelled = Vec::new();
         if !answers(&asked, &rows) {
             for (retry, turn, written) in looks(&asked) {
+                self.require_terms(&retry)?;
                 let (writing, sharing): (Vec<Decl>, Vec<Decl>) = self
                     .repo
                     .find(&retry)?
@@ -544,6 +560,20 @@ impl Find<'_> {
         })
     }
 
+    fn require_terms(&self, query: &Query) -> Result<()> {
+        let Some(term) = &query.term else { return Ok(()) };
+        let missing = self.repo.missing_term_sources(query)?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let sources = missing.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        let repairs =
+            missing.iter().map(|s| format!("`dt refresh {s}`")).collect::<Vec<_>>().join(" then ");
+        let detail =
+            if term.has_type_constraints() { "argument types" } else { "numeric literal values" };
+        bail!("{detail} were not recorded for matching rows in {sources}; run {repairs}")
+    }
+
     /// The query with each argument head it names made every name of the same
     /// thing, where the index knows more than one: `EuclideanSpace` also
     /// `PiLp` and `WithLp`, which it unfolds to, and the other way round.
@@ -586,7 +616,8 @@ impl Find<'_> {
     fn resolve(&self, query: &Query) -> Result<Reading> {
         let mut out = Reading::default();
         let mut seen: Vec<&str> = Vec::new();
-        for word in query.shape.heads().chain(&query.pattern_uses) {
+        let nested = query.term.as_ref().map(|term| term.names()).unwrap_or_default();
+        for word in query.shape.heads().chain(&query.pattern_uses).chain(&nested) {
             // A word written twice -- `exp _ ≤ exp _` -- is one word to
             // resolve and one line to report.
             if word.is_field() || seen.contains(&word.as_str()) {
