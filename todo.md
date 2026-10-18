@@ -2,6 +2,35 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## An applied continuous linear map, written as `dt` prints it, matches nothing
+
+Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking
+for the lemma that turns `fderiv ℝ g z 1` into `deriv g z`:
+
+    $ dt find '(fderiv _ _ _) 1 = deriv _ _'
+    no match: nothing has that shape; each of `fderiv`, `deriv` matches without the others
+    $ dt find 'fderiv _ _ _ 1 = deriv _ _'
+    no match: nothing has that shape; each of `fderiv`, `deriv` matches without the others
+    $ dt find '⇑(fderiv _ _ _) 1 = deriv _ _'
+    no match: every condition matches on its own; drop one
+    $ dt find 'DFunLike.coe (fderiv _ _ _) 1 = deriv _ _'
+    fderiv_apply_one_eq_deriv  theorem  Mathlib.Analysis.Calculus.Deriv.Basic
+      ∀ …, (fderiv 𝕜 f x) 1 = deriv f x
+
+The row prints the left side as `(fderiv 𝕜 f x) 1`, and the skill says to write
+a pattern as Lean prints it, but that spelling misses: the coercion `⇑` that
+Lean hides is in the key and not in the pattern. Only the elaborated head
+`DFunLike.coe`, which nothing prints, finds the lemma. `⇑` itself is rejected
+with a message about conditions, though the query has none. Every lemma about
+an applied `ContinuousLinearMap`, `LinearMap`, `Equiv` or `MonoidHom` is hit,
+which is a large part of analysis.
+
+The right output: a pattern applying a term whose type is a `FunLike` (or, without
+types, any application whose head is not a function constant, like
+`(fderiv _ _ _) 1`) is keyed through `DFunLike.coe`, as Lean elaborates it, so
+all three spellings above find `fderiv_apply_one_eq_deriv`. Failing that, the
+miss names the fix: "an applied bundled map is `DFunLike.coe f x` in a pattern".
+
 ## A stale project index answers `no match` and `dt status` calls it current
 
 Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking
