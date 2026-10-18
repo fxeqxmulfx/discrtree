@@ -2,6 +2,87 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A stale project index answers `no match` and `dt status` calls it current
+
+Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking
+up the flow's variational equation before using it:
+
+    $ dt find --name hasFDerivAt_flow
+    no match
+    $ dt show Transformer.GlobalFlow.IsFlowField.hasFDerivAt_flow
+    dt: Transformer.GlobalFlow.IsFlowField.hasFDerivAt_flow is not in the index; try `dt find --name hasFDerivAt_flow`
+
+The theorem is in `src/Transformer/GlobalFlow/FlowDeriv.lean:65`, added on
+2026-10-17 (commit 3ecda25b). The project was indexed three days ago. `dt status`
+lists it as `indexed 3d ago, revision 7583624` and says nothing about it being
+stale, though its help promises "whether it is current". The revision is not a
+commit of the repository (`git log 7583624..` says unknown revision), so it does
+not tell the reader how far the sources have moved either. Neither `find` nor `show` warned. The
+`show` hint is circular: it sends the reader to the `find` that just failed. So
+`no match` reads as "no such theorem", which is the conclusion the rule "look it
+up with dt, not grep" exists to make reliable, and here it was false.
+
+The right output: when the project's source files have changed since the index
+was built, `find` and `show` say so next to `no match`. For example:
+`project indexed 3 days ago; 669 source files changed since; dt refresh project`.
+`dt status` puts the same fact in a `current` column.
+
+Seen again the same day, still dt 0.65.0 and revision 7583624, by the board's
+reviewer checking the lemmas that a submitted proof rests on:
+
+    $ dt find --name ae_exists_tendsto_not_isStrictSaddle
+    no match
+    $ dt find --name IsStrictSaddle
+    Transformer.Perspective.IsStrictSaddleTorusEnergy  def  Transformer.Perspective.StrictSaddle
+      (n : ℕ) → ℝ → Transformer.Perspective.Angles n → Prop
+    1 result(s)
+    $ dt find --in Transformer.SaddleAvoidance --limit 5
+    no match
+
+The theorem is at `src/Transformer/SaddleAvoidance/Minimizers.lean:76`, and
+`IsStrictSaddle` is at `Defs.lean:78` of the same directory. Both were added
+2026-10-17 in ffb0b2fa. The index has no row from the `Transformer.SaddleAvoidance`
+namespace at all, yet `--in Transformer.Perspective` returns rows. The second answer
+does more harm than `no match`. It is a real row that looks complete, it is the only
+`IsStrictSaddle` it shows, and its module is out of date: since 0b00db05,
+`IsStrictSaddleTorusEnergy` lives in `Perspective.CircleCritical`. The reviewer
+fell back on `#check` in a scratch file, which loads the Lean environment that
+`dt` exists to avoid.
+
+Seen a third time the same day, still dt 0.65.0 and revision 7583624, with the
+0.53.0 refresh asked for explicitly, right after a successful `lake build` of
+the whole project:
+
+    $ dt find --refresh --name IsFlowField
+    no match
+    $ dt find --refresh --name usa_anglesToSphere
+    no match
+
+Nothing on stderr, and `dt status` afterwards still says `indexed 3d ago`. The
+first is `src/Transformer/GlobalFlow/Flow.lean:33`, the second was built a minute
+earlier in `Transformer.Perspective.CircleAngles`. So `--refresh` either did
+not run or ran and refreshed nothing, and said neither, though its entry above
+promises that everything it does is reported on stderr. The right output: the
+refresh runs and the row is found, or the reason it did not run is printed
+(`--refresh: project index is current` would at least be checkable against
+`git log`).
+
+Seen a fourth time on 2026-10-18, still dt 0.65.0 and revision 7583624, now
+`indexed 4d ago`. The lookups were for the lemmas that a new model needs in order
+to reuse the saddle-avoidance framework:
+
+    $ dt show Transformer.SaddleAvoidance.isStrictSaddle_of_inner_neg
+    dt: Transformer.SaddleAvoidance.isStrictSaddle_of_inner_neg is not in the index; try `dt find --name isStrictSaddle_of_inner_neg`
+    $ dt find --name isStrictSaddle_of_inner_neg
+    no match
+    $ dt find --name exists_isLojasiewiczAt_of_analyticAt
+    no match
+
+Both lemmas are on `main` and in the built `.olean` files: `SaddleAvoidance/Necessary.lean`
+and `SaddleAvoidance/LocalInequality.lean:73`. `#check` in a scratch file found
+them at once. `dt status` still prints no `current` column. So every lookup of a
+declaration from the last four days falls back on loading the Lean environment.
+
 ## `--name` is a plain substring, so a name written with `.*` in it finds nothing
 
 Found 2026-09-30, dt 0.61.0, in an agent's transcript looking for the lemma that
