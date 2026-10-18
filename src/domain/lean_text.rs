@@ -35,6 +35,8 @@ const HEADERS: &[&str] = &[
     "abbrev ",
     "instance ",
     "structure ",
+    // Before `class `: the word after it is the kind, not the name.
+    "class inductive ",
     "class ",
     "inductive ",
     "axiom ",
@@ -210,11 +212,17 @@ fn ident(rest: &str) -> Option<&str> {
 
 /// The modules a file imports. For a text corpus these are the only structural
 /// dependency information there is.
+///
+/// Read from the header and nothing after it. A search over a project whose
+/// build is behind its source asks this of every file the root reaches, and
+/// masking the comments of a whole file to read its first lines was most of
+/// what that cost.
 pub fn imports(text: &str) -> Vec<ModuleName> {
-    let (code, _) = syntax_only(text);
     let mut out = Vec::new();
-    for line in code.lines() {
-        let mut t = line.trim();
+    let mut open = 0usize;
+    for line in text.lines() {
+        let code = uncommented(line, &mut open);
+        let mut t = code.trim();
         if t.is_empty() || t == "module" || t == "prelude" {
             continue;
         }
@@ -224,6 +232,30 @@ pub fn imports(text: &str) -> Vec<ModuleName> {
         let rest = rest.strip_prefix("all ").unwrap_or(rest);
         if let Some(module) = rest.split_whitespace().next() {
             out.push(ModuleName::new(module));
+        }
+    }
+    out
+}
+
+/// A line of a header with its comments taken out. `open` is how many block
+/// comments are open where the line starts, and where it ends once it has run.
+/// A header has no strings or escaped names, so comments are all there is.
+fn uncommented(line: &str, open: &mut usize) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('/', Some('-')) => {
+                chars.next();
+                *open += 1;
+            }
+            ('-', Some('/')) if *open > 0 => {
+                chars.next();
+                *open -= 1;
+            }
+            ('-', Some('-')) if *open == 0 => break,
+            _ if *open > 0 => {}
+            _ => out.push(c),
         }
     }
     out
@@ -341,20 +373,98 @@ pub fn scan(text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
     let (code, docs) = syntax_only(text);
     let code_lines: Vec<&str> = code.lines().collect();
+    let (found, anonymous) = declarations(&lines, &code_lines, &docs);
+    let decls = found
+        .into_iter()
+        .map(|f| {
+            let body = lines[f.start..=f.end].join("\n");
+            let syntax = code_lines[f.start..=f.end].join("\n");
+            Scanned {
+                name: f.name,
+                kind: f.kind.to_string(),
+                statement: statement_of(
+                    &body,
+                    header(lines[f.start]).map_or(f.after, |(_, rest)| rest),
+                ),
+                doc: docstring_above(&lines, f.start),
+                idents: dotted_identifiers(&syntax),
+                has_sorry: mentions_sorry(&syntax),
+                line_start: f.start as u32 + 1,
+                line_end: f.end as u32 + 1,
+            }
+        })
+        .collect();
+    Scan { decls, anonymous }
+}
+
+/// A declaration as its header gives it: see [`headers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header {
+    pub name: DeclName,
+    /// Whether it is declared `private`. Lean gives a private name a mangled
+    /// form no dump keeps, so a compiled source has no row for it to compare.
+    pub private: bool,
+    /// 1-based, inclusive.
+    pub span: Span,
+    /// As [`spelled_statement`] reads it.
+    pub statement: Option<String>,
+}
+
+/// Every declaration in a file by its header: what [`scan`] finds before it
+/// reads inside any of them. That reading is two thirds of what a scan costs,
+/// and a check of which names a file declares has no use for it -- over the
+/// thousand files a project's build can fall behind, it was 110 ms of a
+/// 175 ms scan.
+pub fn headers(text: &str) -> Vec<Header> {
+    let lines: Vec<&str> = text.lines().collect();
+    let (code, docs) = syntax_only(text);
+    let code_lines: Vec<&str> = code.lines().collect();
+    let (found, _) = declarations(&lines, &code_lines, &docs);
+    found
+        .into_iter()
+        .map(|f| {
+            let span = Span::new(f.start as u32 + 1, f.end as u32 + 1);
+            Header { name: f.name, private: f.private, span, statement: spelled(&lines, span) }
+        })
+        .collect()
+}
+
+/// A declaration where the walk over a file's lines found it.
+struct Found<'a> {
+    name: DeclName,
+    kind: &'static str,
+    /// What follows the keyword on the header's line, with comments masked.
+    after: &'a str,
+    private: bool,
+    /// 0-based, inclusive.
+    start: usize,
+    end: usize,
+}
+
+/// The declarations a file's lines lay out, and how many have no name of
+/// their own. `code` is `lines` with comments and literals masked and `docs`
+/// the lines docstrings open on, as [`syntax_only`] gives them.
+fn declarations<'a>(lines: &[&str], code: &[&'a str], docs: &[usize]) -> (Vec<Found<'a>>, usize) {
     let mut anonymous = 0usize;
-    let mut out: Vec<Scanned> = Vec::new();
+    let mut out = Vec::new();
     let mut namespaces: Vec<String> = Vec::new();
     let mut scopes: Vec<(String, bool)> = Vec::new();
     let mut i = 0;
 
     while i < lines.len() {
-        let line = code_lines[i].trim_end();
+        let line = code[i].trim_end();
         let structural = undecorated(line).unwrap_or("");
         if let Some(rest) = structural.strip_prefix("namespace ") {
             namespaces.push(rest.trim().to_string());
             scopes.push((rest.trim().to_string(), true));
         } else if structural == "section" || structural.starts_with("section ") {
             scopes.push((structural["section".len()..].trim().to_string(), false));
+        } else if structural == "mutual" {
+            // Closed by a bare `end` like a section, and the declarations in
+            // it are at column zero like any others. Without its own scope
+            // that `end` closed the namespace around it, and every name after
+            // the block lost its namespace.
+            scopes.push((String::new(), false));
         } else if structural == "end" || structural.starts_with("end ") {
             let ended = structural["end".len()..].trim();
             if scopes.last().is_some_and(|(name, _)| ended.is_empty() || name == ended) {
@@ -364,35 +474,21 @@ pub fn scan(text: &str) -> Scan {
                 }
             }
         } else if let Some((kind, after)) = header(line) {
-            let start = i;
-            let end = declaration_end(&lines, &code_lines, &docs, i);
-            let body = lines[start..=end].join("\n");
-            let syntax = code_lines[start..=end].join("\n");
-            let base = first_token(after);
+            let end = declaration_end(lines, code, docs, i);
+            // `foo.{u}` declares `foo`: the dot belongs to the universes.
+            let base = first_token(after).trim_end_matches('.');
             let name = qualify(&namespaces, base);
             if base.is_empty() {
                 anonymous += 1;
             }
             if !base.is_empty() && !name.is_internal() {
-                out.push(Scanned {
-                    name,
-                    kind: kind.to_string(),
-                    statement: statement_of(
-                        &body,
-                        header(lines[start]).map_or(after, |(_, rest)| rest),
-                    ),
-                    doc: docstring_above(&lines, start),
-                    idents: dotted_identifiers(&syntax),
-                    has_sorry: mentions_sorry(&syntax),
-                    line_start: start as u32 + 1,
-                    line_end: end as u32 + 1,
-                });
+                out.push(Found { name, kind, after, private: private(line), start: i, end });
             }
             i = end;
         }
         i += 1;
     }
-    Scan { decls: out, anonymous }
+    (out, anonymous)
 }
 
 /// A declaration header at column zero, returning its kind and what follows.
@@ -402,6 +498,22 @@ fn header(line: &str) -> Option<(&'static str, &str)> {
     let rest = undecorated(line)?;
     let h = HEADERS.iter().find(|h| rest.starts_with(**h))?;
     Some((h.trim_end(), &rest[h.len()..]))
+}
+
+/// Whether a header's modifiers include `private`.
+fn private(line: &str) -> bool {
+    let mut rest = line;
+    loop {
+        if let Some(after) = attribute(rest) {
+            rest = after;
+            continue;
+        }
+        match MODIFIERS.iter().find(|m| rest.starts_with(**m)) {
+            Some(&"private ") => return true,
+            Some(m) => rest = &rest[m.len()..],
+            None => return false,
+        }
+    }
 }
 
 /// What is left of a line after the attributes and modifiers a declaration may
@@ -459,6 +571,7 @@ fn declaration_end(lines: &[&str], code: &[&str], docs: &[usize], start: usize) 
                 || structural.starts_with("end ")
                 || structural == "section"
                 || structural.starts_with("section ")
+                || structural == "mutual"
                 || line.starts_with("open ")
                 || line.starts_with("variable")
                 || line.starts_with("@["));
@@ -578,7 +691,12 @@ fn identifiers(body: &str) -> Vec<&str> {
 /// A `:=` inside brackets is a default argument, and one inside a comment or a
 /// string is not code, so neither ends the statement.
 pub fn spelled_statement(text: &str, span: Span) -> Option<String> {
-    let lines: Vec<&str> = text.lines().collect();
+    spelled(&text.lines().collect::<Vec<_>>(), span)
+}
+
+/// [`spelled_statement`], for a file already split into lines: splitting it
+/// again for each of its declarations was a fifth of what reading them cost.
+fn spelled(lines: &[&str], span: Span) -> Option<String> {
     let (start, end) = (span.start as usize, span.end as usize);
     if start == 0 || end < start || end > lines.len() {
         return None;
@@ -783,6 +901,46 @@ theorem Algebra.norm_of_subsingleton {R A : Type*} [CommRing R] [Ring A]
         let src = "namespace Foo\n\ntheorem bar : True := trivial\n\nend Foo\n\ntheorem baz : True := trivial\n";
         let names: Vec<String> = scan(src).decls.iter().map(|d| d.name.to_string()).collect();
         assert_eq!(names, vec!["Foo.bar", "baz"]);
+    }
+
+    /// The shape of `Transformer/CRASP/MajTwoOfTLC.lean`: a `mutual` block at
+    /// column zero inside two namespaces, closed by a bare `end`. That `end`
+    /// used to close `CRASP`, and the theorem after the block was read as
+    /// `Transformer.Form.freeIn_toMaj` -- a name no build has.
+    #[test]
+    fn a_mutual_block_closes_itself_and_not_the_namespace() {
+        let src = "namespace Transformer\nnamespace CRASP\n\nmutual\n\
+                   def Form.toMaj : Nat := 0\n\ndef Term.toMajs : Nat := 0\nend\n\n\
+                   theorem Form.freeIn_toMaj : True := trivial\nend CRASP\nend Transformer\n";
+        let d = scan(src).decls;
+        let names: Vec<&str> = d.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Transformer.CRASP.Form.toMaj",
+                "Transformer.CRASP.Term.toMajs",
+                "Transformer.CRASP.Form.freeIn_toMaj"
+            ]
+        );
+        assert_eq!(d[1].line_end, 7, "the block's `end` is not part of the declaration");
+    }
+
+    #[test]
+    fn a_header_says_what_it_declares_and_whether_it_is_private() {
+        let src = "private theorem aux : True := trivial\n\
+                   @[simp] private lemma aux' : True := trivial\n\
+                   theorem shown : True := trivial\n\
+                   class inductive Good : Prop\n  | intro\n\
+                   theorem lift.{u} (α : Type u) : True := trivial\n";
+        let h = headers(src);
+        let read: Vec<(&str, bool)> = h.iter().map(|h| (h.name.as_str(), h.private)).collect();
+        assert_eq!(
+            read,
+            [("aux", true), ("aux'", true), ("shown", false), ("Good", false), ("lift", false)]
+        );
+        assert_eq!(h[3].span, Span::new(4, 5));
+        assert_eq!(h[2].statement.as_deref(), Some("theorem shown : True"));
+        assert_eq!(scan(src).decls[3].kind, "class inductive");
     }
 
     #[test]

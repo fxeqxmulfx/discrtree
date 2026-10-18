@@ -6,7 +6,9 @@ mod support;
 
 use discrtree::application::find::Find;
 use discrtree::application::index;
-use discrtree::application::ports::{DeclRepo, DeclSink, NoBuild, Provenance};
+use discrtree::application::ports::{
+    DeclRepo, DeclSink, NoBuild, Provenance, Revisions, Workspace,
+};
 use discrtree::application::status;
 use discrtree::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use discrtree::domain::name::{DeclName, ModuleName};
@@ -885,6 +887,247 @@ fn only_a_stale_local_source_is_read_again_for_a_miss() {
     // A search narrowed to a source reads that source and no other.
     let narrowed = Query { source: Some(mathlib), ..Query::new() };
     assert!(status::refreshable(&db, &disk, &sources, &narrowed).unwrap().is_empty());
+}
+
+/// The project's revision is its build, and the build moves only when somebody
+/// builds it. Agents that build in a git worktree and merge into the main
+/// checkout move its files and never its build, so the index was the build's
+/// to the byte, days and hundreds of files behind the source, and `dt status`
+/// called it current. A file saved after its module was compiled is read, and
+/// a name it declares that the index does not hold there makes the source
+/// behind: for a search, and in the status table.
+#[test]
+fn files_saved_since_their_build_are_stale_when_they_declare_what_the_index_lacks() {
+    let dir = TempDir::new("dt-unbuilt");
+    let (lib, src) = (dir.path().join(".lake/build/lib"), dir.path().join("src"));
+    let now = std::time::SystemTime::now();
+    let ago = |secs| now - std::time::Duration::from_secs(secs);
+    // Saved after the compile, which is now.
+    let later = now + std::time::Duration::from_secs(100);
+    save_at(&src, "Transformer.lean", "import Transformer.Basic\n", ago(300));
+    save_at(
+        &src,
+        "Transformer/Basic.lean",
+        "namespace T\n\ntheorem old : True := trivial\n",
+        ago(300),
+    );
+    compile(&lib, &["Transformer", "Transformer.Basic"]);
+    let dumped = revision::build_stamp(&lib).unwrap();
+    let indexed_at = ago(100).duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+    let id = SourceId::new("project");
+    let mut db = SqliteIndex::in_memory().unwrap();
+    db.put(&[theorem("T.old", "project", "Transformer.Basic", "True", &[])]).unwrap();
+    db.finish().unwrap();
+    let disk = on_disk(dir.path(), &id);
+    let ahead = || -> Vec<String> {
+        disk.unbuilt(&id).unwrap().modules.into_keys().map(|m| m.to_string()).collect()
+    };
+    let check = |db: &SqliteIndex| status::unbuilt(db, &disk, &id).unwrap();
+    assert!(ahead().is_empty(), "the build has every file as it was saved");
+
+    save_at(
+        &src,
+        "Transformer/Basic.lean",
+        "namespace T\n\ntheorem fresh : True := trivial\n",
+        later,
+    );
+    assert_eq!(ahead(), ["Transformer.Basic"]);
+    assert_eq!(
+        check(&db),
+        None,
+        "never indexed: every name is missing, and that is another message"
+    );
+    let was =
+        Provenance { revision: Some(dumped), indexed_at, decls: 1, ..Provenance::by_this_build() };
+    db.record(&id, &was).unwrap();
+
+    // Touched -- a checkout, a merge that changed nothing in it -- it declares
+    // what the index holds.
+    save_at(
+        &src,
+        "Transformer/Basic.lean",
+        "namespace T\n\ntheorem old : True := trivial\n",
+        later,
+    );
+    assert_eq!(ahead(), ["Transformer.Basic"]);
+    assert_eq!(check(&db), None, "a file only touched is not behind");
+
+    let edited = "namespace T\n\ntheorem old : True := trivial\n\n\
+                  private theorem hidden : True := trivial\n\n\
+                  theorem fresh : True := trivial\n";
+    save_at(&src, "Transformer/Basic.lean", edited, later);
+    let (s, behind) = check(&db).expect("a name the index does not hold");
+    let project = dir.path().to_path_buf();
+    assert_eq!(s.why, status::Why::Unbuilt { files: 1, project: project.clone() });
+    assert_eq!(behind.len(), 1);
+    assert_eq!(behind[0].module, ModuleName::new("Transformer.Basic"));
+    let fresh = &behind[0].decls;
+    assert_eq!(
+        fresh.keys().collect::<Vec<_>>(),
+        [&DeclName::new("T.fresh")],
+        "not the private one"
+    );
+    assert_eq!(fresh[&DeclName::new("T.fresh")].span, Some(Span::new(7, 7)));
+
+    // A new module no build has compiled, which the root imports; one it does
+    // not import, which no build of the root compiles and no dump reads; and
+    // a worktree's copy of the project, which is not the project.
+    save_at(&src, "Transformer.lean", "import Transformer.Basic\nimport Transformer.New\n", later);
+    save_at(
+        &src,
+        "Transformer/New.lean",
+        "/-! New. -/\ntheorem T.brand_new : True := trivial\n",
+        later,
+    );
+    save_at(&src, "Transformer/Scratch.lean", "theorem T.scratch : True := trivial\n", later);
+    save_at(
+        &src,
+        ".claude/worktrees/w/Transformer/Odd.lean",
+        "theorem T.odd : True := trivial\n",
+        later,
+    );
+    assert_eq!(
+        ahead(),
+        ["Transformer", "Transformer.Basic", "Transformer.New", "Transformer.Scratch"]
+    );
+    let (s, behind) = check(&db).unwrap();
+    assert_eq!(s.why, status::Why::Unbuilt { files: 3, project: project.clone() });
+    let modules: Vec<String> = behind.iter().map(|b| b.module.to_string()).collect();
+    assert_eq!(modules, ["Transformer.Basic", "Transformer.New"]);
+
+    // A search is told, and a refresh is not the repair: the build is the one
+    // indexed, and reading it again reads what the index holds.
+    let stale = status::stale_for_search(&db, &disk, [id.clone()]).unwrap();
+    assert_eq!(stale.len(), 1);
+    let sources = Sources::new(vec![SourceMeta::derived(id.clone(), SourceKind::Local)]);
+    assert!(status::refreshable(&db, &disk, &sources, &Query::new()).unwrap().is_empty());
+    let found =
+        status::declared_matching(&stale, &Query { name: Some("brand".into()), ..Query::new() });
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].line, found[0].compiled()), (Some(2), false));
+    assert_eq!(found[0].statement.as_deref(), Some("theorem T.brand_new : True"));
+    let in_module = Query { module: Some("Transformer.New".into()), ..Query::new() };
+    let found = status::declared_matching(&stale, &in_module);
+    assert_eq!(found.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["T.brand_new"]);
+
+    let workspace = Workspace {
+        sources,
+        vendor_dir: dir.path().join("src/Transformer/Vendor"),
+        vendor_module: ModuleName::new("Transformer.Vendor"),
+        namespace: "Transformer".into(),
+    };
+    let report = status::Status {
+        repo: &db,
+        revisions: &disk,
+        build: &NoBuild,
+        workspace: &workspace,
+        now: indexed_at + 100,
+    }
+    .run()
+    .unwrap();
+    let row = &report.sources[0];
+    assert_eq!(row.ahead, Some(status::Ahead { files: 3, declaring: 2, project }));
+    assert_eq!(row.current(), Some(false));
+    assert!(!row.reread(), "the build is the one indexed");
+
+    // `lake build` compiles what the root imports. The module it does not
+    // import stays as it was saved, and is no reason to build again.
+    for rel in ["Transformer.lean", "Transformer/Basic.lean", "Transformer/New.lean"] {
+        let file = std::fs::File::options().write(true).open(src.join(rel)).unwrap();
+        file.set_modified(ago(50)).unwrap();
+    }
+    compile(&lib, &["Transformer", "Transformer.Basic", "Transformer.New"]);
+    assert_eq!(ahead(), ["Transformer.Scratch"]);
+    assert_eq!(check(&db), None);
+}
+
+/// A row printed as if complete from a module its file no longer declares it
+/// in. `IsStrictSaddleTorusEnergy` was shown from `StrictSaddle` for days after
+/// a commit moved it to `CircleCritical`, and was the only `IsStrictSaddle` the
+/// search showed.
+#[test]
+fn a_row_its_files_now_declare_in_another_module_is_said_to_be_there() {
+    let dir = TempDir::new("dt-moved-in-files");
+    let (lib, src) = (dir.path().join(".lake/build/lib"), dir.path().join("src"));
+    let now = std::time::SystemTime::now();
+    let later = now + std::time::Duration::from_secs(100);
+    let ago = now - std::time::Duration::from_secs(300);
+    let both = "namespace T\n\ntheorem old : True := trivial\n\ntheorem stays : True := trivial\n";
+    save_at(&src, "Transformer.lean", "import Transformer.Basic\nimport Transformer.Moved\n", ago);
+    save_at(&src, "Transformer/Basic.lean", both, ago);
+    compile(&lib, &["Transformer", "Transformer.Basic"]);
+
+    let id = SourceId::new("project");
+    let mut db = SqliteIndex::in_memory().unwrap();
+    db.put(&[
+        theorem("T.old", "project", "Transformer.Basic", "True", &[]),
+        theorem("T.stays", "project", "Transformer.Basic", "True", &[]),
+    ])
+    .unwrap();
+    db.finish().unwrap();
+    let was = Provenance {
+        revision: revision::build_stamp(&lib),
+        decls: 2,
+        ..Provenance::by_this_build()
+    };
+    db.record(&id, &was).unwrap();
+    let disk = on_disk(dir.path(), &id);
+
+    // The commit: `old` moves to a module of its own, and a theorem is added
+    // beside the one that stays.
+    let kept =
+        "namespace T\n\ntheorem stays : True := trivial\n\ntheorem fresh : True := trivial\n";
+    save_at(&src, "Transformer/Basic.lean", kept, later);
+    save_at(
+        &src,
+        "Transformer/Moved.lean",
+        "namespace T\n\ntheorem old : True := trivial\n",
+        later,
+    );
+    let shown = |name: &str| {
+        let rows = [(DeclName::new(name), ModuleName::new("Transformer.Basic"))].into();
+        [(id.clone(), rows)].into()
+    };
+    let relocated = status::moved_in_files(&db, &disk, &shown("T.old")).unwrap();
+    assert_eq!(relocated.len(), 1);
+    let moved = &relocated[0].moved;
+    assert_eq!(moved.len(), 1);
+    assert_eq!((moved[0].name.as_str(), moved[0].line), ("T.old", Some(3)));
+    assert_eq!(moved[0].module, ModuleName::new("Transformer.Moved"));
+    // The line about the source counts all it lacks, as a search's does.
+    assert_eq!(relocated[0].behind.len(), 2, "{:?}", relocated[0].behind);
+    let stays = status::moved_in_files(&db, &disk, &shown("T.stays")).unwrap();
+    assert!(stays.is_empty(), "a row its file still declares where it was");
+}
+
+/// Write `text` to `rel` under `src`, saved at `at`.
+fn save_at(src: &std::path::Path, rel: &str, text: &str, at: std::time::SystemTime) {
+    let file = src.join(rel);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, text).unwrap();
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(at).unwrap();
+}
+
+/// An `.olean` for each module in the build at `lib`, arriving now.
+fn compile(lib: &std::path::Path, modules: &[&str]) {
+    for m in modules {
+        let olean = lib.join("lean").join(ModuleName::new(*m).relative_path());
+        std::fs::create_dir_all(olean.parent().unwrap()).unwrap();
+        std::fs::write(olean.with_extension("olean"), "compiled").unwrap();
+    }
+}
+
+/// The adapter over a project `lake` laid out at `dir`, its root `Transformer`.
+fn on_disk(dir: &std::path::Path, id: &SourceId) -> revision::OnDisk {
+    revision::OnDisk {
+        checkouts: Default::default(),
+        builds: [(id.clone(), dir.join(".lake/build/lib"))].into(),
+        manifest: Default::default(),
+        toolchains: Default::default(),
+        texts: [(id.clone(), dir.join("src"))].into(),
+        roots: [(id.clone(), ModuleName::new("Transformer"))].into(),
+    }
 }
 
 /// Every source is at whatever the build tree under this root fingerprints to,

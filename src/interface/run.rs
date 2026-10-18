@@ -19,7 +19,7 @@ use crate::domain::decl::{self, DeclKind};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::pattern;
 use crate::domain::query::{Power, Query, Spelling};
-use crate::domain::source::SourceId;
+use crate::domain::source::{SourceId, SourceKind};
 use crate::error::{Error, Result, bail};
 use crate::infrastructure::config::{self, Config, Source};
 use crate::infrastructure::git::Git;
@@ -181,7 +181,7 @@ impl App {
         // only the names that missed, so the answers stay in the asked order.
         if !missed.is_empty() && self.refresh_on_miss(refresh) {
             let reach = Query { source: only_in.cloned(), ..Query::new() };
-            if self.refresh_for_search(repo.as_ref(), &reach) {
+            if self.refresh_for_search(repo.as_ref(), &reach, refresh) {
                 repo = self.repo()?;
                 (shown, missed) = self.look_up(repo.as_ref(), &build, names, only_in);
             }
@@ -198,15 +198,18 @@ impl App {
             let asked: Vec<String> =
                 missed.iter().map(|(n, _)| n.clone()).chain([name.clone()]).collect();
             eprint!("{}", render::declared_behind(&self.behind_named(&stale, &asked)));
-            // When the name is one the build has compiled, "not in the index"
-            // is true and useless: `dt find` would miss it the same way, and
-            // the repair is the refresh.
+            // When the name is one the build has compiled, or one its file
+            // declares, "not in the index" is true and useless: `dt find`
+            // would miss it the same way, and the repair is the refresh -- or
+            // the build and then the refresh.
             let mine = self.behind_named(&stale, std::slice::from_ref(&name));
-            return Err(match mine.first() {
-                Some(d) => Error::new(format!(
-                    "{} is compiled but not indexed — `dt refresh {}`",
-                    d.name, d.source
-                )),
+            let asked = DeclName::new(format!(".{name}"));
+            let meant = mine
+                .iter()
+                .find(|d| d.name.as_str() == name || asked.names(&d.name))
+                .or(mine.first());
+            return Err(match meant {
+                Some(d) => Error::new(render::not_indexed(d)),
                 None => last,
             });
         }
@@ -233,6 +236,21 @@ impl App {
         let revs = OnDisk::read(&self.cfg);
         if let Ok(stale) = status::stale_for_rows(repo.as_ref(), &revs, &rows) {
             self.print_stale(stale);
+        }
+        let mut names: BTreeMap<SourceId, BTreeMap<DeclName, ModuleName>> = BTreeMap::new();
+        for s in &shown {
+            names
+                .entry(s.decl.source.clone())
+                .or_default()
+                .insert(s.decl.name.clone(), s.decl.module.clone());
+        }
+        if let Ok(relocated) = status::moved_in_files(repo.as_ref(), &revs, &names) {
+            for r in &relocated {
+                eprint!("{}", render::stale(&r.stale, self.kind_of(&r.stale.id), &r.behind));
+            }
+            let moved: Vec<status::Declaration> =
+                relocated.into_iter().flat_map(|r| r.moved).collect();
+            eprint!("{}", render::declared_behind(&moved));
         }
         Ok(())
     }
@@ -343,7 +361,7 @@ impl App {
         // and `no match` next to them would be the wrong one.
         if hits.rows.is_empty()
             && self.refresh_on_miss(args.refresh)
-            && self.refresh_for_search(repo.as_ref(), &query)
+            && self.refresh_for_search(repo.as_ref(), &query, args.refresh)
         {
             repo = self.repo()?;
             hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
@@ -394,9 +412,20 @@ impl App {
             true => find::sources_of(repo.as_ref(), &query),
         };
         let stale = self.warn_stale(repo.as_ref(), from);
-        if hits.rows.is_empty() {
-            eprint!("{}", render::declared_behind(&status::declared_matching(&stale, &query)));
-        }
+        // After rows as well as after none. A row can be the old one: the
+        // build and the files may declare the same name in another module
+        // now, and a hit that looks complete is the answer a reader stops at.
+        // A declaration that is one of the rows printed is not said again.
+        let found: Vec<status::Declaration> = status::declared_matching(&stale, &query)
+            .into_iter()
+            .filter(|d| {
+                !hits
+                    .rows
+                    .iter()
+                    .any(|r| r.source == d.source && r.name == d.name && r.module == d.module)
+            })
+            .collect();
+        eprint!("{}", render::declared_behind(&found));
         Ok(())
     }
 
@@ -430,10 +459,13 @@ impl App {
         // outcome than the staleness the warning was about to report.
         let Ok(stale) = status::stale_for_search(repo, &revs, among) else { return Vec::new() };
         for (s, behind) in &stale {
-            let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
-            eprint!("{}", render::stale(s, kind, behind));
+            eprint!("{}", render::stale(s, self.kind_of(&s.id), behind));
         }
         stale
+    }
+
+    fn kind_of(&self, id: &SourceId) -> Option<SourceKind> {
+        self.workspace.sources.iter().find(|w| w.id == *id).map(|w| w.kind)
     }
 
     /// Each name a command could not find, looked for among the declarations
@@ -488,11 +520,27 @@ impl App {
     /// a refresh that happened on the way to them is not part of it. A refresh
     /// that fails is reported and swallowed: the search still has the old rows
     /// and the hint from the build, and both beat an error.
-    fn refresh_for_search(&self, repo: &dyn DeclRepo, query: &Query) -> bool {
+    ///
+    /// `asked` is `--refresh` on the command line. A refresh asked for and not
+    /// run says why: `--refresh` printing nothing and finding nothing could
+    /// not be told from `--refresh` not running at all, and was reported as
+    /// exactly that.
+    fn refresh_for_search(&self, repo: &dyn DeclRepo, query: &Query, asked: bool) -> bool {
         let revs = OnDisk::read(&self.cfg);
         let Ok(among) = status::refreshable(repo, &revs, &self.workspace.sources, query) else {
             return false;
         };
+        if among.is_empty() && asked {
+            let local = self.workspace.sources.iter().filter(|s| s.kind == SourceKind::Local);
+            for s in local.filter(|s| query.source.as_ref().is_none_or(|asked| *asked == s.id)) {
+                let was = repo.provenance(&s.id).ok().flatten();
+                let built = revs.current(&s.id).ok().flatten();
+                let same =
+                    built.map(|b| was.as_ref().and_then(|p| p.revision.as_ref()) == Some(&b));
+                let age = was.map(|p| now().saturating_sub(p.indexed_at));
+                eprint!("{}", render::not_refreshed(&s.id, age, same));
+            }
+        }
         let mut read = false;
         for id in among {
             eprintln!("dt: `{id}` was rebuilt since it was indexed; reading it again");
@@ -545,9 +593,25 @@ impl App {
 
     fn print_stale(&self, stale: Vec<status::Stale>) {
         for s in stale {
-            let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
-            eprint!("{}", render::stale(&s, kind, &[]));
+            eprint!("{}", render::stale(&s, self.kind_of(&s.id), &[]));
         }
+    }
+
+    /// The line for each of these sources whose files are ahead of its build,
+    /// and whether there was one. What `dt refresh` cannot repair, said where
+    /// a refresh ends, since that is where a reader expects the index to be
+    /// current.
+    fn warn_unbuilt<'a>(&self, ids: impl IntoIterator<Item = &'a SourceId>) -> bool {
+        let Ok(repo) = self.repo() else { return false };
+        let revs = OnDisk::read(&self.cfg);
+        let mut any = false;
+        for id in ids {
+            if let Ok(Some((s, behind))) = status::unbuilt(repo.as_ref(), &revs, id) {
+                eprint!("{}", render::stale(&s, self.kind_of(id), &behind));
+                any = true;
+            }
+        }
+        any
     }
 
     fn status(&self) -> Result<()> {
@@ -858,7 +922,18 @@ impl App {
                 .collect(),
         };
         if targets.is_empty() {
-            println!("nothing has changed since it was indexed");
+            let local: Vec<SourceId> = self
+                .workspace
+                .sources
+                .iter()
+                .filter(|s| s.kind == SourceKind::Local)
+                .map(|s| s.id.clone())
+                .collect();
+            let said = match self.warn_unbuilt(&local) {
+                true => "nothing to read again: every build is the one it was indexed from",
+                false => "nothing has changed since it was indexed",
+            };
+            println!("{said}");
             return Ok(());
         }
         // Reported where it happens rather than in the summary: a refresh is
@@ -903,9 +978,10 @@ impl App {
             read_at.retain(|id, _| read.iter().any(|n| n == id.as_str()));
             let moved = status::moved_while_read(&OnDisk::read(&self.cfg), &read_at)?;
             for s in moved {
-                let kind = self.workspace.sources.iter().find(|w| w.id == s.id).map(|w| w.kind);
-                eprint!("{}", render::moved_while_read(&s, kind));
+                eprint!("{}", render::moved_while_read(&s, self.kind_of(&s.id)));
             }
+            let read: Vec<SourceId> = read.iter().map(|n| SourceId::new(n.clone())).collect();
+            self.warn_unbuilt(&read);
         }
         outcome(targets.len(), failed)
     }

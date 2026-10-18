@@ -247,14 +247,23 @@ fn show_from_a_source_takes_the_row_that_source_has() {
     assert!(err.contains("not in the index"), "a name no source has is not a wrong source: {err}");
 }
 
+/// The miss used to end in "try `dt find --name such`", which sent a reader
+/// who had just run that search and got `no match` back to it. The search is
+/// run instead, and what it found is the message.
 #[test]
-fn show_says_which_name_it_could_not_find() {
+fn show_says_which_name_it_could_not_find_and_what_the_name_search_finds() {
     let (repo, files, ws) = (repo(), files(), workspace());
-    let err = Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
-        .run(&DeclName::new("No.such"))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("No.such") && err.contains("dt find"), "got: {err}");
+    let show = |name: &str| {
+        Show { repo: &repo, files: &files, workspace: &ws, build: &NoBuild, only_in: None }
+            .run(&DeclName::new(name))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(show("No.such"), "No.such is not in the index, and no name in it contains `such`");
+    assert_eq!(
+        show("Complex.exp_le_exp"),
+        "Complex.exp_le_exp is not in the index; names containing `exp_le_exp`: Real.exp_le_exp"
+    );
 }
 
 /// `deps` and `add` start from the row a source has, as `show` shows it: the
@@ -1264,12 +1273,12 @@ fn a_name_from_an_unindexed_package_names_the_package_instead_of_a_retry() {
     assert!(err.contains("lake package `batteries`"), "{err}");
     assert!(!err.contains("try `dt find"), "the retry is the dead end: {err}");
 
-    // A name that is simply not there keeps the advice that does work.
+    // A name that is simply not there gets the search that advice named.
     let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Real.exp_nowhere"))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("try `dt find --name exp_nowhere`"), "{err}");
+    assert!(err.contains("no name in it contains `exp_nowhere`"), "{err}");
 }
 
 /// The packages reach the report, which is the only place a reader looks when
@@ -1304,14 +1313,14 @@ fn a_name_from_lean_core_says_so_rather_than_sending_the_reader_to_name_search()
     assert!(err.contains("`Int`"), "the namespace that is core's, not the whole name: {err}");
     assert!(!err.contains("try `dt find"), "the retry cannot reach a corpus nobody dumped: {err}");
 
-    // And a namespace core does not own keeps the advice that works. The list
-    // is narrow on purpose: an explanation that fits every missing name
-    // explains nothing.
+    // And a namespace core does not own gets the name search. The list is
+    // narrow on purpose: an explanation that fits every missing name explains
+    // nothing.
     let err = Show { repo: &repo, files: &files, workspace: &ws, build: &build, only_in: None }
         .run(&DeclName::new("Real.exp_nowhere"))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("try `dt find --name exp_nowhere`"), "{err}");
+    assert!(err.contains("no name in it contains `exp_nowhere`"), "{err}");
 }
 
 /// The module roots and the namespaces are different lists, and `--in` is asked

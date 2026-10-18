@@ -19,6 +19,7 @@ use crate::domain::query::Query;
 use crate::domain::source::{SourceId, SourceKind, Sources};
 use crate::error::Result;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceStatus {
@@ -36,16 +37,49 @@ pub struct SourceStatus {
     /// The `dt` that wrote these rows, when it is not the one reading them.
     /// `Some(None)` is a `dt` too old to have recorded which it was.
     pub written_by: Option<Option<String>>,
+    /// How far the source's files are ahead of its build, when they declare
+    /// something the index does not hold. See [`unbuilt`].
+    pub ahead: Option<Ahead>,
 }
 
 impl SourceStatus {
     /// Whether the index can be trusted for this source: whether the source has
-    /// moved since it was indexed, and whether the rows were written by a `dt`
-    /// that wrote them differently. Either one makes the answers wrong rather
-    /// than late, which is what the column cannot show and this has to.
+    /// moved since it was indexed, whether the rows were written by a `dt`
+    /// that wrote them differently, and whether its files declare what no
+    /// build has compiled. Each makes the answers wrong rather than late,
+    /// which is what the columns cannot show and this has to.
     pub fn stale(&self) -> bool {
+        self.reread() || self.ahead.is_some()
+    }
+
+    /// Whether `dt refresh` alone brings this source up to date: it moved, or
+    /// an older `dt` wrote its rows. A source whose files are ahead of its
+    /// build needs the build first.
+    pub fn reread(&self) -> bool {
         moved(&self.indexed_rev, &self.current_rev) || self.written_by.is_some()
     }
+
+    /// Whether the index is known to hold this source as it is: indexed, at a
+    /// revision that can be read, and not [`SourceStatus::stale`]. `None` when
+    /// that cannot be told -- never indexed, or a revision nobody can read.
+    pub fn current(&self) -> Option<bool> {
+        match self.stale() {
+            true => Some(false),
+            false => (self.indexed_rev.is_some() && self.current_rev.is_some()).then_some(true),
+        }
+    }
+}
+
+/// How far a source's files are ahead of its build, for `dt status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ahead {
+    /// Files the root imports that were saved after their module was last
+    /// compiled, or that no build has compiled.
+    pub files: usize,
+    /// Of those, the ones declaring names the index does not hold there.
+    pub declaring: usize,
+    /// Where `lake build` has to run.
+    pub project: PathBuf,
 }
 
 /// Two revisions disagree only when both are known. Unknown counts as not
@@ -69,8 +103,8 @@ pub struct Stale {
     pub why: Why,
 }
 
-/// The two ways an index falls behind, which are not the same fact and do not
-/// have the same repair.
+/// The three ways an index falls behind, which are not the same fact and do
+/// not have the same repair.
 ///
 /// A source that moved has to be read again — dumped, fetched — before it can
 /// be indexed. A source whose rows were written by an older `dt` has not moved:
@@ -78,6 +112,10 @@ pub struct Stale {
 /// an hour to produce the bytes that are already there. Only the load has to
 /// run again. Keeping the distinction here is what lets `dt refresh` charge the
 /// cheap price when the cheap price is the right one.
+///
+/// And a source whose files are ahead of its build cannot be brought up to
+/// date by `dt` at all: a dump reads the build, and the build does not have
+/// them. `lake build` comes first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Why {
     /// Indexed at one revision, on disk at another.
@@ -85,6 +123,10 @@ pub enum Why {
     /// The rows are in an older row format. `by` is the `dt` that wrote them,
     /// when it recorded which it was.
     Written { by: Option<String> },
+    /// `files` of the files the root imports were saved after the build last
+    /// compiled them, or were never compiled, and some declare what the index
+    /// does not hold. `project` is where `lake build` has to run.
+    Unbuilt { files: usize, project: PathBuf },
 }
 
 impl Why {
@@ -164,7 +206,27 @@ pub fn moved_while_read(
 /// at the lines the build gives it, spelled as the source spells it there. A
 /// new, renamed, moved or restated declaration keeps the line; an edited proof
 /// does not.
+///
+/// Then the files a build has not caught up with, which no revision shows: see
+/// [`unbuilt`]. Those come after the build's own, and a source can be behind
+/// both ways at once -- rebuilt in part, and edited past the rebuild.
 pub fn stale_for_search(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    among: impl IntoIterator<Item = SourceId>,
+) -> Result<Vec<(Stale, Vec<Behind>)>> {
+    let among: Vec<SourceId> = among.into_iter().collect();
+    let mut kept = behind_build(repo, revisions, among.iter().cloned())?;
+    for id in &among {
+        kept.extend(unbuilt(repo, revisions, id)?);
+    }
+    Ok(kept)
+}
+
+/// The sources a search may be missing rows of because the build moved, and
+/// what it moved to. The first half of [`stale_for_search`], and all a
+/// refresh can repair.
+fn behind_build(
     repo: &dyn DeclRepo,
     revisions: &dyn Revisions,
     among: impl IntoIterator<Item = SourceId>,
@@ -178,6 +240,67 @@ pub fn stale_for_search(
         }
     }
     Ok(kept)
+}
+
+/// What a source's files declare that the index does not hold and no build
+/// has compiled: the third way to fall behind, and the one a revision cannot
+/// show.
+///
+/// A project's revision is its build, and the build moves only when somebody
+/// builds it. Agents that build in a git worktree and merge into the main
+/// checkout move its files and never its build, so the index was the build's
+/// to the byte, four days and over a thousand files behind the source, and
+/// `dt status` called it current. So the files are compared too: each one
+/// saved after its module was last compiled is read, and the names it
+/// declares are looked for among the rows of that module. A file only touched
+/// -- a checkout, a merge that changed nothing in it -- declares what the
+/// index has and costs a read; a name the index does not hold, or holds in
+/// another module, is what makes the source behind.
+///
+/// Only modules the root imports count, by the files' own `import` lines, for
+/// the reason [`Revisions::imported`] gives. `None` when nothing is missing,
+/// when the source was never indexed -- then everything is missing, and
+/// that is another message -- or when anything here cannot be read: a
+/// warning that cries wolf on a source nobody can read is a warning nobody
+/// reads.
+pub fn unbuilt(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    id: &SourceId,
+) -> Result<Option<(Stale, Vec<Behind>)>> {
+    let Some(ahead) = revisions.unbuilt(id) else { return Ok(None) };
+    if ahead.modules.is_empty() || repo.provenance(id)?.is_none() {
+        return Ok(None);
+    }
+    // Read only once something is missing, as in `behind`: a file the root
+    // does not import may declare anything, and no refresh would change that.
+    let mut imported = None;
+    let mut out = Vec::new();
+    for (module, decls) in &ahead.modules {
+        if decls.is_empty() {
+            continue;
+        }
+        let Some(rows) = repo.located_in(id, module)? else { return Ok(None) };
+        let missing: BTreeMap<DeclName, Located> = decls
+            .iter()
+            .filter(|(name, _)| !rows.contains_key(*name))
+            .map(|(name, at)| (name.clone(), at.clone()))
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let Some(imported) = imported.get_or_insert_with(|| revisions.imported_as_written(id))
+        else {
+            return Ok(None);
+        };
+        if imported.contains(module) {
+            out.push(Behind { module: module.clone(), decls: missing });
+        }
+    }
+    let Some(Some(imported)) = imported.filter(|_| !out.is_empty()) else { return Ok(None) };
+    let files = ahead.modules.keys().filter(|m| imported.contains(*m)).count();
+    let why = Why::Unbuilt { files, project: ahead.project };
+    Ok(Some((Stale { id: id.clone(), why }, out)))
 }
 
 /// The sources a miss may read again before it answers: the local ones in the
@@ -200,18 +323,23 @@ pub fn refreshable(
         .filter(|s| query.source.as_ref().is_none_or(|asked| *asked == s.id))
         .map(|s| s.id.clone())
         .collect();
-    let stale = stale_for_search(repo, revisions, among)?;
+    // Not the files no build has compiled: reading the build again reads
+    // what is already indexed.
+    let stale = behind_build(repo, revisions, among)?;
     Ok(stale.into_iter().map(|(s, _)| s.id).collect())
 }
 
 /// A module the build has compiled since the index was written, and the
-/// declarations in it the index does not hold as the build has them.
+/// declarations in it the index does not hold as the build has them -- or,
+/// for [`Why::Unbuilt`], a module saved since it was compiled, and the names
+/// its file declares that the index does not hold there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Behind {
     pub module: ModuleName,
     /// Name → where the build puts it and how the source spells it, for the
-    /// declarations that are new, moved or restated. From the `.ilean`, so
-    /// there is no type and no kind: this is what is known without a dump.
+    /// declarations that are new, moved or restated. From the `.ilean` or the
+    /// file, so there is no type and no kind: this is what is known without a
+    /// dump.
     pub decls: BTreeMap<DeclName, Located>,
 }
 
@@ -269,12 +397,20 @@ fn behind(
 /// the statement as the source spells it, and no elaborated type at all, so a
 /// shape or a `--uses` condition has nothing to match. A query carrying one is
 /// not answered from here rather than answered loosely.
+///
+/// A module alone can: `--in Transformer.SaddleAvoidance` asks for what is
+/// declared there, and when no row is, what the files declare is the answer.
+/// A name the build and the file both declare is listed once, as the build
+/// has it.
 pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Declaration> {
     let asked = q.name_asked();
-    if !q.shape.is_empty() || !q.uses.is_empty() || (asked.is_none() && q.text.is_empty()) {
+    if !q.shape.is_empty()
+        || !q.uses.is_empty()
+        || (asked.is_none() && q.text.is_empty() && q.module.is_none())
+    {
         return Vec::new();
     }
-    let mut out = Vec::new();
+    let mut out: Vec<Declaration> = Vec::new();
     for (s, behind) in stale {
         if q.source.as_ref().is_some_and(|id| id != &s.id) {
             continue;
@@ -290,12 +426,15 @@ pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Decla
                     statement.to_lowercase().contains(&t.to_lowercase())
                         || name.as_str().to_lowercase().contains(&t.to_lowercase())
                 });
-                if named && spelled {
+                let listed = out.iter().any(|d| d.source == s.id && &d.name == name);
+                if named && spelled && !listed {
                     out.push(Declaration {
                         source: s.id.clone(),
                         module: b.module.clone(),
                         name: name.clone(),
+                        line: at.span.map(|s| s.start),
                         statement: at.statement.clone(),
+                        why: s.why.clone(),
                     });
                 }
             }
@@ -304,15 +443,28 @@ pub fn declared_matching(stale: &[(Stale, Vec<Behind>)], q: &Query) -> Vec<Decla
     out
 }
 
-/// A declaration the build has and the index does not. See
+/// A declaration the build or the files have and the index does not. See
 /// [`declared_matching`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
     pub source: SourceId,
     pub module: ModuleName,
     pub name: DeclName,
+    /// The line it starts on, as the build or the file has it.
+    pub line: Option<u32>,
     /// How the source spells it, when its file could be read.
     pub statement: Option<String>,
+    /// Why the index does not hold it: [`Why::Moved`] for a declaration the
+    /// build compiled since, [`Why::Unbuilt`] for one only the file has.
+    pub why: Why,
+}
+
+impl Declaration {
+    /// Whether a build has compiled it, so that `dt refresh` alone brings it
+    /// into the index.
+    pub fn compiled(&self) -> bool {
+        !matches!(self.why, Why::Unbuilt { .. })
+    }
 }
 
 /// [`stale_among`], for a command that printed these rows and nothing else.
@@ -348,6 +500,57 @@ pub fn stale_for_rows(
     Ok(kept)
 }
 
+/// The rows a command printed whose files now declare them in another module,
+/// one no build has compiled since: what [`stale_for_rows`] cannot see, since
+/// the module a row names may be untouched and still not where it is.
+///
+/// `Transformer.Perspective.IsStrictSaddleTorusEnergy` was printed from
+/// `Transformer.Perspective.StrictSaddle` for days after a commit moved it to
+/// `CircleCritical`: a real row that looked complete, and the only
+/// `IsStrictSaddle` the search showed. A row whose module merely changed is
+/// still the row, so only a name declared somewhere else counts.
+pub fn moved_in_files(
+    repo: &dyn DeclRepo,
+    revisions: &dyn Revisions,
+    rows: &BTreeMap<SourceId, BTreeMap<DeclName, ModuleName>>,
+) -> Result<Vec<Relocated>> {
+    let mut out = Vec::new();
+    for (id, shown) in rows {
+        let Some((stale, behind)) = unbuilt(repo, revisions, id)? else { continue };
+        let mut moved = Vec::new();
+        for b in &behind {
+            for (name, at) in &b.decls {
+                if shown.get(name).is_some_and(|m| *m != b.module) {
+                    moved.push(Declaration {
+                        source: id.clone(),
+                        module: b.module.clone(),
+                        name: name.clone(),
+                        line: at.span.map(|s| s.start),
+                        statement: at.statement.clone(),
+                        why: stale.why.clone(),
+                    });
+                }
+            }
+        }
+        if !moved.is_empty() {
+            out.push(Relocated { stale, behind, moved });
+        }
+    }
+    Ok(out)
+}
+
+/// A source whose files declare a printed row's name in another module now.
+/// See [`moved_in_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relocated {
+    pub stale: Stale,
+    /// All its files declare that the index does not hold, as [`unbuilt`]
+    /// gives it: what the line about the source counts.
+    pub behind: Vec<Behind>,
+    /// The printed rows' names, where the files declare them now.
+    pub moved: Vec<Declaration>,
+}
+
 /// What `dt status` has to say.
 ///
 /// Two halves, and the second is not a footnote to the first: the sources
@@ -381,6 +584,10 @@ impl Status<'_> {
         let mut out = Vec::new();
         for s in self.workspace.sources.iter() {
             let was = self.repo.provenance(&s.id)?;
+            let ahead = unbuilt(self.repo, self.revisions, &s.id)?.and_then(|(s, behind)| {
+                let Why::Unbuilt { files, project } = s.why else { return None };
+                Some(Ahead { files, declaring: behind.len(), project })
+            });
             out.push(SourceStatus {
                 name: s.id.to_string(),
                 kind: s.kind,
@@ -391,6 +598,7 @@ impl Status<'_> {
                 current_rev: self.revisions.current(&s.id)?,
                 age: was.as_ref().map(|p| self.now.saturating_sub(p.indexed_at)),
                 written_by: was.filter(Provenance::outdated).map(|p| p.writer),
+                ahead,
             });
         }
         Ok(Report {

@@ -68,7 +68,7 @@ impl DeclKind {
             "theorem" | "lemma" => DeclKind::Theorem,
             "def" | "abbrev" | "noncomputable def" => DeclKind::Def,
             "structure" | "class" => DeclKind::Structure,
-            "inductive" => DeclKind::Inductive,
+            "inductive" | "class inductive" => DeclKind::Inductive,
             "axiom" => DeclKind::Axiom,
             "instance" => DeclKind::Instance,
             "ctor" => DeclKind::Ctor,

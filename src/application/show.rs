@@ -13,6 +13,7 @@ use crate::application::rdeps::SHOWN;
 use crate::domain::decl::Decl;
 use crate::domain::lean_text;
 use crate::domain::name::DeclName;
+use crate::domain::query::Query;
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
 
@@ -82,7 +83,7 @@ impl Show<'_> {
             if let Some(missing) = self.build.declaring(name.as_str()) {
                 bail!("{}", missing.about(name))
             }
-            bail!("{name} is not in the index; try `dt find --name {}`", name.base())
+            bail!("{}", absent(self.repo, name, self.only_in)?)
         };
         self.shown(decl, Some(name.clone()))
     }
@@ -156,4 +157,39 @@ impl Show<'_> {
         let head = lean_text::first_code_line(&lines).to_string();
         Ok(Source::Generated { inside: inside.map(Box::new), head })
     }
+}
+
+/// What to say about a name no row is called and none ends in.
+///
+/// This used to be "try `dt find --name <base>`", and a reader who had just
+/// run that search and got `no match` was sent back to it. The search is
+/// cheap, so it is run here and its answer is the message: the names that
+/// contain the last component, or that there are none.
+pub(crate) fn absent(
+    repo: &dyn DeclRepo,
+    name: &DeclName,
+    only_in: Option<&SourceId>,
+) -> Result<String> {
+    let base = name.base();
+    let near = Query {
+        name: Some(base.to_string()),
+        source: only_in.cloned(),
+        limit: SHOWN + 1,
+        ..Query::new()
+    };
+    let mut found: Vec<DeclName> = Vec::new();
+    for d in repo.find(&near)? {
+        if !found.contains(&d.name) {
+            found.push(d.name);
+        }
+    }
+    if found.is_empty() {
+        return Ok(format!("{name} is not in the index, and no name in it contains `{base}`"));
+    }
+    let shown: Vec<&str> = found.iter().take(SHOWN).map(DeclName::as_str).collect();
+    let more = match found.len() > SHOWN {
+        true => format!(", and more — `dt find --name {base}`"),
+        false => String::new(),
+    };
+    Ok(format!("{name} is not in the index; names containing `{base}`: {}{more}", shown.join(", ")))
 }

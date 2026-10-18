@@ -579,18 +579,30 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
     // No width on the last column. It is the one that varies, and padding it
     // buys nothing but trailing spaces on every row of every run.
     out.push_str(&format!(
-        "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {}\n",
-        "source", "kind", "elaborated", "importable", "declarations", "indexed", "revision"
+        "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<7} {}\n",
+        "source",
+        "kind",
+        "elaborated",
+        "importable",
+        "declarations",
+        "indexed",
+        "current",
+        "revision"
     ));
     for r in rows {
         out.push_str(&format!(
-            "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {}\n",
+            "{:<14} {:<7} {:<12} {:<12} {:>12}  {:<8} {:<7} {}\n",
             r.name,
             r.kind.as_str(),
             r.elaborated,
             r.importable,
             r.decls,
             r.age.map_or_else(|| "never".into(), age),
+            match r.current() {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "-",
+            },
             revision(r),
         ));
     }
@@ -612,7 +624,7 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
     // table above: a source that moved shows it in the revision column, and one
     // whose rows an older `dt` wrote shows nothing at all — every column of it
     // is what it was, and the rows behind them are not.
-    let stale: Vec<&SourceStatus> = rows.iter().filter(|r| r.stale()).collect();
+    let stale: Vec<&SourceStatus> = rows.iter().filter(|r| r.reread()).collect();
     if !stale.is_empty() {
         let names: Vec<&str> = stale.iter().map(|r| r.name.as_str()).collect();
         // Upgrading `dt` puts every source behind at once and for the same
@@ -637,6 +649,19 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
             false => names.join(", "),
         };
         out.push_str(&format!("\nbehind: {listed}{why} — re-run `dt refresh`\n"));
+    }
+    // A line of its own, because the repair is not `dt refresh`: a refresh
+    // reads the build, and the build is what is behind. Every column above is
+    // what it was when this was indexed, so this line is the whole report.
+    for r in rows {
+        if let Some(a) = &r.ahead {
+            out.push_str(&format!(
+                "\nbehind its source files: {} — {} — {}\n",
+                r.name,
+                ahead(a.files, a.declaring),
+                rebuild(&a.project, &r.name)
+            ));
+        }
     }
     // The gap no row above can show. A project declares Mathlib and stops, and
     // everything Mathlib is built on is importable from the project already and
@@ -687,9 +712,21 @@ pub fn status(report: &Report, db: &std::path::Path) -> String {
 /// are known: "rows may be missing" over a project of three hundred modules
 /// names none of them, and the four that were just compiled are the answer to
 /// the question the line raises.
+///
+/// Files ahead of the build are the one reason `dt refresh` does not repair,
+/// so that line names the build to run first, and where: an agent in a git
+/// worktree finds the main checkout's index, and a `lake build` in the
+/// worktree builds something else.
 pub fn stale(s: &Stale, kind: Option<SourceKind>, behind: &[Behind]) -> String {
     let id = &s.id;
     let what = match (&s.why, kind) {
+        (Why::Unbuilt { files, project }, _) => {
+            return format!(
+                "dt: `{id}` is behind its source files: {}; rows are missing — {}\n",
+                ahead(*files, behind.len()),
+                rebuild(project, id.as_str())
+            );
+        }
         // Written by this very dt, and still old: the dump it loaded is.
         (Why::Written { by }, _) if by.as_deref() == Some(version()) => {
             "was loaded from a dump an older dt wrote".to_string()
@@ -717,6 +754,60 @@ pub fn stale(s: &Stale, kind: Option<SourceKind>, behind: &[Behind]) -> String {
     format!("dt: `{id}` {what}; rows may be missing — `dt refresh {id}`\n")
 }
 
+/// Why `dt show` has no row for a name the build or the files declare: the
+/// error that replaces "not in the index", which is true and sends the reader
+/// to a `dt find` that misses it the same way.
+pub fn not_indexed(d: &Declaration) -> String {
+    match &d.why {
+        Why::Unbuilt { project, .. } => {
+            let line = d.line.map_or(String::new(), |l| format!(", line {l}"));
+            format!(
+                "{} is in the source files ({}{line}) and in no build yet — {}",
+                d.name,
+                d.module,
+                rebuild(project, d.source.as_str())
+            )
+        }
+        _ => format!("{} is compiled but not indexed — `dt refresh {}`", d.name, d.source),
+    }
+}
+
+/// Why `--refresh` read a local source in reach of the search again: it did
+/// not, and this is the reason. `age` is how long ago it was indexed, `None`
+/// if never; `same` whether its build is the one indexed, `None` if it has no
+/// build. The line is there so that a refresh that did nothing reads
+/// differently from one that never ran -- and the index's age is what `git log`
+/// can be held against.
+pub fn not_refreshed(id: &SourceId, age: Option<u64>, same: Option<bool>) -> String {
+    let why = match (age, same) {
+        (None, _) => format!("it has never been indexed — `dt refresh {id}`"),
+        (Some(_), None) => "it has no build to read".to_string(),
+        (Some(a), Some(true)) => format!("its build is the one indexed {}", self::age(a)),
+        (Some(a), Some(false)) => format!(
+            "it was indexed {}, and its build has compiled nothing since that the index lacks",
+            self::age(a)
+        ),
+    };
+    format!("dt: --refresh: `{id}` not read again: {why}\n")
+}
+
+/// How far a source's files are ahead of its build, as both reports say it.
+fn ahead(files: usize, declaring: usize) -> String {
+    match files == declaring {
+        true => format!("{files} newer than the build and declaring names the index does not hold"),
+        false => format!(
+            "{files} newer than the build, {declaring} of them declaring names the index does not \
+             hold"
+        ),
+    }
+}
+
+/// The repair for files ahead of the build: the build, where it is, then the
+/// refresh that reads it.
+fn rebuild(project: &std::path::Path, id: &str) -> String {
+    format!("`lake build` in {}, then `dt refresh {id}`", project.display())
+}
+
 /// How many rebuilt modules the staleness line names.
 const BEHIND: usize = 4;
 
@@ -733,19 +824,30 @@ fn clipped(s: &str) -> String {
 }
 
 /// The declarations a search would have matched if the index held them, from
-/// the `.ilean` of a module compiled since it was written.
+/// the `.ilean` of a module compiled since it was written, or from the file of
+/// one no build has compiled since it was saved.
 ///
 /// This is the answer `no match` could not give: the name is in the project,
-/// it was compiled, and nothing but a refresh is missing. The statement is
-/// printed as the source spells it, which is what the reader would have got
-/// from a row -- minus the elaborated type, which no `.ilean` holds.
+/// and nothing but a refresh -- or a build and a refresh -- is missing. The
+/// statement is printed as the source spells it, which is what the reader
+/// would have got from a row -- minus the elaborated type, which neither holds.
+/// The line is there because neither can be `dt show`n yet, and the file can
+/// be read.
 pub fn declared_behind(found: &[Declaration]) -> String {
+    let (compiled, written): (Vec<&Declaration>, Vec<&Declaration>) =
+        found.iter().partition(|d| d.compiled());
+    listed("compiled since the index was written, so not a row yet:", &compiled)
+        + &listed("in the source files and in no build yet, so not a row:", &written)
+}
+
+fn listed(head: &str, found: &[&Declaration]) -> String {
     if found.is_empty() {
         return String::new();
     }
-    let mut out = String::from("dt: compiled since the index was written, so not a row yet:\n");
+    let mut out = format!("dt: {head}\n");
     for d in found.iter().take(BEHIND) {
-        out.push_str(&format!("dt:   {} [{}]\n", d.name, d.module));
+        let line = d.line.map_or(String::new(), |l| format!(", line {l}"));
+        out.push_str(&format!("dt:   {} [{}{line}]\n", d.name, d.module));
         if let Some(statement) = &d.statement {
             out.push_str(&format!("dt:     {}\n", clipped(lean_text::statement_only(statement))));
         }
@@ -766,7 +868,7 @@ pub fn moved_while_read(s: &Stale, kind: Option<SourceKind>) -> String {
         (Why::Moved { indexed, current }, _) => {
             format!("went from {} to {}", short_rev(indexed), short_rev(current))
         }
-        (Why::Written { .. }, _) => "changed".to_string(),
+        (Why::Written { .. } | Why::Unbuilt { .. }, _) => "changed".to_string(),
     };
     format!(
         "dt: `{id}` {what} while it was being read, so the index is already behind it — \
@@ -830,13 +932,21 @@ fn short_rev(rev: &str) -> String {
 /// the second value is what `git log A..B` wants, and for the project it is the
 /// build fingerprint that tells two rebuilds apart. Seven characters each,
 /// which is what a person pastes into `git show`.
+///
+/// The project's is marked as a build. Seven hex digits read as a commit, and
+/// `git log 7583624..` answered "unknown revision": no help in telling how far
+/// the files had moved, and no hint of why.
 fn revision(r: &SourceStatus) -> String {
     let short = |s: &String| s.chars().take(7).collect::<String>();
+    let of = match r.kind {
+        SourceKind::Local => "build ",
+        _ => "",
+    };
     match (&r.indexed_rev, &r.current_rev) {
         (Some(was), Some(now)) if was != now => {
-            format!("{} (now {}, stale)", short(was), short(now))
+            format!("{of}{} (now {}, stale)", short(was), short(now))
         }
-        (Some(was), _) => short(was),
+        (Some(was), _) => format!("{of}{}", short(was)),
         (None, _) => "-".into(),
     }
 }
@@ -981,6 +1091,7 @@ mod tests {
             current_rev: Some("9ab0d31".into()),
             age: Some(3600),
             written_by: None,
+            ahead: None,
         }
     }
 
@@ -1637,5 +1748,124 @@ mod tests {
             ),
             "{r}"
         );
+    }
+
+    /// The report the table was missing: `dt status` called the project
+    /// current while its files were days and hundreds of modules past the
+    /// build it was read from, since the build had not moved. The row says
+    /// `no`, and the line under the table names the build to run, and where.
+    #[test]
+    fn files_ahead_of_the_build_make_a_source_not_current() {
+        use crate::application::status::Ahead;
+        let path = std::path::Path::new("/p/index.db");
+        let column = |r: &str| {
+            let head = r.lines().find(|l| l.starts_with("source ")).unwrap();
+            let at = head.find("current").unwrap();
+            let row = r.lines().find(|l| l.starts_with("project")).unwrap();
+            row[at..].split_whitespace().next().unwrap().to_string()
+        };
+        let ahead = SourceStatus {
+            current_rev: Some("4f21c8e".into()),
+            ahead: Some(Ahead { files: 669, declaring: 412, project: "/w/transformer".into() }),
+            ..behind("project", SourceKind::Local, true)
+        };
+        let r = status(&report(std::slice::from_ref(&ahead)), path);
+        assert_eq!(column(&r), "no", "{r}");
+        assert!(r.lines().any(|l| l.ends_with(" build 4f21c8e")), "a build, not a commit: {r}");
+        assert!(
+            r.contains(
+                "behind its source files: project — 669 newer than the build, 412 of them \
+                 declaring names the index does not hold — `lake build` in /w/transformer, \
+                 then `dt refresh project`"
+            ),
+            "{r}"
+        );
+        assert!(!r.contains("\nbehind: "), "`dt refresh` alone is not the repair: {r}");
+
+        let current = SourceStatus { ahead: None, ..ahead };
+        let r = status(&report(std::slice::from_ref(&current)), path);
+        assert_eq!(column(&r), "yes", "{r}");
+        assert!(!r.contains("behind"), "{r}");
+        let never = SourceStatus { indexed_rev: None, age: None, ..current };
+        assert_eq!(column(&status(&report(&[never]), path)), "-", "not known either way");
+    }
+
+    /// Files ahead of the build are the one staleness `dt refresh` cannot
+    /// repair: it reads the build, and the build is what is behind. So the line
+    /// names the build to run first, and the project to run it in -- an agent
+    /// in a git worktree finds the main checkout's index.
+    #[test]
+    fn files_ahead_of_the_build_name_the_build_to_run_and_where() {
+        let s = Stale {
+            id: SourceId::new("project"),
+            why: Why::Unbuilt { files: 3, project: "/w/transformer".into() },
+        };
+        let at = |m: &str| Behind { module: ModuleName::new(m), decls: BTreeMap::new() };
+        assert_eq!(
+            stale(&s, Some(SourceKind::Local), &[at("T.A"), at("T.B")]),
+            "dt: `project` is behind its source files: 3 newer than the build, 2 of them \
+             declaring names the index does not hold; rows are missing — `lake build` in \
+             /w/transformer, then `dt refresh project`\n"
+        );
+        let all = stale(&s, Some(SourceKind::Local), &[at("T.A"), at("T.B"), at("T.C")]);
+        assert!(all.contains(": 3 newer than the build and declaring names"), "{all}");
+    }
+
+    /// A name only the files declare cannot be shown until a build compiles it,
+    /// and its repair is not the refresh a compiled one needs, so the two are
+    /// listed apart, each with the line its file has it on.
+    #[test]
+    fn a_name_only_the_files_declare_is_listed_apart_with_its_line() {
+        let d = |why: Why, line| Declaration {
+            source: SourceId::new("project"),
+            module: ModuleName::new("T.Basic"),
+            name: DeclName::new("T.fresh"),
+            line,
+            statement: Some("/-- New. -/ theorem fresh : True".into()),
+            why,
+        };
+        let unbuilt = Why::Unbuilt { files: 1, project: "/w/transformer".into() };
+        let moved = Why::Moved { indexed: "b57d6d7".into(), current: "04e1042".into() };
+        assert_eq!(
+            declared_behind(&[d(unbuilt.clone(), Some(7)), d(moved.clone(), Some(3))]),
+            "dt: compiled since the index was written, so not a row yet:\n\
+             dt:   T.fresh [T.Basic, line 3]\n\
+             dt:     theorem fresh : True\n\
+             dt: in the source files and in no build yet, so not a row:\n\
+             dt:   T.fresh [T.Basic, line 7]\n\
+             dt:     theorem fresh : True\n"
+        );
+        assert_eq!(
+            not_indexed(&d(unbuilt, Some(7))),
+            "T.fresh is in the source files (T.Basic, line 7) and in no build yet — \
+             `lake build` in /w/transformer, then `dt refresh project`"
+        );
+        assert_eq!(
+            not_indexed(&d(moved, None)),
+            "T.fresh is compiled but not indexed — `dt refresh project`"
+        );
+    }
+
+    /// `--refresh` that read nothing and found nothing looked the same as a
+    /// `--refresh` that never ran, and was reported as one. The line says which
+    /// it was, with the index's age, which a reader can hold against `git log`.
+    #[test]
+    fn a_refresh_that_did_not_run_says_why() {
+        let id = SourceId::new("project");
+        let why = |age, same| not_refreshed(&id, age, same);
+        assert_eq!(
+            why(Some(3 * 86_400), Some(true)),
+            "dt: --refresh: `project` not read again: its build is the one indexed 3d ago\n"
+        );
+        assert!(
+            why(Some(7200), Some(false)).contains(
+                "it was indexed 2h ago, and its build has compiled nothing since that the \
+                 index lacks"
+            ),
+            "{}",
+            why(Some(7200), Some(false))
+        );
+        assert!(why(Some(7200), None).ends_with("not read again: it has no build to read\n"));
+        assert!(why(None, None).contains("it has never been indexed — `dt refresh project`"));
     }
 }

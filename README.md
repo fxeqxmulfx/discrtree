@@ -384,12 +384,12 @@ ago looks exactly like a correct answer. So every source records what it was
 built from, and `dt status` reports both that and where the source is now.
 
 ```
-source         kind    elaborated   importable   declarations  indexed  revision
-project        local   true         true                  784  2h ago   4f21c8e (now 9ab0d31, stale)
-mathlib        lake    true         true               325936  2h ago   0df444a
-flt            git     false        false               58674  2h ago   aa2d8b3
+source         kind    elaborated   importable   declarations  indexed  current revision
+project        local   true         true                  784  2h ago   no      build 4f21c8e (now 9ab0d31, stale)
+mathlib        lake    true         true               325936  2h ago   yes     0df444a
+flt            git     false        false               58674  2h ago   yes     aa2d8b3
 
-behind the build: project — re-run `dt dump` and `dt index`
+behind: project — re-run `dt refresh`
 ```
 
 A lake dependency's revision comes from `lake-manifest.json`, which is what the
@@ -398,7 +398,9 @@ A source that has moved shows both revisions rather than the word `stale` alone:
 one of them says a re-dump is due, the pair says how far behind and against
 what, which is what `git log A..B` wants. A source with no revision to read is
 reported as `-` and never as stale: a warning that is always on is a warning
-nobody reads.
+nobody reads. `current` is the row in one word: `yes` when the index holds the
+source as it is, `no` when it does not for any of the reasons on this page, and
+`-` when that cannot be told.
 
 The project itself has neither. Nobody pins it, and its working tree is ahead of
 its last commit by definition — that is what working on it means. So its
@@ -406,7 +408,8 @@ revision is a hash of (module path, size, mtime) over every `.olean` under
 `.lake/build/lib`, which moves exactly when a rebuild has happened. It has to be
 the build rather than the `.lean` files, because the build is what `dt dump`
 reads: an edit nobody has compiled yet would otherwise report a staleness that
-re-dumping would not fix.
+re-dumping would not fix. The table says `build 4f21c8e`, because seven hex
+digits read as a commit, and `git log 4f21c8e..` answers `unknown revision`.
 
 This is the source where staleness is guaranteed rather than occasional. Mathlib
 is bumped monthly and the project changes every commit, so the corpus being
@@ -472,7 +475,55 @@ every edit and costs seconds, a pinned dependency is rebuilt when somebody
 bumps it and costs minutes, and a Mathlib dump nobody asked for is not an
 answer to a search. Everything the refresh says goes to stderr, so the rows on
 stdout are still only the answer, and a refresh that fails is reported and
-swallowed: the old rows and the hint from the build both beat an error.
+swallowed: the old rows and the hint from the build both beat an error. A
+`--refresh` that reads nothing says why, with the index's age, which is what
+`git log` can be held against:
+
+```
+dt: --refresh: `project` not read again: its build is the one indexed 3d ago
+```
+
+Without that line, a `--refresh` that read nothing and found nothing could not
+be told from one that never ran, and was reported as exactly that.
+
+A build moves only when somebody builds, though, and a project's files can move
+without it. Agents that build in a git worktree and merge into the main
+checkout change its `.lean` files and never its build — and `dt` run in a
+worktree, which has no `discrtree.toml`, finds the main checkout's. The index
+was that build's to the byte, four days and over a thousand files behind the
+source, and `dt status` called it current. So the files are compared too: each
+`.lean` file saved after its module was last compiled, or never compiled, is
+read, and the names it declares are looked for among the index's rows for that
+module.
+
+```
+$ dt find --name isStrictSaddle_of_inner_neg
+no match
+dt: `project` is behind its source files: 1169 newer than the build, 860 of them declaring names the index does not hold; rows are missing — `lake build` in /home/me/transformer, then `dt refresh project`
+dt: in the source files and in no build yet, so not a row:
+dt:   Transformer.SaddleAvoidance.isStrictSaddle_of_inner_neg [Transformer.SaddleAvoidance.Necessary, line 94]
+dt:     theorem isStrictSaddle_of_inner_neg (hf : ContDiff ℝ 2 f) {z : E} (hz : gradient f z = 0) {h : E} (hh : ⟪fderiv ℝ (gradient f) z h, h⟫ < 0) : IsStrictSaddle f z
+```
+
+The repair is two commands, and the line names the directory the first one
+runs in: a `lake build` in the worktree builds the worktree. `dt status` puts
+the same fact under its table and `no` in its `current` column, `dt show` of
+such a name says where its file has it, and `dt refresh` prints the line too,
+since a refresh reads the build and the build is what is behind. A hit is
+checked as well. A row whose name the files now declare in another module is
+printed with where they declare it: `IsStrictSaddleTorusEnergy` was shown for
+days from the module a commit had moved it out of, a real row that looked
+complete and the only `IsStrictSaddle` the search found.
+
+What is not reported is as deliberate. A file only touched — a checkout, a
+merge that changed nothing in it — declares what the index holds. A private
+name has no row to compare, since Lean mangles it and no dump keeps it. A
+module the root does not import is never dumped, so no build of the root would
+change what it adds. When the build is current, which it is after every `lake
+build`, the check is a walk and two `stat`s per source file: a `dt find` on a
+296-file project takes 179.4 ms of CPU with it and 178.0 without. Only a file
+the build is behind is read, and for the project above, 1169 files behind, the
+whole check takes 0.18 s.
 
 `dt index` leaves alone any source whose input has not changed since it was
 indexed. The input is the dump for a compiled source and the checkout for a

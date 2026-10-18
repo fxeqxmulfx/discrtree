@@ -83,6 +83,95 @@ and `SaddleAvoidance/LocalInequality.lean:73`. `#check` in a scratch file found
 them at once. `dt status` still prints no `current` column. So every lookup of a
 declaration from the last four days falls back on loading the Lean environment.
 
+Fixed in 0.66.0. The index was right about the build, and the build was four
+days behind the files. Agents work in git worktrees under `.claude/worktrees`,
+build there and merge into the main checkout, whose `.lean` files move and
+whose `.lake/build` does not: its newest `.olean` was written two minutes
+before the project was indexed on 2026-10-14. A worktree has no
+`discrtree.toml`, so `dt` run in one finds the main checkout's. A local
+source's revision is a stamp of its build, and the stamp had not moved, so
+`dt status` had nothing to report and `--refresh` nothing to read. The
+`lake build` of the third sighting and the `.olean` files of the fourth were a
+worktree's. Every name the four sightings looked up is declared in a file of
+the main checkout that its build is behind.
+
+So the files are compared with the build too. A `.lean` file whose `.olean` is
+missing, or arrived before the file was last saved, is read for the names its
+headers declare, and those are looked for among the index's rows for its
+module. Arrival is the later of the `.olean`'s mtime and ctime, because Lake's
+artifact cache hardlinks an `.olean` into place with the mtime it was first
+written at. A private name is left out, since no dump keeps it, and so is a
+module the root does not import, since no build of the root dumps it. Only a
+name the index lacks makes the source stale, so a checkout or a merge that
+touched files without changing what they declare does not. The fourth
+sighting's search now says
+
+    $ dt find --name isStrictSaddle_of_inner_neg
+    no match
+    dt: `project` is behind its source files: 1169 newer than the build, 860 of them declaring names the index does not hold; rows are missing — `lake build` in /home/misha/lean_projects/transformer, then `dt refresh project`
+    dt: in the source files and in no build yet, so not a row:
+    dt:   Transformer.SaddleAvoidance.isStrictSaddle_of_inner_neg [Transformer.SaddleAvoidance.Necessary, line 94]
+    dt:     theorem isStrictSaddle_of_inner_neg (hf : ContDiff ℝ 2 f) {z : E} (hz : gradient f z = 0) {h : E} (hh : ⟪fderiv ℝ (gradient f) z h, h⟫ < 0) : IsStrictSaddle f z
+
+and every name the sightings looked up is listed the same way, with its line:
+`IsFlowField` at line 33 of `Transformer.GlobalFlow.Flow`, `usa_anglesToSphere`
+at line 116 of `Transformer.Perspective.CircleAngles`. The repair is two
+commands, and the line names the directory the first one runs in, since a
+`lake build` in a worktree builds the worktree. `dt show` of the same name
+ends in
+
+    dt: Transformer.SaddleAvoidance.isStrictSaddle_of_inner_neg is in the source files (Transformer.SaddleAvoidance.Necessary, line 94) and in no build yet — `lake build` in /home/misha/lean_projects/transformer, then `dt refresh project`
+
+A hit is checked as well. `--name IsStrictSaddle` still prints the row from
+`Transformer.Perspective.StrictSaddle`, and under it the line and
+`IsStrictSaddleTorusEnergy [Transformer.Perspective.CircleCritical, line 53]`,
+where the files have it now; `dt show` of a row the files declare in another
+module says the same. A `--refresh` that reads nothing says why:
+
+    dt: --refresh: `project` not read again: its build is the one indexed 4d ago
+
+`dt status` has a `current` column, `no` for the project, and puts the line
+under its table as `behind its source files: project — …`, with the
+`lake build` to run. Its revision reads `build 7583624`, since seven hex digits
+read as a commit. `dt refresh` with nothing to read prints the line before it
+says so. And a name in no file either is no longer sent back to the search that
+missed it: `dt show` and `dt add` run that search and say what it found, that
+no name contains the last component or which names do.
+
+The scanner had to be right before its names could be held against the index.
+In the 2488 modules compiled after their last save and before the index was
+written, every name it reads must have a row. It read `class inductive` as a
+`class` named `inductive` and `foo.{u}` as `foo.`, and let a `mutual` block's
+`end` close the namespace around it, so every name after the block lost its
+namespace. With those fixed it reads no name there that the index lacks.
+
+Of the main checkout's files, 1169 are newer than the build and 860 of them
+declare 5750 names the index lacks. The whole check takes 0.18 s, 51 ms of it
+the import closure, and reads only those files. On a current build it is a walk
+and two `stat`s per source file: a `dt find` on a 296-file project takes
+179.4 ms of CPU with it and 178.0 without, and a miss 362.7 against 361.7,
+medians of 40 rounds of one build with the check switched on and off.
+
+Not done:
+
+- A statement edited in a file the build is behind goes unnoticed. Names are
+  compared, not statements, so the row prints what the build says.
+- A name the files no longer declare, deleted or renamed, is still a row and
+  is not flagged. The new name of a renamed one is.
+- A file saved without a change is read again by every check until it is
+  compiled.
+- Arrival is when an `.olean` got where it is, not what it was compiled from,
+  so a build copied in from an older checkout reads as built for every file
+  saved before the copy.
+- `dt show` of a row whose file moved past the build prints the lines of its
+  indexed range, which may hold something else by now. The file's line is
+  given only when the name is in another module.
+- The import closure is read again by every check that finds a name missing:
+  51 ms of the 0.18 s.
+- `dt` run in a worktree searches the main checkout's index and reads the main
+  checkout's files, so a name only the worktree declares is neither found nor
+  reported.
+
 ## `--name` is a plain substring, so a name written with `.*` in it finds nothing
 
 Found 2026-09-30, dt 0.61.0, in an agent's transcript looking for the lemma that

@@ -17,7 +17,7 @@
 //! What a dump of it actually reads is the build, so the build is what gets
 //! fingerprinted: see [`build_stamp`].
 
-use crate::application::ports::{DeclRepo, Declared, Located, Revisions};
+use crate::application::ports::{DeclRepo, Declared, Located, Revisions, Unbuilt};
 use crate::domain::decl::Span;
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
@@ -26,6 +26,7 @@ use crate::error::Result;
 use crate::infrastructure::config::{Config, Kind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 pub struct OnDisk {
     /// Source → its checkout, for the sources that have one.
@@ -133,7 +134,30 @@ impl OnDisk {
 /// When a file was last written, in seconds since the Unix epoch.
 fn mtime(path: &Path) -> Option<u64> {
     let t = std::fs::metadata(path).ok()?.modified().ok()?;
-    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+    Some(t.duration_since(UNIX_EPOCH).ok()?.as_secs())
+}
+
+/// When a build got a file: written there, or linked or copied into place.
+///
+/// Not the same as when it was written. Lake's artifact cache restores a
+/// module by linking the `.olean` it keeps, and a link keeps the time that
+/// copy was written -- in another worktree, before this checkout's `.lean` was
+/// saved, or before the index was. The change time is when the link was made,
+/// so the later of the two is the moment this build has the module from.
+fn arrival(m: &std::fs::Metadata) -> Option<Duration> {
+    let written = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(changed(m).map_or(written, |c| c.max(written)))
+}
+
+#[cfg(unix)]
+fn changed(m: &std::fs::Metadata) -> Option<Duration> {
+    use std::os::unix::fs::MetadataExt;
+    Some(Duration::new(u64::try_from(m.ctime()).ok()?, u32::try_from(m.ctime_nsec()).ok()?))
+}
+
+#[cfg(not(unix))]
+fn changed(_: &std::fs::Metadata) -> Option<Duration> {
+    None
 }
 
 impl Revisions for OnDisk {
@@ -156,7 +180,9 @@ impl Revisions for OnDisk {
     fn rebuilt_since(&self, source: &SourceId, module: &ModuleName, since: u64) -> Option<bool> {
         let lib = self.builds.get(source)?;
         let rel: PathBuf = module.as_str().split('.').collect::<PathBuf>().with_extension("olean");
-        [lib.join("lean").join(&rel), lib.join(&rel)].iter().find_map(|p| Some(mtime(p)? > since))
+        [lib.join("lean").join(&rel), lib.join(&rel)]
+            .iter()
+            .find_map(|p| Some(arrival(&std::fs::metadata(p).ok()?)?.as_secs() > since))
     }
 
     /// From the `.ilean` Lean writes beside each `.olean`: its `decls` maps
@@ -170,7 +196,7 @@ impl Revisions for OnDisk {
         let mut compiled = Vec::new();
         oleans(&root, &root, &mut compiled);
         let mut out = Declared::new();
-        for (rel, _, _) in compiled.into_iter().filter(|(_, _, t)| *t > since) {
+        for (rel, ..) in compiled.into_iter().filter(|o| o.3 > since) {
             let olean = root.join(&rel);
             let module = ModuleName::new(
                 rel.strip_suffix(".olean")?.replace(std::path::MAIN_SEPARATOR, "."),
@@ -219,6 +245,97 @@ impl Revisions for OnDisk {
         }
         // Without the root's own `.ilean` nothing is known to be imported.
         seen.contains(self.roots.get(source)?).then_some(seen)
+    }
+
+    /// By when each `.lean` file was saved against when its `.olean` arrived,
+    /// which is a walk and two `stat`s per file -- the whole cost when the
+    /// build is current, as it is after every `lake build`. Only a file the build is
+    /// behind is read, and private names are left out, as the dump leaves them
+    /// out.
+    fn unbuilt(&self, source: &SourceId) -> Option<Unbuilt> {
+        let lib = self.builds.get(source)?;
+        let texts = self.texts.get(source)?;
+        // No build at all is not a build that is behind: `current` has no
+        // revision for it either, and an index of it has nothing to be
+        // behind.
+        let root = [lib.join("lean"), lib.clone()].into_iter().find(|d| d.is_dir())?;
+        let mut files = Vec::new();
+        lean_files(texts, texts, &mut files);
+        let mut modules = Declared::new();
+        for (rel, saved) in files {
+            let built = std::fs::metadata(root.join(&rel).with_extension("olean")).ok();
+            if built.and_then(|m| arrival(&m)).is_some_and(|built| built >= saved) {
+                continue;
+            }
+            let Some(module) = ModuleName::from_relative_path(&rel) else { continue };
+            let Ok(text) = std::fs::read_to_string(texts.join(&rel)) else { continue };
+            let decls = modules.entry(module).or_default();
+            for h in lean_text::headers(&text).into_iter().filter(|h| !h.private) {
+                decls.insert(h.name, Located { span: Some(h.span), statement: h.statement });
+            }
+        }
+        Some(Unbuilt { project: project_of(lib), modules })
+    }
+
+    /// By the `import` lines of each file, from the root's down. A module with
+    /// no file here is another package's, and is looked for once: a project
+    /// imports Mathlib from most of its files.
+    fn imported_as_written(&self, source: &SourceId) -> Option<BTreeSet<ModuleName>> {
+        let texts = self.texts.get(source)?;
+        let root = self.roots.get(source)?;
+        let (mut seen, mut tried) = (BTreeSet::new(), BTreeSet::new());
+        let mut todo = vec![root.clone()];
+        while let Some(module) = todo.pop() {
+            if !tried.insert(module.clone()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(texts.join(module.relative_path())) else {
+                continue;
+            };
+            todo.extend(lean_text::imports(&text));
+            seen.insert(module);
+        }
+        seen.contains(root).then_some(seen)
+    }
+}
+
+/// The project a build tree belongs to: what [`OnDisk::read`] joined
+/// [`BUILD_LIB`] onto, or the tree itself when it is not one `lake` laid out.
+fn project_of(lib: &Path) -> PathBuf {
+    match lib.ends_with(BUILD_LIB) {
+        true => lib.ancestors().nth(3).unwrap_or(lib).to_path_buf(),
+        false => lib.to_path_buf(),
+    }
+}
+
+/// Every `.lean` file under `dir`, as (path relative to `root`, when it was
+/// saved). A directory whose name starts with a dot is not entered: `.lake`
+/// holds every dependency's sources, and a worktree under `.claude` a second
+/// copy of the whole project.
+fn lean_files(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Duration)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            if !entry.file_name().to_string_lossy().starts_with('.') {
+                lean_files(root, &path, out);
+            }
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "lean") {
+            continue;
+        }
+        // Through a link to the file it names, which is the one that was
+        // saved; a link to a directory is not followed, since nothing stops
+        // one pointing back up the tree.
+        let Ok(m) = std::fs::metadata(&path) else { continue };
+        let Some(saved) = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()) else {
+            continue;
+        };
+        if m.is_file() {
+            out.push((path.strip_prefix(root).unwrap_or(&path).to_path_buf(), saved));
+        }
     }
 }
 
@@ -291,7 +408,7 @@ pub fn build_stamp(lib: &Path) -> Option<String> {
     // hands it back, and two walks of an unchanged tree must agree.
     entries.sort_unstable();
     let mut h = Fnv::new();
-    for (path, len, mtime) in &entries {
+    for (path, len, mtime, _) in &entries {
         h.write(path.as_bytes());
         h.write(&len.to_le_bytes());
         h.write(&mtime.to_le_bytes());
@@ -299,11 +416,14 @@ pub fn build_stamp(lib: &Path) -> Option<String> {
     Some(format!("{:016x}", h.0))
 }
 
-/// Every `.olean` under `dir`, as (path relative to `root`, size, mtime).
+/// Every `.olean` under `dir`, as (path relative to `root`, size, mtime, and
+/// when it arrived -- see [`arrival`]), times in seconds. The fingerprint is
+/// over the mtime, which a link keeps; whether a module came after an index
+/// was written is by the arrival.
 /// An unreadable directory or file contributes nothing rather than failing:
 /// this feeds a warning, and a warning that aborts a search is worse than the
 /// staleness it was reporting.
-fn oleans(root: &Path, dir: &Path, out: &mut Vec<(String, u64, u64)>) {
+fn oleans(root: &Path, dir: &Path, out: &mut Vec<(String, u64, u64, u64)>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -314,10 +434,11 @@ fn oleans(root: &Path, dir: &Path, out: &mut Vec<(String, u64, u64)>) {
                 let mtime = m
                     .modified()
                     .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_secs());
+                let arrived = arrival(&m).map_or(mtime, |d| d.as_secs());
                 let rel = path.strip_prefix(root).unwrap_or(&path);
-                out.push((rel.to_string_lossy().into_owned(), m.len(), mtime));
+                out.push((rel.to_string_lossy().into_owned(), m.len(), mtime, arrived));
             }
             _ => {}
         }
@@ -350,7 +471,7 @@ impl Fnv {
 /// more than reading it.
 pub fn file_stamp(path: &Path) -> Option<String> {
     let m = std::fs::metadata(path).ok()?;
-    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let t = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     Some(format!("{}:{}", m.len(), t.as_secs()))
 }
 

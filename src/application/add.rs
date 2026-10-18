@@ -50,7 +50,7 @@ impl Add<'_> {
     /// Resolve the frontier and plan the write. Touches nothing.
     pub fn plan(&self, name: &DeclName) -> Result<AddReport> {
         let Some(root) = row_in(self.repo, name, self.only_in)? else {
-            bail!("{name} is not in the index; try `dt find --name {}`", name.base())
+            bail!("{}", crate::application::show::absent(self.repo, name, self.only_in)?)
         };
         let src =
             RepoSource { repo: self.repo, workspace: self.workspace, root: Some(root.clone()) };

@@ -165,7 +165,9 @@ pub enum Command {
     /// A named source is refreshed whether or not it looks stale, because the
     /// reason to name one is that you know something the timestamps do not.
     /// With no name, exactly the sources that have fallen behind — never all
-    /// of them, which would mean dumping Mathlib again for nothing.
+    /// of them, which would mean dumping Mathlib again for nothing. A project
+    /// whose files are ahead of its build is not one of them: a refresh reads
+    /// the build, so what it prints is the `lake build` to run first.
     ///
     /// Exit status is what a `&&` chain reads: 0 only when every source it
     /// tried was read and indexed, and 0 as well when none had fallen behind.
@@ -188,6 +190,12 @@ pub enum Command {
     /// is at now. A source that has moved since is named, because a stale index
     /// answers confidently and wrongly. The project's own revision fingerprints
     /// its build, so a module compiled since the last dump shows up here too.
+    ///
+    /// A build moves only when somebody builds, so the project's `.lean` files
+    /// are compared as well. One saved since its module was compiled that
+    /// declares a name the index does not hold makes `current` say `no`, and
+    /// the line under the table names the `lake build` to run first and the
+    /// directory to run it in.
     ///
     /// The lake packages the build resolved that no source covers are listed
     /// last, and under them the toolchain, whose `Init` and `Std` are a corpus
@@ -213,6 +221,7 @@ pub enum Command {
         source: Option<String>,
         /// Read a rebuilt local source again when a name is not in the index.
         /// Costs a dump and an index of that source, seconds for a project.
+        /// When it reads nothing, it says why.
         #[arg(long)]
         refresh: bool,
         /// Accepted and ignored. `--long` is a `find` flag, and `show` is
@@ -388,6 +397,7 @@ pub struct FindArgs {
 
     /// Read a rebuilt local source again when the search finds nothing.
     /// Costs a dump and an index of that source, seconds for a project.
+    /// When it reads nothing, it says why.
     #[arg(long)]
     pub refresh: bool,
 

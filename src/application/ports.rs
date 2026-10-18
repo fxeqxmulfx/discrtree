@@ -281,10 +281,39 @@ pub trait Revisions {
     fn imported(&self, _source: &SourceId) -> Option<BTreeSet<ModuleName>> {
         None
     }
+
+    /// The modules of `source` the build has not caught up with: each `.lean`
+    /// file saved after its module was last compiled, or never compiled at
+    /// all, with the names its text declares now. `None` when that cannot be
+    /// read, and for every source not compiled here.
+    fn unbuilt(&self, _source: &SourceId) -> Option<Unbuilt> {
+        None
+    }
+
+    /// The modules `source`'s root imports as its `.lean` files write their
+    /// imports, itself included: what [`Revisions::imported`] reads from the
+    /// build, for a source whose newest modules no build has seen. `None` when
+    /// the root's own file cannot be read.
+    fn imported_as_written(&self, _source: &SourceId) -> Option<BTreeSet<ModuleName>> {
+        None
+    }
 }
 
 /// Module → the names it declares, and where each is.
 pub type Declared = BTreeMap<ModuleName, BTreeMap<DeclName, Located>>;
+
+/// The part of a source its build is behind. See [`Revisions::unbuilt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unbuilt {
+    /// The project the build belongs to: where `lake build` has to run for
+    /// the build to catch up. Not always where `dt` was run from -- an agent
+    /// working in a git worktree finds the main checkout's configuration, and
+    /// a build in the worktree is a different build.
+    pub project: PathBuf,
+    /// Module → the names its text declares, at the lines it declares them,
+    /// for every module whose file is ahead of its build.
+    pub modules: Declared,
+}
 
 /// Where a declaration is: its lines, and its statement as the source spelled
 /// it there. See [`crate::domain::lean_text::spelled_statement`].

@@ -28,7 +28,7 @@ Not guessable:
   `Analysis`. `--name` is a substring, `*` is anything; `--text` is whole
   words, and repeats.
 - A `dt:` line on stderr means the index is behind the source and rows may be
-  missing; re-run the `dt refresh` it names.
+  missing; run what it names, `lake build` included.
 - Default limit 10; `--long` adds type and docstring. Compiler-generated
   names (`ctorIdx`, `congr_simp`) are hidden unless `--generated`.
 
