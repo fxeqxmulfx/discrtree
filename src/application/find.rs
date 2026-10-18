@@ -33,17 +33,26 @@ pub enum Empty {
     /// These conditions match nothing in the index even on their own — a
     /// misspelled constant, a module prefix that is not a prefix. Edit them.
     Barren(Vec<String>),
-    /// Every condition matches something; no row satisfies all of them, and
-    /// the query narrowed nothing. Drop one rather than correcting any.
-    Combination,
+    /// Every part of the query matches something; no row matches all of them,
+    /// and the query narrowed nothing. Drop one rather than correcting any.
+    ///
+    /// The parts are named as they were written, a pattern's shape as one
+    /// and its numerals as another: see [`Query::parts`]. "Every condition"
+    /// named none of them, to a reader who wrote no flag.
+    Combination {
+        parts: Vec<String>,
+        /// The parts whose leaving out finds something: the one to drop,
+        /// where it is one. Each of two, which is each matching on its own.
+        without: Vec<String>,
+    },
     /// The query narrowed where it looked -- `--in`, `--source` -- and that
     /// scope holds declarations: `held` of them. What emptied the search is
     /// one of the conditions asked inside it, and the scope is the one thing
     /// not to touch.
     ///
-    /// Told apart from `Combination` because "drop one" picks the condition
-    /// whose removal yields the most rows, and that is the narrowing one
-    /// nearly every time -- which maximises rows and blames intent. A reader
+    /// Told apart from `Combination` because the part whose leaving out finds
+    /// something is the narrowing one nearly every time -- which finds rows
+    /// and blames intent. A reader
     /// who writes `--in Transformer.ALM` is saying where the answer belongs;
     /// `--name addr` is the guess. Naming the scope and its size says which
     /// half was right.
@@ -562,7 +571,9 @@ impl Find<'_> {
     }
 
     fn require_terms(&self, query: &Query) -> Result<()> {
-        let Some(term) = &query.term else { return Ok(()) };
+        let Some(term) = query.term.as_ref().filter(|_| query.needs_terms()) else {
+            return Ok(());
+        };
         let missing = self.repo.missing_term_sources(query)?;
         if missing.is_empty() {
             return Ok(());
@@ -585,11 +596,16 @@ impl Find<'_> {
     /// was written with, and the statement that answers it is often stated
     /// for what that unfolds to -- or for the other way of writing it. A field
     /// is a suffix and names no one constant, and stays as it is.
+    ///
+    /// So does the coercion a map is applied through. What unfolds to it is a
+    /// map applied already, and the pattern names the map: 64 definitions of
+    /// Mathlib unfold to one, `Matrix.mulVecLin` and `SimpleGraph.edgeSet`
+    /// among them, and none is the `fderiv 𝕜 f x` of `fderiv _ _ _ v = _`.
     fn unfolding(&self, query: &Query) -> Result<Query> {
         let mut out = query.clone();
         for a in &mut out.shape.args {
             let ArgHead::Named(n) = a else { continue };
-            if n.is_field() {
+            if n.is_field() || n.as_str() == pattern::COERCION {
                 continue;
             }
             let class = self.repo.reducible_class(n)?;
@@ -702,7 +718,7 @@ impl Find<'_> {
         // Hidden rather than absent: the rows are there, and the flag that
         // shows them is the whole repair.
         if !query.generated
-            && !self.repo.find(&Query { generated: true, limit: 1, ..query.clone() })?.is_empty()
+            && self.repo.any(&Query { generated: true, limit: 1, ..query.clone() })?
         {
             return Ok(Empty::OnlyGenerated);
         }
@@ -713,10 +729,7 @@ impl Find<'_> {
         // sources cover every package it answers `None` immediately.
         if let Some(m) = &query.module
             && let Some(missing) = self.build.module(m)
-            && self
-                .repo
-                .find(&Query { module: Some(m.clone()), limit: 1, ..Query::new() })?
-                .is_empty()
+            && !self.repo.any(&Query { module: Some(m.clone()), limit: 1, ..Query::new() })?
         {
             return Ok(Empty::NotIndexed { asked: Asked::Module(m.clone()), missing });
         }
@@ -731,10 +744,7 @@ impl Find<'_> {
             && let Some(head) = query.name_asked().as_ref().and_then(NameQuery::head)
             && head.contains('.')
             && let Some(missing) = self.build.declaring(head)
-            && self
-                .repo
-                .find(&Query { name: Some(n.clone()), limit: 1, ..Query::new() })?
-                .is_empty()
+            && !self.repo.any(&Query { name: Some(n.clone()), limit: 1, ..Query::new() })?
         {
             return Ok(Empty::NotIndexed { asked: Asked::Name(DeclName::new(head)), missing });
         }
@@ -743,15 +753,12 @@ impl Find<'_> {
         // scanner was written -- and the answer would otherwise be "drop a
         // condition", which is the one repair that cannot help here.
         if query.kind == [DeclKind::Instance]
-            && self
-                .repo
-                .find(&Query {
-                    kind: vec![DeclKind::Instance],
-                    elaborated_only: true,
-                    limit: 1,
-                    ..Query::new()
-                })?
-                .is_empty()
+            && !self.repo.any(&Query {
+                kind: vec![DeclKind::Instance],
+                elaborated_only: true,
+                limit: 1,
+                ..Query::new()
+            })?
         {
             return Ok(Empty::InstancesAreDefs);
         }
@@ -771,7 +778,7 @@ impl Find<'_> {
         }
         let mut barren = Vec::new();
         for (label, probe) in conditions {
-            if self.repo.find(&probe)?.is_empty() {
+            if !self.repo.any(&probe)? {
                 barren.push(label);
             }
         }
@@ -798,7 +805,22 @@ impl Find<'_> {
         if let Some(empty) = self.inside_scope(query)? {
             return Ok(empty);
         }
-        Ok(Empty::Combination)
+        let parts = query.parts();
+        if parts.len() < 2 {
+            return Ok(Empty::Plain);
+        }
+        // Of two parts, what is left without either is the other, which
+        // matches on its own.
+        let mut without = Vec::new();
+        for (label, rest) in &parts {
+            if parts.len() == 2 || self.repo.any(rest)? {
+                without.push(label.clone());
+            }
+        }
+        Ok(Empty::Combination {
+            parts: parts.into_iter().map(|(label, _)| label).collect(),
+            without,
+        })
     }
 
     /// What a search that said where to look reports when the place it named
@@ -844,7 +866,7 @@ impl Find<'_> {
                     limit: 1,
                     ..probe
                 };
-                if self.repo.find(&inside)?.is_empty() {
+                if !self.repo.any(&inside)? {
                     failing.push(label);
                 }
             }
@@ -877,7 +899,7 @@ impl Find<'_> {
         }
         let both =
             Query { name: Some(n.clone()), shape: query.shape.clone(), limit: 1, ..Query::new() };
-        if !self.repo.find(&both)?.is_empty() {
+        if self.repo.any(&both)? {
             return Ok(None);
         }
         let by_name = Query { name: Some(n.clone()), limit: SPREAD, ..Query::new() };
@@ -901,7 +923,7 @@ impl Find<'_> {
         if bare == *query {
             return Ok(true);
         }
-        Ok(self.repo.find(&bare)?.is_empty())
+        Ok(!self.repo.any(&bare)?)
     }
 
     /// The constants written in the pattern that nothing of its shape
@@ -917,13 +939,13 @@ impl Find<'_> {
             ..Query::new()
         };
         let whole = with(query.pattern_uses.clone());
-        if whole != *query && !self.repo.find(&whole)?.is_empty() {
+        if whole != *query && self.repo.any(&whole)? {
             return Ok(None);
         }
         let mut absent = Vec::new();
         if query.pattern_uses.len() > 1 {
             for u in &query.pattern_uses {
-                if self.repo.find(&with(vec![u.clone()]))?.is_empty() {
+                if !self.repo.any(&with(vec![u.clone()]))? {
                     absent.push(u.clone());
                 }
             }
@@ -943,7 +965,7 @@ impl Find<'_> {
     fn no_such_shape(&self, shape: &Shape) -> Result<Empty> {
         let hit = |args: Vec<ArgHead>| -> Result<bool> {
             let shape = Shape { args, ..shape.clone() };
-            Ok(!self.repo.find(&Query { shape, limit: 1, ..Query::new() })?.is_empty())
+            self.repo.any(&Query { shape, limit: 1, ..Query::new() })
         };
         let mut rev = shape.args.clone();
         rev.reverse();
@@ -1014,34 +1036,148 @@ impl Find<'_> {
 /// [`pattern::COERCION`]: `ContinuousLinearMap.funLike`, `Equiv.instEquivLike`.
 const BUNDLED: &[&str] = &["DFunLike", "FunLike", "EquivLike"];
 
-/// The constants a pattern applies to more terms than they take, where what
-/// they return is a bundled map, each with how many they take: `fderiv` and
-/// three for `fderiv _ _ _ 1 = deriv _ _`. See [`pattern::parse_with`].
+/// What the index says of what a pattern applies. See [`pattern::Known`].
 ///
-/// What a constant returns is the conclusion head of its row, and the count is
-/// read off its type. `Matrix.diagonal` returns a `Matrix`, which no instance
-/// says is a map, and `Matrix.diagonal d i j` applies a function: it stays as
-/// it was written.
-pub fn bundled_maps(repo: &dyn DeclRepo, pattern: &str) -> Result<BTreeMap<DeclName, usize>> {
-    let mut out = BTreeMap::new();
-    let mut known: BTreeMap<DeclName, bool> = BTreeMap::new();
-    for (name, applied) in pattern::applications(pattern) {
+/// Of each constant applied, how many explicit arguments its type has, and,
+/// where it is applied to more, whether its row's conclusion is a type that is
+/// a bundled map: `fderiv` takes three and returns a `ContinuousLinearMap`,
+/// and `fderiv _ _ _ 1 = deriv _ _` applies that map to `1`. `Matrix.diagonal`
+/// returns a `Matrix`, which no instance says is a map, and `Matrix.diagonal
+/// d i j` applies a function: it stays as it was written. And where a term
+/// written with `↑` is applied, every coercion to a function there is.
+pub fn known(repo: &dyn DeclRepo, pattern: &str) -> Result<pattern::Known> {
+    let asked = pattern::applications(pattern);
+    let mut out = pattern::Known::default();
+    let mut bundled: BTreeMap<DeclName, bool> = BTreeMap::new();
+    for (name, applied) in asked.constants {
         let Some(d) = repo.get(&name)?.filter(|d| d.elaborated) else { continue };
-        let Some(takes) = decl::explicit_arity(&d.ty).filter(|n| *n < applied) else { continue };
-        let Some(returns) = d.shape.concl else { continue };
-        let bundled = match known.get(&returns) {
-            Some(b) => *b,
-            None => {
-                let b = is_bundled(repo, &returns)?;
-                known.insert(returns, b);
-                b
-            }
+        let Some(takes) = decl::explicit_arity(&d.ty) else { continue };
+        let map = match d.shape.concl {
+            Some(returns) if takes < applied => match bundled.get(&returns) {
+                Some(b) => *b,
+                None => {
+                    let b = is_bundled(repo, &returns)?;
+                    bundled.insert(returns, b);
+                    b
+                }
+            },
+            _ => false,
         };
-        if bundled {
-            out.insert(name, takes);
-        }
+        out.constants.insert(name, (takes, map));
+    }
+    if asked.coerces {
+        out.coercions = coercions(repo)?;
     }
     Ok(out)
+}
+
+/// Every constant a map is applied through where Lean prints `↑e x`:
+/// [`pattern::COERCION`], which a reader may write `↑` for too, and what each
+/// `CoeFun` instance applies. `PartialHomeomorph`'s is
+/// `PartialHomeomorph.toFun'`, and its instance says so only in its value.
+///
+/// What an instance's value depends on, less what its type mentions, is that
+/// function and what it takes to apply it. Each instance gives the first of:
+/// definitions in the namespace of its type taking a value of it and what to
+/// apply it to, as `PartialHomeomorph.toFun'` does; the same in the namespace
+/// of a parent it is projected to, as `Equidecomp` is to `PartialEquiv`, for
+/// `PartialEquiv.toFun`; `Subtype.val` or `Units.val`, for a subtype of
+/// functions or a unit of matrices; and definitions in its namespace taking
+/// only the value, as `CategoryTheory.Sieve.arrows` takes a sieve. One whose
+/// value applies [`pattern::COERCION`] gives that. In Mathlib and core, 87
+/// instances give 43 constants besides it.
+fn coercions(repo: &dyn DeclRepo) -> Result<Vec<DeclName>> {
+    let probe = Query {
+        shape: Shape::new(Some(DeclName::new("CoeFun")), Vec::new()),
+        elaborated_only: true,
+        limit: usize::MAX,
+        ..Query::new()
+    };
+    let named: Vec<DeclName> = repo.find(&probe)?.into_iter().map(|d| d.name).collect();
+    let mut out = BTreeSet::from([DeclName::new(pattern::COERCION)]);
+    // The type each instance is for, and what its value depends on that its
+    // type does not mention.
+    let mut instances: Vec<(DeclName, Vec<DeclName>)> = Vec::new();
+    for d in repo.get_many(&named)? {
+        let Some(ty) = d.shape.args.first().and_then(ArgHead::name).cloned() else { continue };
+        if d.deps.iter().any(|n| out.contains(n)) {
+            continue;
+        }
+        let deps = d
+            .deps
+            .iter()
+            .filter(|n| **n != ty && !d.consts.contains(n) && n.namespace() != Some("CoeFun"))
+            .cloned()
+            .collect();
+        instances.push((ty, deps));
+    }
+    let inside = |n: &DeclName, ty: &DeclName| n.namespace() == Some(ty.as_str());
+    let own = arities(
+        repo,
+        instances.iter().flat_map(|(ty, deps)| deps.iter().filter(move |n| inside(n, ty))),
+    )?;
+    // A projection to a parent, as `Equidecomp.toPartialEquiv` is, says where
+    // else to look.
+    let parents: Vec<Vec<DeclName>> = instances
+        .iter()
+        .map(|(ty, deps)| {
+            deps.iter()
+                .filter(|n| {
+                    n.as_str().strip_prefix(ty.as_str()).is_some_and(|f| f.starts_with(".to"))
+                })
+                .filter_map(|n| own.get(n)?.1.clone())
+                .collect()
+        })
+        .collect();
+    let inherited = arities(
+        repo,
+        instances.iter().zip(&parents).flat_map(|((_, deps), ps)| {
+            deps.iter().filter(move |n| ps.iter().any(|p| inside(n, p)))
+        }),
+    )?;
+    for ((ty, deps), ps) in instances.iter().zip(&parents) {
+        let taking = |found: &BTreeMap<DeclName, (usize, Option<DeclName>)>,
+                      places: &[DeclName],
+                      applied: bool| {
+            deps.iter()
+                .filter(|n| places.iter().any(|p| inside(n, p)))
+                .filter(|n| {
+                    found.get(*n).is_some_and(|(k, _)| if applied { *k > 1 } else { *k == 1 })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let values: Vec<DeclName> = deps
+            .iter()
+            .filter(|n| matches!(n.as_str(), "Subtype.val" | "Units.val"))
+            .cloned()
+            .collect();
+        let at = std::slice::from_ref(ty);
+        let chosen =
+            [taking(&own, at, true), taking(&inherited, ps, true), values, taking(&own, at, false)]
+                .into_iter()
+                .find(|found| !found.is_empty())
+                .unwrap_or_default();
+        out.extend(chosen);
+    }
+    // The one every bundled map has first, and then the rest by name.
+    let coe = DeclName::new(pattern::COERCION);
+    Ok(std::iter::once(coe.clone()).chain(out.into_iter().filter(|n| *n != coe)).collect())
+}
+
+/// Of each of `names` the index has a definition for, how many explicit
+/// arguments it takes and the head of what it returns.
+fn arities<'a>(
+    repo: &dyn DeclRepo,
+    names: impl Iterator<Item = &'a DeclName>,
+) -> Result<BTreeMap<DeclName, (usize, Option<DeclName>)>> {
+    let names: Vec<DeclName> = names.cloned().collect::<BTreeSet<_>>().into_iter().collect();
+    Ok(repo
+        .get_many(&names)?
+        .into_iter()
+        .filter(|d| d.elaborated && d.kind == DeclKind::Def)
+        .filter_map(|d| Some((d.name, (decl::explicit_arity(&d.ty)?, d.shape.concl))))
+        .collect())
 }
 
 /// Whether an instance of one of [`BUNDLED`] is stated for `ty`, under any of
@@ -1056,7 +1192,7 @@ fn is_bundled(repo: &dyn DeclRepo, ty: &DeclName) -> Result<bool> {
     for like in BUNDLED {
         let shape = Shape::new(Some(DeclName::new(*like)), vec![arg.clone()]);
         let probe = Query { shape, elaborated_only: true, limit: 1, ..Query::new() };
-        if !repo.find(&probe)?.is_empty() {
+        if repo.any(&probe)? {
             return Ok(true);
         }
     }

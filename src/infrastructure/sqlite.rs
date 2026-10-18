@@ -7,6 +7,7 @@ use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape, Span};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::query::Query;
 use crate::domain::source::SourceId;
+use crate::domain::term::Term;
 use crate::error::{Result, bail};
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::{Connection, OptionalExtension, Row as SqlRow, params};
@@ -294,17 +295,24 @@ impl SqliteIndex {
             2,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
             |ctx| {
-                // Cache the query expression, not each declaration expression.
+                // Cache the query expression, not each declaration expression,
+                // and how much of a declaration's it reads.
                 let pattern = ctx.get_or_create_aux(
                     1,
                     |v| -> std::result::Result<
-                        crate::domain::term::Term,
+                        (Term, Terms),
                         Box<dyn std::error::Error + Send + Sync>,
-                    > { Ok(serde_json::from_str(v.as_str()?)?) },
+                    > {
+                        let pattern: Term = serde_json::from_str(v.as_str()?)?;
+                        let terms = Terms::asked_by(Some(&pattern));
+                        Ok((pattern, terms))
+                    },
                 )?;
-                let actual = ctx.get::<Option<String>>(0)?;
-                Ok(actual
-                    .and_then(|s| serde_json::from_str(&s).ok())
+                let (pattern, terms) = &*pattern;
+                Ok(ctx
+                    .get_raw(0)
+                    .as_str_or_null()?
+                    .and_then(|json| terms.read(json))
                     .is_some_and(|t| pattern.matches(&t)))
             },
         )?;
@@ -495,7 +503,7 @@ impl SqliteIndex {
     }
 }
 
-fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
+fn decl_from_row(r: &SqlRow<'_>, terms: Terms) -> rusqlite::Result<Decl> {
     let concl: Option<String> = r.get("concl")?;
     let args: String = r.get("concl_args")?;
     let explicit_args: Option<String> = r.get("concl_explicit_args")?;
@@ -516,7 +524,10 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
                 .map(|args| crate::domain::name::name_list(&args).map(ArgHead::parse).collect()),
         ),
         consts: Vec::new(),
-        term: r.get::<_, Option<String>>("term")?.and_then(|s| serde_json::from_str(&s).ok()),
+        term: match terms {
+            Terms::Skipped => None,
+            _ => r.get_ref("term")?.as_str_or_null()?.and_then(|json| terms.read(json)),
+        },
         deps: Vec::new(),
         doc: r.get("doc")?,
         has_sorry: r.get::<_, i64>("sorry")? != 0,
@@ -529,9 +540,71 @@ fn decl_from_row(r: &SqlRow<'_>) -> rusqlite::Result<Decl> {
     })
 }
 
+/// How much of a row's term a search reads. Only the query's own term asks
+/// anything of a row's, to match it and to rank by it, and only an ascription
+/// in it asks the types of the row's terms. A term is most of what a row
+/// keeps, and its types are most of a term: of the equations in Mathlib that
+/// mention a `.map`, a term is 14 KB, and 73% of it is types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Terms {
+    Skipped,
+    Untyped,
+    Whole,
+}
+
+impl Terms {
+    /// What a query with this term reads of a row's.
+    fn asked_by(term: Option<&Term>) -> Terms {
+        match term {
+            None => Terms::Skipped,
+            Some(term) if term.has_type_constraints() => Terms::Whole,
+            Some(_) => Terms::Untyped,
+        }
+    }
+
+    fn read(self, json: &str) -> Option<Term> {
+        match self {
+            Terms::Skipped => None,
+            Terms::Untyped => serde_json::from_str::<Untyped>(json).ok().map(Term::from),
+            Terms::Whole => serde_json::from_str(json).ok(),
+        }
+    }
+}
+
+/// A row's term without the types of its terms. See [`Terms`].
+#[derive(serde::Deserialize)]
+struct Untyped {
+    #[serde(default)]
+    head: Option<String>,
+    #[serde(default)]
+    variable: Option<usize>,
+    #[serde(default)]
+    literal: Option<String>,
+    #[serde(default)]
+    args: Vec<Untyped>,
+    #[serde(default)]
+    explicit: Option<Vec<usize>>,
+    #[serde(default)]
+    implicit: bool,
+}
+
+impl From<Untyped> for Term {
+    fn from(t: Untyped) -> Term {
+        Term {
+            head: t.head,
+            variable: t.variable,
+            literal: t.literal,
+            args: t.args.into_iter().map(Term::from).collect(),
+            explicit: t.explicit,
+            implicit: t.implicit,
+            ..Term::default()
+        }
+    }
+}
+
 /// A row and its id, which is what its lists are kept under.
-fn row_and_id(r: &SqlRow<'_>) -> rusqlite::Result<(i64, Decl)> {
-    Ok((r.get("id")?, decl_from_row(r)?))
+fn row_and_id(r: &SqlRow<'_>, terms: Terms) -> rusqlite::Result<(i64, Decl)> {
+    Ok((r.get("id")?, decl_from_row(r, terms)?))
 }
 
 /// The side tables, each with the column its list is in: the constants a
@@ -561,8 +634,9 @@ impl SqliteIndex {
             let mut stmt = self.conn.prepare(&sql)?;
             let bind: Vec<&dyn rusqlite::ToSql> =
                 binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let terms = Terms::asked_by(query.term.as_ref());
             let rows = stmt
-                .query_map(bind.as_slice(), row_and_id)?
+                .query_map(bind.as_slice(), |r| row_and_id(r, terms))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             *last = Some(Last { sql, binds, written, rows });
         }
@@ -620,7 +694,7 @@ impl DeclRepo for SqliteIndex {
         let rows = self
             .conn
             .prepare_cached("SELECT * FROM decl WHERE name = ?1 ORDER BY elaborated DESC")?
-            .query_map(params![name.as_str()], row_and_id)?
+            .query_map(params![name.as_str()], |r| row_and_id(r, Terms::Whole))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         self.with_lists(rows, &[USES, DEP])
     }
@@ -714,7 +788,7 @@ impl DeclRepo for SqliteIndex {
                     span.start,
                     span.end
                 ],
-                decl_from_row,
+                |r| decl_from_row(r, Terms::Whole),
             )
             .optional()
             .map_err(Into::into)
@@ -745,7 +819,7 @@ impl DeclRepo for SqliteIndex {
             let bind: Vec<&dyn rusqlite::ToSql> =
                 strings.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
             let mut stmt = self.conn.prepare(&sql)?;
-            for r in stmt.query_map(bind.as_slice(), row_and_id)? {
+            for r in stmt.query_map(bind.as_slice(), |r| row_and_id(r, Terms::Whole))? {
                 rows.push(r?);
             }
         }
@@ -783,6 +857,35 @@ impl DeclRepo for SqliteIndex {
             return Ok(decls);
         }
         Ok(decls.into_iter().filter(|d| query.answers_shape_and_uses(d)).collect())
+    }
+
+    /// The rows [`DeclRepo::find`] answers with, read in no order and only as
+    /// far as the first. `find` reads a window and orders it: asked for one
+    /// row, it read 10 715 to say that the arguments of `Real.sqrt 2 *
+    /// Real.exp _ = _` are some statement's, and every name in the index for
+    /// a `--name`.
+    fn any(&self, query: &Query) -> Result<bool> {
+        let (filter, binds) = build_filter(query, self.has_fts());
+        let mut stmt = self.conn.prepare(&format!("SELECT d.* FROM decl d{filter}"))?;
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let terms = Terms::asked_by(query.term.as_ref());
+        let mut rows = stmt.query(bind.as_slice())?;
+        while let Some(row) = rows.next()? {
+            let (id, d) = row_and_id(row, terms)?;
+            if !query.shape.matches(&d.shape) {
+                continue;
+            }
+            // As `find` asks it, of this one row's constants.
+            if query.uses.is_empty() || query.excusable().is_empty() {
+                return Ok(true);
+            }
+            let decls = self.with_lists(vec![(id, d)], &[USES])?;
+            if decls.iter().any(|d| query.answers_shape_and_uses(d)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Count every match, independently of the search's result window.
@@ -922,12 +1025,13 @@ const NOT_GENERATED: &str = "NOT (d.name LIKE '%.ctorIdx' OR d.name LIKE '%.ctor
      OR (d.name LIKE '%.elim' AND instr(d.type, ?) > 0))";
 
 /// The test of a shape's heads, the conclusion's and its named arguments', if
-/// it has any, with its binds pushed.
+/// it has any, and of the constants the query uses, with its binds pushed.
 ///
-/// A subquery that hands back ids: the heads are tested before a row is read,
-/// and scope conditions also apply before expensive argument checks. The rows it
-/// names come in order of id, which is what lets a shape query be read in the
-/// order the rows were indexed and still stop at its window.
+/// A subquery that hands back ids: the heads and the constants are tested
+/// before a row is read, and scope conditions also apply before expensive
+/// argument checks. The rows it names come in order of id, which is what lets
+/// a shape query be read in the order the rows were indexed and still stop at
+/// its window.
 fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
     if q.shape.is_empty() {
         return None;
@@ -970,13 +1074,12 @@ fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
     // thousands of declarations.
     //
     // An argument that can match through an unfolding is any of the names it
-    // is known by.
+    // is known by, and one that can be any of several is any of them.
     for a in &q.shape.args {
-        let names: Vec<&DeclName> = match a {
-            ArgHead::Named(n) => vec![n],
-            ArgHead::Reducible { class, .. } => class.iter().collect(),
-            ArgHead::Any => continue,
-        };
+        let names = a.names();
+        if names.is_empty() {
+            continue;
+        }
         tests.push("heads_named(concl_args, ?)".into());
         binds.push(spaced(&names));
     }
@@ -997,16 +1100,51 @@ fn heads_filter(q: &Query, binds: &mut Vec<String>) -> Option<String> {
             .iter()
             .map(|a| match a {
                 ArgHead::Any => None,
-                ArgHead::Named(n) => Some(vec![n.as_str()]),
-                ArgHead::Reducible { class, .. } => {
-                    Some(class.iter().map(DeclName::as_str).collect())
-                }
+                _ => Some(a.names().into_iter().map(DeclName::as_str).collect()),
             })
             .collect();
         binds.push(serde_json::to_string(&args).expect("strings serialize"));
     }
+    // Asked of the rows the ids name, the constants were a join, which SQLite
+    // makes inside the loop over those rows, after every test of the row: the
+    // term too, which reads the row's whole elaborated statement.
+    // `⇑e.symm (e x) = x` read the terms of the 21 865 equations with a
+    // coercion on the left, to keep the 3152 that mention `.symm`.
+    tests.extend(uses_tests(q, "decl", binds));
     (!tests.is_empty())
         .then(|| format!("d.id IN (SELECT id FROM decl WHERE {})", tests.join(" AND ")))
+}
+
+/// The test that a row mentions each constant the query uses, of the table
+/// called `row` in the statement, with its binds pushed.
+///
+/// A field is a suffix, and still a seek: the key is `(decl_id, const)`, so
+/// the `GLOB` runs over one row's constants and never over the table.
+///
+/// A row may leave out a use written only inside arguments that can match
+/// through an unfolding, if it has for each of them a head that matches it
+/// so. Whether those heads are where the arguments are is asked of the row;
+/// see `find`.
+fn uses_tests(q: &Query, row: &str, binds: &mut Vec<String>) -> Vec<String> {
+    let mut tests = Vec::new();
+    for c in &q.uses {
+        let (test, bind) = match c.is_field() {
+            true => ("GLOB ?", format!("*{}", glob_escaped(c.as_str()))),
+            false => ("= ?", c.to_string()),
+        };
+        let uses =
+            format!("EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = {row}.id AND u.const {test})");
+        binds.push(bind);
+        let instead = q.instead_of(c);
+        if instead.is_empty() {
+            tests.push(uses);
+            continue;
+        }
+        let heads = vec![format!("heads_named({row}.concl_args, ?)"); instead.len()].join(" AND ");
+        tests.push(format!("({uses} OR {heads})"));
+        binds.extend(instead.iter().map(|names| spaced(names)));
+    }
+    tests
 }
 
 /// `heads_named(heads, names)`, for SQL: whether one of `heads` is a constant
@@ -1094,36 +1232,10 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
         where_clauses.push("unicode_lower(d.name) GLOB ?".into());
         binds.push(format!("*{}*", glob_of(n.pieces())));
     }
-    if let Some(heads) = heads_filter(q, &mut binds) {
-        where_clauses.push(heads);
-    }
-    if let Some(term) = &q.term {
-        where_clauses.push("term_matches(d.term, ?)".into());
-        binds.push(serde_json::to_string(term).expect("terms serialize"));
-    }
-    // A field is a suffix, and still a seek: the key is `(decl_id, const)`,
-    // so the `GLOB` runs over one row's constants and never over the table.
-    //
-    // A row may leave out a use written only inside arguments that can match
-    // through an unfolding, if it has for each of them a head that matches it
-    // so. Whether those heads are where the arguments are is asked of the
-    // row; see `find`.
-    for c in &q.uses {
-        let (test, bind) = match c.is_field() {
-            true => ("GLOB ?", format!("*{}", glob_escaped(c.as_str()))),
-            false => ("= ?", c.to_string()),
-        };
-        let uses =
-            format!("EXISTS (SELECT 1 FROM uses u WHERE u.decl_id = d.id AND u.const {test})");
-        binds.push(bind);
-        let instead = q.instead_of(c);
-        if instead.is_empty() {
-            where_clauses.push(uses);
-            continue;
-        }
-        let heads = vec!["heads_named(d.concl_args, ?)"; instead.len()].join(" AND ");
-        where_clauses.push(format!("({uses} OR {heads})"));
-        binds.extend(instead.iter().map(|names| spaced(names)));
+    match heads_filter(q, &mut binds) {
+        Some(heads) => where_clauses.push(heads),
+        // Without a shape, the constants are asked of the rows themselves.
+        None => where_clauses.extend(uses_tests(q, "d", &mut binds)),
     }
     if let Some(m) = q.module.as_ref().filter(|m| !m.is_empty()) {
         where_clauses.push("(d.module = ? OR d.module GLOB ?)".into());
@@ -1172,6 +1284,15 @@ fn build_filter(q: &Query, has_fts: bool) -> (String, Vec<String>) {
                 binds.extend([t.clone(), t.clone(), t.clone()]);
             }
         }
+    }
+    // Last, because a row's term is read whole to be asked anything: what
+    // the cheap conditions rule out first is never read.
+    if let Some(term) = &q.term {
+        where_clauses.push(match q.needs_terms() {
+            true => "term_matches(d.term, ?)".into(),
+            false => "(d.term IS NULL OR term_matches(d.term, ?))".into(),
+        });
+        binds.push(serde_json::to_string(term).expect("terms serialize"));
     }
 
     let filter = match where_clauses.is_empty() {
@@ -1566,5 +1687,30 @@ mod tests {
             assert!(db.find(&q).unwrap().is_empty(), "{term}");
             assert_eq!(DeclRepo::count(&db, &q).unwrap(), 0, "{term}");
         }
+    }
+
+    /// A row's term is read whole for a pattern with an ascription, without
+    /// the types of its terms for any other pattern, and not at all for a
+    /// query with no term.
+    #[test]
+    fn a_term_is_read_as_far_as_the_query_asks() {
+        let nat = || Box::new(Term::named("Nat", Vec::new()));
+        let n = Term { variable: Some(0), ty: Some(nat()), ..Term::default() };
+        let one = Term { literal: Some("1".into()), ty: Some(nat()), ..Term::default() };
+        let row =
+            Term { explicit: Some(vec![1, 2]), ..Term::named("Eq", vec![Term::default(), n, one]) };
+        let json = serde_json::to_string(&row).unwrap();
+        let mut untyped = row.clone();
+        untyped.args.iter_mut().for_each(|a| a.ty = None);
+        assert_eq!(Terms::Whole.read(&json), Some(row.clone()));
+        assert_eq!(Terms::Untyped.read(&json), Some(untyped));
+        assert_eq!(Terms::Skipped.read(&json), None);
+        let ascribed = Term { ty: Some(nat()), ..Term::default() };
+        assert_eq!(Terms::asked_by(Some(&Term::named("Eq", vec![ascribed]))), Terms::Whole);
+        assert_eq!(
+            Terms::asked_by(Some(&Term::named("Eq", vec![Term::default()]))),
+            Terms::Untyped
+        );
+        assert_eq!(Terms::asked_by(None), Terms::Skipped);
     }
 }

@@ -1381,7 +1381,13 @@ fn a_name_with_a_star_that_finds_nothing_blames_the_piece_no_name_has() {
     );
     q.module = None;
     let found = find.run(&q).unwrap();
-    assert_eq!(found.empty, Some(Empty::Combination));
+    let pieces = ["`finite` in --name", "`mem_of` in --name"].map(String::from).to_vec();
+    assert_eq!(found.empty, Some(Empty::Combination { parts: pieces.clone(), without: pieces }));
+    assert_eq!(
+        render::find(&found, false),
+        "no match: `finite` in --name and `mem_of` in --name each match on their own, but not \
+         together\n"
+    );
     q.module = Some("M".into());
 
     // And where the pieces do come in that order, they find it.

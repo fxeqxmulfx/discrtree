@@ -16,6 +16,7 @@ use crate::domain::lean_core;
 use crate::domain::lean_text;
 use crate::domain::name::ModuleName;
 use crate::domain::pattern;
+use crate::domain::query;
 use crate::domain::source::{SourceId, SourceKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,6 +70,21 @@ fn scope_notes(labels: &[String]) -> String {
         );
     }
     out
+}
+
+/// A count of things as a word, the way a sentence says one.
+fn number(n: usize) -> String {
+    match n {
+        2 => "two".into(),
+        3 => "three".into(),
+        4 => "four".into(),
+        5 => "five".into(),
+        6 => "six".into(),
+        7 => "seven".into(),
+        8 => "eight".into(),
+        9 => "nine".into(),
+        n => n.to_string(),
+    }
 }
 
 /// The scope a search narrowed to, as a reader would say it back.
@@ -126,8 +142,24 @@ pub fn find(hits: &Hits, long: bool) -> String {
             Some(Empty::Barren(c)) => {
                 format!("no match: {} match nothing on their own{}\n", c.join(", "), scope_notes(c))
             }
-            Some(Empty::Combination) => {
-                "no match: every condition matches on its own; drop one\n".into()
+            // Named, because a pattern's parts are no flags the reader gave,
+            // and said of which the rest match without, because that is the
+            // one to drop.
+            Some(Empty::Combination { parts, without }) => {
+                let n = parts.len();
+                let rest = match without.as_slice() {
+                    _ if n == 2 => String::new(),
+                    [] => format!("; no {} of them match together", number(n - 1)),
+                    all if all.len() == n => {
+                        format!("; any {} of them match together", number(n - 1))
+                    }
+                    [one] => format!("; all but {one} match together"),
+                    some => format!("; all but {}, match together", some.join(", or all but ")),
+                };
+                format!(
+                    "no match: {} each match on their own, but not together{rest}\n",
+                    query::listed(parts)
+                )
             }
             // The scope is the one condition not to correct: it says where the
             // answer belongs, and it is populated. What it holds is said
@@ -1266,10 +1298,36 @@ mod tests {
         );
 
         // With nothing narrowed there is no scope to name, and the line goes
-        // back to saying the only thing it can.
-        let plain = find(&empty(Empty::Combination), false);
-        assert!(plain.contains("every condition matches on its own; drop one"), "{plain}");
-        assert!(!plain.contains("--in"), "{plain}");
+        // back to naming the parts, and those the rest match without.
+        let combination = |parts: &[&str], without: &[&str]| {
+            let strings = |s: &[&str]| s.iter().map(|p| p.to_string()).collect();
+            find(
+                &empty(Empty::Combination { parts: strings(parts), without: strings(without) }),
+                false,
+            )
+        };
+        let flags = ["--name exp", "--uses Finset.sum"];
+        assert_eq!(
+            combination(&flags, &flags),
+            "no match: --name exp and --uses Finset.sum each match on their own, but not together\n"
+        );
+        let parts = ["the shape", "`fderiv` in the pattern", "the value of `1`"];
+        assert_eq!(
+            combination(&parts, &parts[2..]),
+            "no match: the shape, `fderiv` in the pattern and the value of `1` each match on \
+             their own, but not together; all but the value of `1` match together\n"
+        );
+        let r = combination(&parts, &parts[1..]);
+        assert!(
+            r.ends_with(
+                "; all but `fderiv` in the pattern, or all but the value of `1`, match together\n"
+            ),
+            "{r}"
+        );
+        let r = combination(&parts, &parts);
+        assert!(r.ends_with("; any two of them match together\n"), "{r}");
+        let r = combination(&parts, &[]);
+        assert!(r.ends_with("; no two of them match together\n"), "{r}");
     }
 
     /// The reader wrote one pattern, and "drop one condition" is an answer

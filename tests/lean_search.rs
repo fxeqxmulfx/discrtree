@@ -1,6 +1,6 @@
 mod support;
 
-use discrtree::application::find::{self, Find};
+use discrtree::application::find::{self, Empty, Find};
 use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, NoBuild};
 use discrtree::domain::decl::{Decl, DeclKind};
@@ -11,6 +11,7 @@ use discrtree::domain::source::SourceId;
 use discrtree::infrastructure::jsonl::{self, Row};
 use discrtree::infrastructure::lake::{DUMP_LEAN, splice_imports};
 use discrtree::infrastructure::sqlite::SqliteIndex;
+use discrtree::interface::render;
 use std::path::Path;
 use std::process::Command;
 use support::{FakeRepo, TempDir};
@@ -897,10 +898,11 @@ root = "SearchFixture"
     assert!(String::from_utf8_lossy(&output.stdout).contains("SearchFixture.succ_add"));
 }
 
-/// Rows of Mathlib at d13f23b as dt 0.65.0 indexed them (Lean 4.34.1,
-/// lean/dump.lean format 4), written back as dump rows: bundled maps, the
-/// instances that make them functions, functions applied to more than they
-/// are written with, and statements of each applied.
+/// Rows of Mathlib at d13f23b and of core as dt 0.65.0 indexed them (Lean
+/// 4.34.1, lean/dump.lean format 4), written back as dump rows: bundled maps,
+/// the instances that make them functions, one type with a coercion of its
+/// own, functions applied to more than they are written with, and statements
+/// of each applied.
 fn coe_fixture() -> Vec<Decl> {
     include_str!("fixtures/coe-search.jsonl")
         .lines()
@@ -920,12 +922,13 @@ fn an_applied_bundled_map_is_found_as_it_is_printed_in_every_repository() {
     let db = database(&rows);
     for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
         let maps = |text: &str| -> Vec<(String, usize)> {
-            let maps = find::bundled_maps(repo, text).unwrap();
-            maps.into_iter().map(|(name, takes)| (name.to_string(), takes)).collect()
+            let known = find::known(repo, text).unwrap();
+            let maps = known.constants.into_iter().filter(|(_, (_, map))| *map);
+            maps.map(|(name, (takes, _))| (name.to_string(), takes)).collect()
         };
         let found = |text: &str| {
-            let maps = find::bundled_maps(repo, text).unwrap();
-            let q = Query { limit: 100, ..pattern::parse_with(text, &maps).query };
+            let known = find::known(repo, text).unwrap();
+            let q = Query { limit: 100, ..pattern::parse_with(text, &known).query };
             let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
             hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
         };
@@ -956,6 +959,76 @@ fn an_applied_bundled_map_is_found_as_it_is_printed_in_every_repository() {
         let names = found("⇑(f + g) x = ⇑f x + ⇑g x");
         assert!(names.contains(&"ContinuousLinearMap.add_apply".into()), "{names:?}");
         assert!(!names.contains(&"Pi.add_apply".into()), "{names:?}");
+    }
+}
+
+/// The report's other spellings: a field applied, which is the map it
+/// returns applied where the field is `Equiv.symm`; a type with a coercion of
+/// its own, which Lean prints `↑e x`; parentheses round a `Prop`, which Lean
+/// would not print; and a map whose values are maps, applied to two.
+#[test]
+fn a_map_applied_is_found_however_it_is_applied_in_every_repository() {
+    let rows = coe_fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        let found = |text: &str| {
+            let known = find::known(repo, text).unwrap();
+            let q = Query { limit: 100, ..pattern::parse_with(text, &known).query };
+            let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+            hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+        };
+        // First, and before the shorter statement of `.symm` for one
+        // equivalence, `Equiv.boolNot`.
+        for text in [
+            "e.symm (e x) = x",
+            "⇑e.symm (e x) = x",
+            "Equiv.symm e (e x) = x",
+            "↑e.symm (↑e x) = x",
+        ] {
+            let names = found(text);
+            assert_eq!(names[0], "Equiv.symm_apply_apply", "{text}: {names:?}");
+            assert!(names.contains(&"Equiv.boolNot_symm_apply".into()), "{text}: {names:?}");
+        }
+        // `Cardinal.preAleph` is an `OrderIso`, and its `.symm` no `Equiv.symm`.
+        assert!(found("e.symm (e x) = x").contains(&"Cardinal.preAleph_symm_natCast".into()));
+        assert!(
+            !found("Equiv.symm e (e x) = x").contains(&"Cardinal.preAleph_symm_natCast".into())
+        );
+        let coercions = find::known(repo, "↑e x = _").unwrap().coercions;
+        assert_eq!(coercions, [pattern::COERCION, "PartialHomeomorph.toFun'"].map(DeclName::new));
+        let names = found("↑e.symm (↑e x) = x");
+        assert!(names.contains(&"PartialHomeomorph.left_inv".into()), "{names:?}");
+        assert_eq!(found("(Nat.Coprime a) b"), ["Nat.coprime_one_left"]);
+        assert_eq!(found("(fderiv _ _) x 1 = deriv _ _"), ["fderiv_apply_one_eq_deriv"]);
+        assert_eq!(found("fderiv _ _ _ v w = _"), ["IsSymmSndFDerivAt.eq"]);
+    }
+}
+
+/// The report: `⇑(fderiv _ _ _) 1 = deriv _ _` missed with "every condition
+/// matches on its own; drop one", to a reader who had written a pattern and
+/// no condition. A miss names the parts of what was written, and which the
+/// rest match without.
+#[test]
+fn a_miss_in_combination_names_the_parts_and_the_one_to_drop() {
+    let rows = coe_fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &db] {
+        let text = "Equiv.symm e (e x) = x";
+        let known = find::known(repo, text).unwrap();
+        let q = Query { name: Some("swap".into()), ..pattern::parse_with(text, &known).query };
+        let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+        let parts = ["--name swap", "the shape", "`Equiv.symm` in the pattern"].map(String::from);
+        let without = vec![parts[0].clone(), parts[2].clone()];
+        assert_eq!(hits.empty, Some(Empty::Combination { parts: parts.to_vec(), without }));
+        assert_eq!(
+            render::find(&hits, false),
+            "no match: --name swap, the shape and `Equiv.symm` in the pattern each match on \
+             their own, but not together; all but --name swap, or all but `Equiv.symm` in the \
+             pattern, match together\n"
+        );
     }
 }
 
@@ -996,6 +1069,17 @@ root = "Mathlib"
             (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success(), "{pattern}: {err}");
         assert!(out.contains("fderiv_apply_one_eq_deriv"), "{pattern}: {out}");
+        assert!(err.contains(read), "{pattern}: {err}");
+    }
+    // A head only the types could say is each one it can be.
+    for (pattern, read) in [
+        ("e.symm (e x) = x", "argument 1 as `.symm` or `DFunLike.coe`"),
+        ("↑e.symm (↑e x) = x", "argument 1 as `DFunLike.coe` or `PartialHomeomorph.toFun'`"),
+    ] {
+        let output = run(&["--verbose", "find", pattern]);
+        let (out, err) =
+            (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(out.starts_with("Equiv.symm_apply_apply "), "{pattern}: {out}");
         assert!(err.contains(read), "{pattern}: {err}");
     }
 }

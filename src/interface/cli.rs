@@ -308,6 +308,8 @@ pub enum Command {
     /// in any namespace: `l.length` is `.length` applied to `_`. A map applied,
     /// `(fderiv _ _ _) 1` as Lean prints it, `⇑(fderiv _ _ _) 1` or
     /// `fderiv _ _ _ 1`, is read as Lean elaborates it, through `DFunLike.coe`.
+    /// A field applied, `e.symm (e x)`, is the field or the map it returns
+    /// applied, and `↑e x` is applied through any coercion the index has.
     /// `-v` prints what the pattern was read as.
     /// `(_ : ℂ)` constrains that argument's type. ℕ ℤ ℚ ℝ ℂ are type
     /// notation, not variables. Polymorphic parameters specialize consistently;
@@ -321,8 +323,8 @@ pub enum Command {
     /// head symbol, so including it would silently drop the condition.
     ///
     /// An empty result says which condition to blame — the one that matches
-    /// nothing on its own, or none of them when it is the combination that is
-    /// empty.
+    /// nothing on its own, or, when it is the combination that is empty, the
+    /// parts of the query and which the rest match without.
     #[command(verbatim_doc_comment)]
     Find(FindArgs),
 

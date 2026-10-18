@@ -91,6 +91,88 @@ Not done:
   one`, is worded as it was. Its conditions are the parts of the query, there
   the shape, `--uses fderiv` and the value of `1`, not hypotheses.
 
+Fixed in 0.68.0. A field applied to more than it is written on is either the
+field applied directly or the map it returns applied through the coercion, and
+the index is asked for both: `e.symm (e x)` is `Equiv.symm e` applied through
+`DFunLike.coe` where `e` is an equivalence, and `h.symm h'` is `Ne.symm h`
+applied directly. Of a row with the coercion, its term is asked that what it
+applies is a `.symm`, applied to as many arguments as the pattern writes. Then
+every row's term ranks it: a statement of what the pattern writes comes before
+a particular case of it, such as `Cardinal.preAleph.symm ↑n = ↑n`, which is
+shorter. On the report's index:
+
+    $ dt -v find 'e.symm (e x) = x'
+    dt: `e.symm (e x) = x` read as conclusion Eq, 2 argument(s), operator `=`, `e`, `x` as `_`, argument 1 as `.symm` or `DFunLike.coe`, --uses .symm
+    Equiv.symm_apply_apply  theorem  Mathlib.Logic.Equiv.Defs
+      ∀ … (e : α ≃ β) (x : α), e.symm (e x) = x
+    MulEquiv.symm_apply_apply  theorem  Mathlib.Algebra.Group.Equiv.Defs
+      ∀ … (e : M ≃* N) (x : M), e.symm (e x) = x
+
+0.67.0 found 677 statements for it, none of them that one,
+`unitInterval.symm_one` first. `⇑e.symm (e x) = x` finds
+`Equiv.symm_apply_apply` first of 2263 where it was 58th of 3330, and
+`Equiv.symm e (e x) = x` first of 790 where it was 39th of 1413.
+
+`↑e x` is applied through any coercion the index has: `DFunLike.coe`, or the
+function of another `CoeFun` instance, 43 constants for 87 instances, among
+them `PartialHomeomorph.toFun'`. `↑e.symm (↑e x) = x` finds
+`Equiv.symm_apply_apply` first of 2191 where it was 155th of 7147, and
+`PartialHomeomorph.left_inv` 21st where it was 2004th. `⇑` is still
+`DFunLike.coe` alone, the one coercion Lean prints so. Parentheses round a
+constant that returns no map only group, and round fewer arguments than a map
+takes they end where the map does: `(Nat.Coprime a) b` is `Nat.Coprime a b`
+and finds `Nat.coprime_one_right` first of 63, where nothing had its shape, and
+`(fderiv _ _) x 1 = deriv _ _` finds `fderiv_apply_one_eq_deriv`, where every
+condition matched on its own.
+
+A map applied is one application through any number of coercions, the
+pattern's and the row's: `fderiv _ _ _ v w` matches `⇑(⇑(fderiv 𝕜 f x) v) w`,
+where Lean nests one in the other, and a numeral among `v w` is where it is
+written either way. `fderiv _ _ _ v w = _` finds `IsSymmSndFDerivAt.eq` alone,
+where it was 24th of 225 statements that mention `fderiv` and apply a map once
+on the left, as `(fderiv 𝕜 f x) y = deriv f x * y` does.
+
+A miss whose parts each match names them as they were written: the shape, each
+constant in the pattern, the values of its numerals and each flag. With three
+or more, it says which of them the others match without:
+
+    $ dt find 'Real.sqrt 2 * Real.exp _ = _'
+    no match: the shape, `Real.exp` in the pattern, `Real.sqrt` in the pattern and the value of `2` each match on their own, but not together; any three of them match together
+
+A side read through its coercion costs: every equation with a `DFunLike.coe`
+side is asked whether it mentions the field, and the term of each that does is
+read. `e.symm (e x) = x` takes 474.2 ms of CPU where it took 76.9 to find
+nothing that answers, `l.map f = _` 616.1 against 501.8, and `s.image f = _`
+243.7 against 84.5. The term is the dearest test, and is asked last: the
+constants a query uses are asked with the heads, before a row is read, where
+SQLite had asked them after every test of the row, and `⇑e.symm (e x) = x`
+read the terms of the 21 865 equations with a coercion on the left to keep the
+3152 that mention `.symm`. Two more changes make the rest faster than it was.
+A row's term is read only as far as the query asks: not at all by a query with
+no term, and without the types of its terms, 73% of it, by one with no
+ascription. And a miss asks whether each part matches only as far as the first
+row, where it read a window of rows and ranked them. `⇑e.symm (e x) = x` takes
+458.1 against 715.4, `↑e.symm (↑e x) = x` 495.8 against 2264.9,
+`Equiv.symm e (e x) = x` 200.7 against 403.0, `f.comp g = _` 1614.4 against
+2535.1, `Finset.sum _ _ = _` 46.9 against 70.9, the miss of
+`Real.sqrt 2 * Real.exp _ = _` 1036.6 against 2062.5, and `(Nat.Coprime a) b`
+4.2 against 1583.6. `Real.exp _ ≤ Real.exp _` takes 11.3 either way: medians
+of 9 runs alternating with a 0.67.0 build.
+
+Not done:
+
+- A field applied is the field or `DFunLike.coe`, and not a type's own
+  coercion: `e.symm (e x) = x` misses `PartialHomeomorph.left_inv`, which is
+  stated so and printed `↑e.symm (↑e x) = x`.
+- Every equation with a `DFunLike.coe` side, 24 619 of 168 448, is asked one
+  at a time whether it mentions the field: `s.image f = _` takes 243.7 ms
+  against 84.5. A term that matches is read twice, to match it and to rank it.
+- Rows without a term, in an index written before 0.65.0, are let through and
+  ranked as before. On a copy of the project indexed by dt 0.60.0,
+  `e.symm (e x) = x` has `Equiv.symm_apply_apply` 117th of 3822 and
+  `⇑e.symm (e x) = x` 58th of 3145. The warning says rows may be missing, and
+  not that the order suffers.
+
 ## A stale project index answers `no match` and `dt status` calls it current
 
 Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking

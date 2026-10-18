@@ -18,7 +18,9 @@ pub struct Query {
     /// Shape: conclusion head symbol and argument head symbols.
     pub shape: Shape,
     /// Nested argument, type and literal constraints. Old rows without an elaborated
-    /// expression cannot answer these; their source needs a fresh dump.
+    /// expression cannot answer the type and literal ones; their source needs a
+    /// fresh dump. One that asks only which map a coercion applies passes them,
+    /// as the shape alone would. See [`Query::needs_terms`].
     pub term: Option<Term>,
     /// Constants the type must mention. Conditions combine with AND, because
     /// `--uses Real.exp,Finset.sum` means both.
@@ -28,6 +30,10 @@ pub struct Query {
     /// that an empty result blames `` `List.range'` in the pattern `` rather
     /// than a flag the reader never typed.
     pub pattern_uses: Vec<DeclName>,
+    /// Whether `shape` is a pattern's rather than `--concl`'s. Not a
+    /// condition either: it names the shape as one part of what was written.
+    /// See [`Query::parts`].
+    pub from_pattern: bool,
     /// For each argument of `shape`, the constants of `pattern_uses` written
     /// inside it and nowhere else: `Fin` in `MeasurableSpace (EuclideanSpace ℝ
     /// (Fin 3))`. An argument that matches only once unfolded has been
@@ -216,7 +222,9 @@ impl Query {
             };
             out.push((label, one(Query { uses: vec![c.clone()], ..Query::new() })));
         }
-        if let Some(term) = &self.term {
+        // Not a term that asks only which map a coercion applies: a row
+        // without a term answers it, and the shape says the rest.
+        if let Some(term) = self.term.as_ref().filter(|_| self.needs_terms()) {
             out.push((
                 if term.has_type_constraints() {
                     "type constraints in the pattern"
@@ -252,11 +260,126 @@ impl Query {
         out
     }
 
+    /// The parts of what was written, each with the query that is all the
+    /// others, for explaining an empty result where every condition matches
+    /// on its own.
+    ///
+    /// A part is what a reader can leave out, and not a condition the query
+    /// was taken apart into: a pattern's shape is one, whatever heads it has,
+    /// and its numerals are one, as the term that asks their values is.
+    /// `⇑(fderiv _ _ _) 1 = deriv _ _` was the shape, `fderiv` and the value
+    /// of `1`, and "every condition matches on its own; drop one" named none
+    /// of them.
+    pub fn parts(&self) -> Vec<(String, Query)> {
+        let one = |q: Query| Query { limit: 1, ..q };
+        let mut out = Vec::new();
+        if let Some(n) = &self.name
+            && let Some(asked) = self.name_asked()
+        {
+            let pieces = asked.written();
+            match pieces {
+                // Each piece is a part, as it is a condition: see
+                // [`Query::conditions`].
+                [_, _, ..] => {
+                    for (i, piece) in pieces.iter().enumerate() {
+                        let rest: Vec<&str> = pieces
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, p)| p.as_str())
+                            .collect();
+                        let name = Some(rest.join("*"));
+                        out.push((
+                            format!("`{piece}` in --name"),
+                            one(Query { name, ..self.clone() }),
+                        ));
+                    }
+                }
+                _ => out.push((format!("--name {n}"), one(Query { name: None, ..self.clone() }))),
+            }
+        }
+        if !self.shape.is_empty() {
+            let label = match &self.shape.concl {
+                Some(c) if !self.from_pattern => format!("--concl {c}"),
+                _ => "the shape".to_string(),
+            };
+            // What says which argument is which goes with it, and so does the
+            // term, which is the shape written out.
+            let rest = Query {
+                shape: Shape::default(),
+                inside: Vec::new(),
+                powers: Vec::new(),
+                term: None,
+                ..self.clone()
+            };
+            out.push((label, one(rest)));
+        }
+        for c in &self.uses {
+            let label = if self.pattern_uses.contains(c) {
+                format!("`{c}` in the pattern")
+            } else {
+                format!("--uses {c}")
+            };
+            let mut rest = self.clone();
+            for held in std::iter::once(&mut rest.uses)
+                .chain(std::iter::once(&mut rest.pattern_uses))
+                .chain(rest.inside.iter_mut())
+            {
+                held.retain(|u| u != c);
+            }
+            // Left out of a pattern, it is `_` there.
+            if let Some(term) = &mut rest.term {
+                term.rename(c.as_str(), None);
+            }
+            out.push((label, one(rest)));
+        }
+        if let Some(term) = self.term.as_ref().filter(|_| self.needs_terms()) {
+            let numerals: Vec<String> = term.numerals().iter().map(|n| format!("`{n}`")).collect();
+            let mut said = match numerals.as_slice() {
+                [] => Vec::new(),
+                [one] => vec![format!("the value of {one}")],
+                more => vec![format!("the values of {}", listed(more))],
+            };
+            if term.has_type_constraints() {
+                said.push("the type ascribed".into());
+            }
+            out.push((said.join(" and "), one(Query { term: None, ..self.clone() })));
+        }
+        if let Some(m) = &self.module {
+            out.push((format!("--in {m}"), one(Query { module: None, ..self.clone() })));
+        }
+        if let Some(s) = &self.source {
+            out.push((format!("--source {s}"), one(Query { source: None, ..self.clone() })));
+        }
+        if !self.kind.is_empty() {
+            let named: Vec<&str> = self.kind.iter().map(DeclKind::as_str).collect();
+            out.push((
+                format!("--kind {}", named.join(",")),
+                one(Query { kind: Vec::new(), ..self.clone() }),
+            ));
+        }
+        for x in &self.text {
+            let text = self.text.iter().filter(|t| *t != x).cloned().collect();
+            out.push((format!("--text {x}"), one(Query { text, ..self.clone() })));
+        }
+        out
+    }
+
     /// Whether answering the query requires elaborated rows. Asking for a shape
     /// implies it: a text row has no conclusion head symbol, so including it
     /// would silently drop the condition.
     pub fn needs_shape(&self) -> bool {
         !self.shape.is_empty() || self.term.is_some()
+    }
+
+    /// Whether a row has to have a term to answer: the term asks a numeral's
+    /// value or an ascribed type, which nothing else records. A term that asks
+    /// which map a coercion applies asks what a row without one answers as
+    /// `--uses` would, and those rows are let through, ranked as they were:
+    /// `⇑e.symm (e x) = x` is keyed by `DFunLike.coe`, which 24 241 equations
+    /// of Mathlib have on a side.
+    pub fn needs_terms(&self) -> bool {
+        self.term.as_ref().is_some_and(|t| t.has_numeric_literals() || t.has_type_constraints())
     }
 
     pub fn matches(&self, d: &Decl) -> bool {
@@ -312,7 +435,7 @@ impl Query {
     /// only once unfolded. See [`Query::inside`].
     pub fn answers_shape_and_uses(&self, d: &Decl) -> bool {
         if let Some(term) = &self.term
-            && !d.term.as_ref().is_some_and(|actual| term.matches(actual))
+            && !d.term.as_ref().map_or(!self.needs_terms(), |actual| term.matches(actual))
         {
             return false;
         }
@@ -446,10 +569,11 @@ impl PartialEq for Query {
 impl Eq for Query {}
 
 /// How well a result answers the query, for ordering. How much of the name the
-/// query accounted for, then shape agreement, then how much of the type is
+/// query accounted for, then shape agreement, then whether it states what the
+/// pattern writes or a particular case of it, then how much of the type is
 /// spent on things the query did not ask for: a two-line lemma about exactly
 /// the right constants beats a long one that happens to mention them.
-pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
+pub fn rank(q: &Query, d: &Decl) -> (u32, usize, usize) {
     let mut score = 0;
     if let Some(n) = q.name_asked() {
         score += name_score(&n, d);
@@ -473,8 +597,17 @@ pub fn rank(q: &Query, d: &Decl) -> (u32, usize) {
     if d.has_sorry {
         score = score.saturating_sub(2);
     }
-    // Descending score, then ascending type length.
-    (u32::MAX - score, d.ty.len())
+    // A particular case is shorter than what it is a case of, and was ranked
+    // first: `⇑e.symm (e x) = x` had `Equiv.symm_apply_apply` behind 24
+    // statements of `.symm` for one equivalence, `Cardinal.preAleph.symm ↑n
+    // = ↑n` first. A row without a term says nothing either way.
+    let specifics = match (&q.term, &d.term) {
+        (Some(asked), Some(actual)) => asked.specifics(actual).unwrap_or(0),
+        _ => 0,
+    };
+    // Descending score, then the fewest particulars, then ascending type
+    // length.
+    (u32::MAX - score, specifics, d.ty.len())
 }
 
 /// Whether the statement writes each power the query does, spelled the way
@@ -661,6 +794,15 @@ fn in_order(mut text: &str, pieces: &[String]) -> bool {
     true
 }
 
+/// `a`, `a and b`, `a, b and c`.
+pub fn listed(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,6 +835,67 @@ mod tests {
         assert!(q.matches(&d));
         let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
         assert_eq!(labels, vec!["--kind def,structure"]);
+    }
+
+    /// The report: `⇑(fderiv _ _ _) 1 = deriv _ _` missed with "every
+    /// condition matches on its own; drop one", and the reader had written
+    /// one pattern and no condition. Its parts are what it was written with.
+    #[test]
+    fn a_query_is_taken_apart_into_what_was_written() {
+        let parts = |q: &Query| -> Vec<String> { q.parts().into_iter().map(|(l, _)| l).collect() };
+        let mut q = crate::domain::pattern::parse("Real.sqrt 2 * Real.exp _ = _").query;
+        q.name = Some("sqrt".into());
+        assert_eq!(
+            parts(&q),
+            [
+                "--name sqrt",
+                "the shape",
+                "`Real.exp` in the pattern",
+                "`Real.sqrt` in the pattern",
+                "the value of `2`"
+            ]
+        );
+        // Each is the query without it, and a constant left out of a pattern
+        // is `_` there.
+        let rest: Vec<Query> = q.parts().into_iter().map(|(_, q)| q).collect();
+        assert!(rest[0].name.is_none() && rest[0].term.is_some());
+        assert!(rest[1].shape.is_empty() && rest[1].term.is_none() && rest[1].name.is_some());
+        assert_eq!(rest[2].uses, [DeclName::new("Real.sqrt")]);
+        assert_eq!(
+            rest[2].term.as_ref().unwrap().names(),
+            ["Eq", "HMul.hMul", "Real.sqrt"].map(DeclName::new)
+        );
+        assert!(rest[4].term.is_none() && !rest[4].shape.is_empty());
+        assert!(rest.iter().all(|r| r.limit == 1));
+        // A shape no pattern gave is the flag that did, and pieces of a name
+        // are each a part, as they are each a condition.
+        let q = Query {
+            name: Some("finite.*mem".into()),
+            shape: Shape::new(Some(DeclName::new("LE.le")), Vec::new()),
+            uses: vec![DeclName::new("Real.exp")],
+            ..Query::new()
+        };
+        assert_eq!(
+            parts(&q),
+            ["`finite` in --name", "`mem` in --name", "--concl LE.le", "--uses Real.exp"]
+        );
+        // The numerals said back as Lean reads them, and an ascription.
+        let q = crate::domain::pattern::parse("Real.exp 0x10 = 2.50").query;
+        assert_eq!(parts(&q)[1], "the values of `16` and `2.5`");
+        let q = crate::domain::pattern::parse("Real.exp (x : ℝ) = 1").query;
+        assert_eq!(parts(&q)[1], "the value of `1` and the type ascribed");
+    }
+
+    /// A term that asks only which map a coercion applies is answered by a
+    /// row without one, and is no condition that can match nothing.
+    #[test]
+    fn a_term_that_only_says_which_map_is_applied_is_no_condition() {
+        let q = crate::domain::pattern::parse("e.symm (e x) = x").query;
+        assert!(q.term.is_some() && !q.needs_terms());
+        let labels: Vec<String> = q.conditions().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, ["--concl Eq", "`.symm` in the pattern"]);
+        let labels: Vec<String> = q.parts().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(labels, ["the shape", "`.symm` in the pattern"]);
     }
 
     #[test]

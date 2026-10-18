@@ -39,6 +39,29 @@ pub(super) struct Scientific {
     pub exponent: String,
 }
 
+/// As a decimal where the point falls among the digits or a few places
+/// before them, `2.5` for twenty-five tenths, and with an exponent otherwise,
+/// `3e100`: both read back as the same value.
+impl std::fmt::Display for Scientific {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let digits = self.mantissa.len();
+        match self.exponent.parse::<usize>() {
+            Ok(0) => write!(f, "{}.0", self.mantissa),
+            Ok(places) if self.negative && places < digits => {
+                let (whole, fraction) = self.mantissa.split_at(digits - places);
+                write!(f, "{whole}.{fraction}")
+            }
+            Ok(places) if self.negative && places <= digits + 3 => {
+                write!(f, "0.{}{}", "0".repeat(places - digits), self.mantissa)
+            }
+            _ => {
+                let sign = if self.negative { "-" } else { "" };
+                write!(f, "{}e{sign}{}", self.mantissa, self.exponent)
+            }
+        }
+    }
+}
+
 impl Scientific {
     pub fn parse(text: &str) -> Option<Self> {
         let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
@@ -124,4 +147,23 @@ fn subtract(a: &str, b: &str) -> String {
     }
     result.reverse();
     trimmed(std::str::from_utf8(&result).expect("decimal digits")).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decimal_is_said_back_as_lean_reads_it() {
+        for (written, said) in [
+            ("2.5", "2.5"),
+            ("2.50", "2.5"),
+            ("0.05", "0.05"),
+            ("2.0", "2.0"),
+            ("1e5", "1e5"),
+            ("1.5e-10", "15e-11"),
+        ] {
+            assert_eq!(Scientific::parse(written).unwrap().to_string(), said, "{written}");
+        }
+    }
 }

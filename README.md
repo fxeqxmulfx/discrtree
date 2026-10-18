@@ -192,8 +192,8 @@ different repairs:
 $ dt find --name exp --in Analysis
 no match: --in Analysis matches nothing on its own
 
-$ dt find --name exp --uses Finset.sum
-no match: every condition matches on its own; drop one
+$ dt find 'Real.exp 2 = Real.sqrt _'
+no match: the shape and the value of `2` each match on their own, but not together
 
 $ dt find --name addr --in Transformer.ALM
 no match: Transformer.ALM has 877 declarations, none matching --name addr
@@ -207,9 +207,15 @@ of this index; add it to discrtree.toml and re-run `dt dump batteries` and
 ```
 
 The first is a condition to edit — Mathlib's modules begin `Mathlib.`, so
-`Analysis` is not a prefix of any of them. The second is a condition to drop.
-Guessing between them costs a search either way; asking each condition on its
-own costs one row each, and only when the search has already failed.
+`Analysis` is not a prefix of any of them. The second is a part to drop:
+statements of that shape exist, but none with `Real.exp 2` on the left. The
+parts are named as they were written, a pattern's shape as one, its numerals as
+another and each constant in it and each flag as one more. With three or more,
+the line ends with the part the others match without, where there is one, or
+says that any or none of them can go: `--name log --uses Finset.sum --kind def`
+ends `any two of them match together`. Guessing between editing and dropping
+costs a search either way; asking each condition on its own costs one row each,
+and only when the search has already failed.
 
 The third is the second with the scope said out loud. `--in` and `--source` are
 not guesses like `--name` and `--text` are: a reader who names a module has
@@ -324,11 +330,32 @@ fderiv_apply_one_eq_deriv  theorem  Mathlib.Analysis.Calculus.Deriv.Basic
 
 A constant that returns a function is applied directly, as Lean applies it:
 `Matrix.diagonal d i j` is one application, because a matrix is a function.
-Notation applied may be either. `(f + g) x` matches `Pi.add_apply`, which adds
-functions, and `ContinuousLinearMap.add_apply`, which adds maps; `⇑(f + g) x`
-matches only the second. Parentheses are the one mark of the coercion that Lean
-prints, so a pattern that writes them where Lean would not, as in
-`(Nat.Coprime a) b`, asks for a coercion all the same.
+Parentheses round a constant that returns no map only group, so
+`(Nat.Coprime a) b` is `Nat.Coprime a b`. Notation applied may be either.
+`(f + g) x` matches `Pi.add_apply`, which adds functions, and
+`ContinuousLinearMap.add_apply`, which adds maps; `⇑(f + g) x` matches only
+the second.
+
+A field applied to more than it is written on may be either too. `e.symm (e x)`
+applies the map `Equiv.symm` returns, through the coercion, and `h.symm h'`
+applies the proof `Ne.symm` returns directly. Only the type of `e` says which, so
+the pattern asks for both, and asks of the coercion that what it applies be
+`.symm`. A type with a coercion of its own prints as `↑e x`, which is any
+coercion the index has: `PartialHomeomorph.toFun'` for a `PartialHomeomorph`. A
+map whose values are maps, as in `fderiv 𝕜 (fderiv 𝕜 f) x v w`, is applied
+through a coercion for each, and one in the pattern matches the same
+application. A statement of what the pattern writes comes before a particular
+case of it, such as `Cardinal.preAleph.symm ↑n = ↑n`:
+
+```
+$ dt -v find 'e.symm (e x) = x'
+dt: `e.symm (e x) = x` read as conclusion Eq, 2 argument(s), operator `=`,
+    `e`, `x` as `_`, argument 1 as `.symm` or `DFunLike.coe`, --uses .symm
+Equiv.symm_apply_apply  theorem  Mathlib.Logic.Equiv.Defs
+  ∀ … (e : α ≃ β) (x : α), e.symm (e x) = x
+MulEquiv.symm_apply_apply  theorem  Mathlib.Algebra.Group.Equiv.Defs
+  ∀ … (e : M ≃* N) (x : M), e.symm (e x) = x
+```
 
 Numeric literals constrain their value at the position where they are written:
 `dt find 'ENNReal.ofReal _ = 1'` finds `ENNReal.ofReal_one`, and excludes

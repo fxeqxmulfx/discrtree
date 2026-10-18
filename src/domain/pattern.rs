@@ -10,7 +10,7 @@ use crate::domain::decl::{ArgHead, Shape};
 use crate::domain::name::DeclName;
 use crate::domain::numeral::{self, Scientific};
 use crate::domain::query::{Power, Query, Spelling};
-use crate::domain::term::Term;
+use crate::domain::term::{COERCED, Term};
 use std::collections::BTreeMap;
 
 /// Notation to head symbol, with Lean's own binding strength and whether it
@@ -247,6 +247,37 @@ pub struct Parsed {
     pub coerced: Vec<(String, String)>,
 }
 
+/// What the index says about a pattern that the pattern cannot say itself,
+/// having no types: which of the constants it applies return a map, and
+/// through which constants a map is applied where `↑` is written. See
+/// [`applications`] for what to ask.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Known {
+    /// Each constant the pattern applies that the index has, with how many
+    /// explicit arguments it takes and whether what it returns is a bundled
+    /// map, applied through [`COERCION`] past them: `fderiv` takes three and
+    /// returns one, and `Nat.Coprime` takes two and returns a `Prop`.
+    pub constants: BTreeMap<DeclName, (usize, bool)>,
+    /// The constants a map is applied through where Lean prints `↑`:
+    /// [`COERCION`], and each of those a type has of its own, as
+    /// `PartialHomeomorph` has `PartialHomeomorph.toFun'`. Empty when the
+    /// index was not asked, and `↑e x` is then read as `_`.
+    pub coercions: Vec<DeclName>,
+}
+
+/// What a pattern applies, and so what to ask the index about it: see
+/// [`Known`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Applications {
+    /// Each constant applied in the place of a function, with the most terms
+    /// it is applied to anywhere in the pattern, counted through the
+    /// parentheses round it: `(fderiv _ _ _) 1` applies `fderiv` to four.
+    pub constants: BTreeMap<DeclName, usize>,
+    /// Whether a term written with `↑` is applied, which may be through a
+    /// coercion of its own.
+    pub coerces: bool,
+}
+
 /// Parse a pattern such as `Real.exp _ ≤ _` or `Finset.sum _ _ = _`.
 ///
 /// The rule is small enough to state in full: the pattern is split on `→`,
@@ -259,22 +290,22 @@ pub struct Parsed {
 /// A field -- `l.length` -- is `.length`, in whichever namespace has one,
 /// applied to `_`.
 pub fn parse(pattern: &str) -> Parsed {
-    parse_with(pattern, &BTreeMap::new())
+    parse_with(pattern, &Known::default())
 }
 
-/// [`parse`], knowing of each constant in `maps` how many arguments it takes
-/// before what it returns is a bundled map: with `fderiv` taking three,
-/// `fderiv _ _ _ 1` applies that map to `1`, as `(fderiv _ _ _) 1` writes
-/// it. Only the index knows, and [`applications`] says what to ask it.
-pub fn parse_with(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
-    let mut p = read(pattern, maps);
+/// [`parse`], knowing what the index says of what the pattern applies: with
+/// `fderiv` taking three arguments and returning a map, `fderiv _ _ _ 1`
+/// applies that map to `1`, as `(fderiv _ _ _) 1` writes it.
+pub fn parse_with(pattern: &str, known: &Known) -> Parsed {
+    let mut p = read(pattern, known);
     p.query.pattern_uses = p.query.uses.clone();
+    p.query.from_pattern = !p.query.shape.is_empty();
     p
 }
 
-fn read(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
+fn read(pattern: &str, known: &Known) -> Parsed {
     let (lexemes, lambdas) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
-    let (mut lexemes, coerced) = coerced(lexemes, maps);
+    let (mut lexemes, coerced) = coerced(lexemes, known);
     lexemes = group_prefixes(lexemes);
     // Repeated factors retain their identity before explicit binders become
     // wildcards: `∀ id : Nat, id * id` is still a square. Field receivers
@@ -314,8 +345,8 @@ fn read(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
 
     match split_on_operator(tokens) {
         Some((lhs, op, rhs)) => {
-            let (left_head, left_rest) = side(lhs);
-            let (right_head, right_rest) = side(rhs);
+            let (left_head, left_rest) = side(lhs, known);
+            let (right_head, right_rest) = side(rhs, known);
             let rest = left_rest.into_iter().chain(right_rest).chain(assumed);
             if op == "∉" {
                 // `a ∉ s` is `¬ (a ∈ s)` once elaborated: a negation with one
@@ -369,7 +400,7 @@ fn read(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
         None => match constants(tokens).split_first() {
             Some((head, rest)) => {
                 written = arguments(tokens, head);
-                let args: Vec<ArgHead> = written.iter().map(|a| side(a).0).collect();
+                let args: Vec<ArgHead> = written.iter().map(|a| side(a, known).0).collect();
                 // A name an argument is headed by is said by the shape, as the
                 // name a side is headed by is. See [`side`].
                 let mut rest = rest.to_vec();
@@ -433,8 +464,45 @@ fn read(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
             query.term = Some(term);
         }
     }
+    if query.term.is_none() {
+        query.term = applied_maps(&query.shape, &written);
+    }
     query.inside = inside(&all, &written, &query.uses);
     Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown, coerced }
+}
+
+/// The term each argument applied through a coercion is, where it names what
+/// it applies, and `_` for the others: what a row's term is asked when
+/// nothing else asks for one.
+///
+/// A shape keys such an argument by the coercion alone. `⇑e.symm (e x) = x` is
+/// `DFunLike.coe _ _ = _`, which 24 241 equations of Mathlib are, and the map
+/// was left to `--uses`, which a statement meets by mentioning `.symm`
+/// anywhere: `Equiv.symm_apply_apply` came 58th of 3317. The term says that
+/// the map is the one applied. A row without a term answers it, as the shape
+/// alone would have: see [`Query::needs_terms`].
+fn applied_maps(shape: &Shape, written: &[&[String]]) -> Option<Term> {
+    let through = |a: &ArgHead| match a {
+        ArgHead::Either(_) => true,
+        _ => a.name().is_some_and(|n| n.as_str() == COERCION),
+    };
+    let mut named = false;
+    let args = shape
+        .args
+        .iter()
+        .zip(written)
+        .map(|(a, w)| {
+            let term = term_of(w);
+            if !through(a) || !term.names().iter().any(|n| n.as_str() != COERCION) {
+                return Term::default();
+            }
+            named = true;
+            term
+        })
+        .collect();
+    let mut term = Term::named(shape.concl.as_ref()?.as_str(), args);
+    term.implicit = shape.include_implicit;
+    named.then_some(term)
 }
 
 /// Lean's `!=` returns Bool, while a standalone ASCII inequality has also
@@ -745,15 +813,19 @@ pub const COERCION: &str = "DFunLike.coe";
 /// parentheses is not: `(f + g) x` adds two functions as often as two maps.
 /// Written without the parentheses, `fderiv _ _ _ 1` is the same
 /// application, and only the index can say that `fderiv` takes three
-/// arguments and returns a map: `maps` has how many each such constant takes.
+/// arguments and returns a map: `known` says, of each constant it has.
 ///
 /// Keyed by its head as it was written, the application was `fderiv` applied
 /// to four arguments, which no row has, and the search was `no match`.
-fn coerced(
-    lexemes: Vec<String>,
-    maps: &BTreeMap<DeclName, usize>,
-) -> (Vec<String>, Vec<(String, String)>) {
-    if maps.is_empty() && !lexemes.iter().any(|t| t == "⇑" || t == "(") {
+///
+/// Parentheses a reader wrote and Lean would not print group, where the index
+/// says they do: `(Nat.Coprime a) b` is `Nat.Coprime a b`, a `Prop`, and read
+/// as a map applied it was a `DFunLike.coe` no row has. A field in
+/// parentheses is left to [`side`], which reads it both ways.
+fn coerced(lexemes: Vec<String>, known: &Known) -> (Vec<String>, Vec<(String, String)>) {
+    if !known.constants.values().any(|(_, map)| *map)
+        && !lexemes.iter().any(|t| t == "⇑" || t == "(")
+    {
         return (lexemes, Vec::new());
     }
     let mut tokens = lexemes.clone();
@@ -788,19 +860,36 @@ fn coerced(
             let Some(close) = (i + 1..tokens.len()).find(|k| depth[*k] <= depth[i]) else {
                 continue;
             };
-            let Some(last) = applied(&tokens, &depth, close + 1).last().map(|r| r.end) else {
-                continue;
-            };
+            let after = applied(&tokens, &depth, close + 1);
+            let Some(last) = after.last().map(|r| r.end) else { continue };
             if tokens[close] != ")"
                 || term_end(&tokens, &depth, i) != Some(close + 1)
                 || !applied_name(&tokens, &depth, i + 1, close)
             {
                 continue;
             }
+            let Some(head) = (i + 1..close).find(|k| tokens[*k] != SPACE) else { continue };
+            if is_field(&tokens[head]) {
+                continue;
+            }
+            if let Some(&(takes, map)) = known.constants.get(&DeclName::new(&tokens[head])) {
+                let inside = applied(&tokens, &depth, head + 1).len();
+                if !map || takes < inside || takes >= inside + after.len() {
+                    continue;
+                }
+                // `(fderiv _ _) x 1`: the map is `fderiv _ _ x`, and the
+                // parentheses end where it does.
+                if takes > inside {
+                    tokens.remove(close);
+                    origin.remove(close);
+                    insert(&mut tokens, &mut origin, after[takes - inside - 1].end - 1, &[")"]);
+                }
+            }
             insert(&mut tokens, &mut origin, i, &[COERCION, SPACE]);
             Some(i..last + 2)
-        } else if let Some(takes) =
-            applied_constant(&tokens, &depth, i).and_then(|c| maps.get(&c).copied())
+        } else if let Some((takes, _)) = applied_constant(&tokens, &depth, i)
+            .and_then(|c| known.constants.get(&c).copied())
+            .filter(|(_, map)| *map)
         {
             let args = applied(&tokens, &depth, i + 1);
             if args.len() <= takes {
@@ -842,24 +931,54 @@ fn insert(tokens: &mut Vec<String>, origin: &mut Vec<Option<usize>>, at: usize, 
     origin.splice(at..at, new.iter().map(|_| None));
 }
 
-/// Each constant a pattern applies in the place of a function, with the most
-/// terms it is applied to anywhere in it: what the index is asked about, to
-/// tell `fderiv _ _ _ 1`, which applies the map `fderiv` returns, from
-/// `Matrix.diagonal _ _ _`, which applies a function. See [`parse_with`].
-pub fn applications(pattern: &str) -> BTreeMap<DeclName, usize> {
-    let (lexemes, _) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
-    let (tokens, _) = coerced(lexemes, &BTreeMap::new());
+/// What a pattern applies, which is what the index is asked about: to tell
+/// `fderiv _ _ _ 1`, which applies the map `fderiv` returns, from
+/// `Matrix.diagonal _ _ _`, which applies a function, and `(fderiv _ _ _) 1`,
+/// a map in parentheses, from `(Nat.Coprime a) b`, a function. See
+/// [`parse_with`].
+pub fn applications(pattern: &str) -> Applications {
+    let (tokens, _) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
     let depth = depths(&tokens);
-    let mut out: BTreeMap<DeclName, usize> = BTreeMap::new();
+    let mut out = Applications::default();
     for i in 0..tokens.len() {
+        if tokens[i] == "↑" && applies(&tokens, &depth, i) && applied_to(&tokens, &depth, i) > 0 {
+            out.coerces = true;
+        }
         let Some(c) = applied_constant(&tokens, &depth, i) else { continue };
-        let n = applied(&tokens, &depth, i + 1).len();
+        let n = applied_to(&tokens, &depth, i);
         if n > 0 {
-            let most = out.entry(c).or_default();
+            let most = out.constants.entry(c).or_default();
             *most = (*most).max(n);
         }
     }
     out
+}
+
+/// How many terms the term at `at` is applied to: those written after it,
+/// and, where it and they are all that a pair of parentheses holds, those
+/// written after the parentheses, and so on out. `(fderiv _ _ _) v` applies
+/// `fderiv` to four, and `(↑e) x` applies `↑e` to one.
+fn applied_to(tokens: &[String], depth: &[usize], at: usize) -> usize {
+    let mut n = 0;
+    let mut start = at;
+    let Some(mut end) = term_end(tokens, depth, at) else { return 0 };
+    loop {
+        let args = applied(tokens, depth, end);
+        n += args.len();
+        let stop = args.last().map_or(end, |r| r.end);
+        let Some(open) = tokens[..start].iter().rposition(|t| t != SPACE) else { break };
+        let Some(close) = (stop..tokens.len()).find(|k| tokens[*k] != SPACE) else { break };
+        if tokens[open] != "("
+            || tokens[close] != ")"
+            || term_end(tokens, depth, open) != Some(close + 1)
+            || !applies(tokens, depth, open)
+        {
+            break;
+        }
+        start = open;
+        end = close + 1;
+    }
+    n
 }
 
 /// Whether the term at `i` is in the place of a function: first in its group
@@ -1545,7 +1664,7 @@ fn conditions_of(hypotheses: &[&[String]]) -> Vec<DeclName> {
     hypotheses
         .iter()
         .flat_map(|h| {
-            let (head, rest) = side(h);
+            let (head, rest) = side(h, &Known::default());
             head.name().cloned().into_iter().chain(rest)
         })
         .filter(is_condition)
@@ -1711,7 +1830,14 @@ fn notation_in(tokens: &[String]) -> Vec<DeclName> {
 /// application on that side once the relation has been stripped: the head of a
 /// norm bracket is `Norm.norm`, and the head of `Real.exp x + y` is `HAdd.hAdd`
 /// with `Real.exp` demoted to a `uses` condition.
-fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
+///
+/// Where only the types say what the head is, it is each that it can be. A
+/// field applied to more than what it is written on is the field's function
+/// applied, or the map it returns applied through [`COERCION`]: `e.symm (e x)`
+/// is `Equiv.symm`'s map applied to `e x`, and `h.symm h'` is `Ne.symm`
+/// applied to `h` and `h'`. And `↑e x` is a map applied through whatever
+/// coercion the type of `e` has, which `known` lists.
+fn side(tokens: &[String], known: &Known) -> (ArgHead, Vec<DeclName>) {
     let mut rest = constants(tokens);
     let grouped = ungrouped(tokens);
     if grouped.first().is_some_and(|t| matches!(t.as_str(), "∀" | "let" | "have"))
@@ -1726,7 +1852,14 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
     {
         // A coercion's head depends on the operand and target types. Preserve
         // constants inside it, but do not mistake its operand for that head.
-        return (ArgHead::Any, rest);
+        // Applied, it is one of the coercions to a function.
+        let head = match known.coercions.as_slice() {
+            [] => ArgHead::Any,
+            _ if grouped[0] != "↑" || terms(grouped).len() < 2 => ArgHead::Any,
+            [one] => ArgHead::Named(one.clone()),
+            all => ArgHead::Either(all.to_vec()),
+        };
+        return (head, rest);
     }
     if (grouped.first().is_some_and(|t| t == "⟨") || record_literal(grouped))
         && outermost(grouped).is_none()
@@ -1750,6 +1883,11 @@ fn side(tokens: &[String]) -> (ArgHead, Vec<DeclName>) {
         // already means.
         Some(t) if t == "_" || is_variable(t) || SORTS.contains(&t.as_str()) => {
             (ArgHead::Any, rest)
+        }
+        // Still a condition: the coercion is in many more statements than the
+        // field.
+        Some(t) if t.starts_with('.') && arguments(tokens, &DeclName::new(t)).len() > 1 => {
+            (ArgHead::Either(vec![DeclName::new(t), DeclName::new(COERCION)]), rest)
         }
         Some(t) => {
             if let Some(i) = rest.iter().position(|c| c.as_str() == t.as_str()) {
@@ -2330,7 +2468,15 @@ fn term_of(tokens: &[String]) -> Term {
         return Term::named(head, args);
     }
     if tokens.first().is_some_and(|t| matches!(t.as_str(), "↑" | "⇑")) {
-        return Term { args: vec![term_of(&tokens[1..])], ..Term::default() };
+        // `↑e x` is `↑e` applied to `x`, through whichever coercion: a cast
+        // of `e x` would be written `↑(e x)`.
+        return match terms(&tokens[1..]).as_slice() {
+            [map, applied @ ..] if !applied.is_empty() => Term::named(
+                COERCED,
+                std::iter::once(term_of(map)).chain(applied.iter().map(|a| term_of(a))).collect(),
+            ),
+            _ => Term { args: vec![term_of(&tokens[1..])], ..Term::default() },
+        };
     }
     if let Some((None, inside)) = enclosing(tokens)
         && is_tuple(inside)
@@ -3020,7 +3166,6 @@ mod tests {
             ("xs.length = _", ".length"),
             ("xs.reverse.length = _", ".length"),
             ("(l ++ m).length = _", ".length"),
-            ("l[i]?.getD d = _", ".getD"),
             ("l.tail[i] = _", "GetElem.getElem"),
             ("_.length = _", ".length"),
             ("p.1.le = _", ".le"),
@@ -3033,6 +3178,9 @@ mod tests {
         ] {
             assert_eq!(parse(pattern).query.shape.args[0], arg(head), "{pattern}");
         }
+        // Applied to more than it is written on, it may be the map the field
+        // returns that is applied.
+        assert_eq!(parse("l[i]?.getD d = _").query.shape.args[0], either(&[".getD", COERCION]));
         assert_eq!(parse("xs.length = _").variables, ["xs"]);
         // A word a field is written on is a variable wherever it stands.
         let p = parse("(xs ++ ys).length = xs.length + ys.length");
@@ -3197,6 +3345,22 @@ mod tests {
         (written.to_string(), read.to_string())
     }
 
+    /// What the index says of `constants`: how many arguments each takes,
+    /// and whether it returns a map.
+    fn known(constants: &[(&str, usize, bool)]) -> Known {
+        Known {
+            constants: constants
+                .iter()
+                .map(|(name, takes, map)| (DeclName::new(*name), (*takes, *map)))
+                .collect(),
+            coercions: Vec::new(),
+        }
+    }
+
+    fn either(names: &[&str]) -> ArgHead {
+        ArgHead::Either(names.iter().map(|n| DeclName::new(*n)).collect())
+    }
+
     /// The report: `fderiv_apply_one_eq_deriv` is `(fderiv 𝕜 f x) 1 = deriv f
     /// x`, and as `dt` prints it, with the `⇑` Lean leaves out, or without
     /// the parentheses, the pattern was `fderiv` applied to four arguments,
@@ -3216,14 +3380,13 @@ mod tests {
         // `⇑` is the coercion as written, and says nothing new.
         assert!(parse("⇑(fderiv _ _ _) 1 = deriv _ _").coerced.is_empty());
         // Without the parentheses, the index says where the map ends.
-        let maps = BTreeMap::from([(DeclName::new("fderiv"), 3)]);
-        let p = parse_with("fderiv _ _ _ 1 = deriv _ _", &maps);
+        let p = parse_with("fderiv _ _ _ 1 = deriv _ _", &known(&[("fderiv", 3, true)]));
         assert_eq!(p.query, elaborated.query);
         assert_eq!(p.coerced, [reading("fderiv _ _ _ 1", "DFunLike.coe (fderiv _ _ _) 1")]);
         assert_eq!(parse("fderiv _ _ _ 1 = deriv _ _").query.shape.args[0], arg("fderiv"));
         // A map that takes nothing is applied as it is.
-        let maps = BTreeMap::from([(DeclName::new("MeasureTheory.volume"), 0)]);
-        let p = parse_with("MeasureTheory.volume s = _", &maps);
+        let p =
+            parse_with("MeasureTheory.volume s = _", &known(&[("MeasureTheory.volume", 0, true)]));
         assert_eq!(p.query, parse("DFunLike.coe MeasureTheory.volume s = _").query);
         // One coercion is applied once, and a map a map returns is applied
         // through a coercion of its own.
@@ -3235,7 +3398,7 @@ mod tests {
             [reading("((fderiv _ _ _) v) w", "DFunLike.coe (DFunLike.coe (fderiv _ _ _) v) w")]
         );
         assert_eq!(parse("(Equiv.swap a b) a = b").query.shape.args[0], arg(COERCION));
-        assert_eq!(parse("(e.symm) x = _").query.shape.args[0], arg(COERCION));
+        assert_eq!(parse("(e.symm) x = _").query.shape.args[0], either(&[".symm", COERCION]));
         // `⇑f` handed to a function is one argument of it.
         let p = parse("Continuous ⇑f");
         assert_eq!(p.query.shape.args, vec![arg(COERCION)]);
@@ -3264,7 +3427,7 @@ mod tests {
         }
         // A constant the index has not called a map is a function, however
         // much it is applied to.
-        let maps = BTreeMap::from([(DeclName::new("fderiv"), 3)]);
+        let maps = known(&[("fderiv", 3, true), ("Matrix.diagonal", 1, false)]);
         assert_eq!(
             parse_with("Matrix.diagonal _ _ _ = _", &maps),
             parse("Matrix.diagonal _ _ _ = _")
@@ -3278,14 +3441,17 @@ mod tests {
     #[test]
     fn a_pattern_applies_each_constant_to_the_most_it_is_written_with() {
         let applied = |pattern: &str| -> Vec<(String, usize)> {
-            applications(pattern).into_iter().map(|(n, k)| (n.to_string(), k)).collect()
+            applications(pattern).constants.into_iter().map(|(n, k)| (n.to_string(), k)).collect()
         };
         assert_eq!(
             applied("fderiv _ _ _ 1 = deriv _ _"),
             [("deriv".to_string(), 2), ("fderiv".to_string(), 4)]
         );
-        // In parentheses it is the map, and what applies it is the coercion.
-        assert_eq!(applied("(fderiv _ _ _) 1 = _"), [("fderiv".to_string(), 3)]);
+        // In parentheses it is applied all the same: whether they apply a
+        // map, or only group, is for the index to say.
+        assert_eq!(applied("(fderiv _ _ _) 1 = _"), [("fderiv".to_string(), 4)]);
+        assert_eq!(applied("((fderiv _ _ _) v) w = _"), [("fderiv".to_string(), 5)]);
+        assert_eq!(applied("(Nat.Coprime a) b"), [("Nat.Coprime".to_string(), 2)]);
         assert_eq!(applied("fderiv _ _ _ = fderiv _ _ _ v"), [("fderiv".to_string(), 4)]);
         // An argument is not applied, nor a field, a variable or a lambda.
         assert_eq!(
@@ -3293,5 +3459,101 @@ mod tests {
             [("Filter.Tendsto".to_string(), 3), ("nhds".to_string(), 1)]
         );
         assert!(applied("@fderiv _ _ _ _ _ _ _ = f x").is_empty());
+    }
+
+    /// The report: `e.symm (e x) = x` is `Equiv.symm_apply_apply` as `dt`
+    /// prints it, and was `.symm` applied to `e` and `e x`, which it is only
+    /// where the field is `Ne.symm`, whose proof is applied directly. Without
+    /// the types it is either, and the term says which map is applied.
+    #[test]
+    fn a_field_applied_is_its_function_or_its_map_applied() {
+        for pattern in ["e.symm (e x) = x", "(e.symm) (e x) = x"] {
+            let p = parse(pattern);
+            assert_eq!(p.query.shape.args, vec![either(&[".symm", COERCION]), arg("_")]);
+            assert_eq!(p.query.uses, [DeclName::new(".symm")], "{pattern}");
+            let term = p.query.term.expect(pattern);
+            assert_eq!(term.names(), [DeclName::new("Eq"), DeclName::new(".symm")]);
+            // Which a row without a term answers, as the shape does.
+            assert!(!term.has_numeric_literals() && !term.has_type_constraints());
+        }
+        // Applied to what it is written on alone, it is the field.
+        assert_eq!(parse("e.symm = _").query.shape.args[0], arg(".symm"));
+        assert!(parse("e.symm = _").query.term.is_none());
+        // And a constant is what the index says it is.
+        let p = parse_with("Equiv.symm e (e x) = x", &known(&[("Equiv.symm", 1, true)]));
+        assert_eq!(p.query.shape.args[0], arg(COERCION));
+        assert_eq!(p.coerced, [reading("Equiv.symm e (e x)", "DFunLike.coe (Equiv.symm e) (e x)")]);
+        assert_eq!(p.query.term.unwrap().names()[1..], [COERCION, "Equiv.symm"].map(DeclName::new));
+        // A term the pattern writes anyway says the map too.
+        let p = parse("⇑e.symm (e 2) = x");
+        assert!(p.query.term.unwrap().has_numeric_literals());
+    }
+
+    /// `PartialHomeomorph` is applied through `PartialHomeomorph.toFun'`, and
+    /// Lean prints that `↑e x`. Which coercion is the type's to say, and the
+    /// index lists those there are.
+    #[test]
+    fn a_coercion_applied_is_each_one_the_index_has() {
+        let own = Known {
+            coercions: [COERCION, "PartialHomeomorph.toFun'"].map(DeclName::new).to_vec(),
+            ..Known::default()
+        };
+        let p = parse_with("↑e.symm (↑e x) = x", &own);
+        assert_eq!(p.query.shape.args[0], either(&[COERCION, "PartialHomeomorph.toFun'"]));
+        assert_eq!(p.query.uses, [DeclName::new(".symm")]);
+        let term = p.query.term.unwrap();
+        assert_eq!(term.args[0].head.as_deref(), Some(COERCED));
+        assert_eq!(term.args[0].args[1].head.as_deref(), Some(COERCED));
+        // With only the one every bundled map has, it is that one.
+        let one = Known { coercions: vec![DeclName::new(COERCION)], ..Known::default() };
+        assert_eq!(parse_with("↑f x = _", &one).query.shape.args[0], arg(COERCION));
+        // Not applied, it is a cast, whose head is the target type's; and
+        // unasked, the index has said nothing.
+        for pattern in ["↑(e x) = _", "↑e = _", "↑n + 1 = _"] {
+            let p = parse_with(pattern, &own);
+            assert_eq!(p.query.shape.args[0], parse(pattern).query.shape.args[0], "{pattern}");
+        }
+        assert_eq!(parse("↑e.symm (↑e x) = x").query.shape.args[0], arg("_"));
+        // So the index is asked only where one is applied.
+        let coerces = |pattern: &str| applications(pattern).coerces;
+        assert!(coerces("↑e.symm (↑e x) = x"));
+        assert!(coerces("(↑e) x = _"));
+        assert!(!coerces("↑(e x) = _"));
+        assert!(!coerces("↑n + 1 = ↑m"));
+    }
+
+    /// The report: `(Nat.Coprime a) b` was read as a map applied, which Lean
+    /// would print with the parentheses, and a `Prop` is no map.
+    #[test]
+    fn parentheses_round_what_returns_no_map_only_group() {
+        let maps = known(&[("Nat.Coprime", 2, false), ("fderiv", 3, true)]);
+        let p = parse_with("(Nat.Coprime a) b", &maps);
+        assert!(p.coerced.is_empty(), "{:?}", p.coerced);
+        assert_eq!(p.query, parse("Nat.Coprime a b").query);
+        // Unknown to the index, they are what Lean prints them for.
+        assert_eq!(parse("(Nat.Coprime a) b").query.shape.concl, Some(DeclName::new(COERCION)));
+        // Round fewer arguments than the map takes, they end where it does.
+        let p = parse_with("(fderiv _ _) x 1 = deriv _ _", &maps);
+        assert_eq!(p.coerced, [reading("(fderiv _ _) x 1", "DFunLike.coe (fderiv _ _ x) 1")]);
+        assert_eq!(p.query, parse("DFunLike.coe (fderiv _ _ x) 1 = deriv _ _").query);
+        // Round more, the map is applied inside them, and what it returns
+        // is applied again.
+        let p = parse_with("(fderiv _ _ _ v) w = _", &maps);
+        let read = "DFunLike.coe (DFunLike.coe (fderiv _ _ _) v) w";
+        assert_eq!(p.coerced, [reading("(fderiv _ _ _ v) w", read)]);
+    }
+
+    /// Where `fderiv`'s values are maps, `fderiv 𝕜 f x v w` is two coercions,
+    /// one round the other. Read with one, it is the same application: the
+    /// term matches through every coercion, and asks for the two arguments.
+    #[test]
+    fn a_map_applied_past_what_it_takes_is_applied_once() {
+        let maps = known(&[("fderiv", 3, true)]);
+        let p = parse_with("fderiv _ _ _ v w = _", &maps);
+        assert_eq!(p.coerced, [reading("fderiv _ _ _ v w", "DFunLike.coe (fderiv _ _ _) v w")]);
+        let term = p.query.term.unwrap();
+        assert_eq!(term.args[0].args.len(), 3, "{term:?}");
+        let p = parse_with("fderiv _ _ _ v 1 = _", &maps);
+        assert!(p.query.term.unwrap().has_numeric_literals());
     }
 }

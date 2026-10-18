@@ -122,6 +122,13 @@ pub enum ArgHead {
         written: DeclName,
         class: Vec<DeclName>,
     },
+    /// A pattern's head that is any of several, as the types the pattern
+    /// does not have would decide: `e.symm x` applies `.symm` to two terms
+    /// where the field is `Ne.symm`, which returns a proof that is applied
+    /// directly, and applies `DFunLike.coe` where it is `Equiv.symm`, which
+    /// returns a map. Only a search builds one, from what the index says the
+    /// names can return.
+    Either(Vec<DeclName>),
     Any,
 }
 
@@ -130,11 +137,23 @@ impl ArgHead {
         if s == "_" || s.is_empty() { ArgHead::Any } else { ArgHead::Named(DeclName::new(s)) }
     }
 
-    /// The head as written, `None` for `_`.
+    /// The head as written, `None` for `_`, and for one of several that
+    /// none was written as.
     pub fn name(&self) -> Option<&DeclName> {
         match self {
             ArgHead::Named(n) | ArgHead::Reducible { written: n, .. } => Some(n),
-            ArgHead::Any => None,
+            ArgHead::Either(_) | ArgHead::Any => None,
+        }
+    }
+
+    /// Every name it matches a statement's head by, none for `_`.
+    pub fn names(&self) -> Vec<&DeclName> {
+        match self {
+            ArgHead::Named(n) => vec![n],
+            ArgHead::Reducible { class: names, .. } | ArgHead::Either(names) => {
+                names.iter().collect()
+            }
+            ArgHead::Any => Vec::new(),
         }
     }
 
@@ -147,15 +166,13 @@ impl ArgHead {
     pub fn matches(&self, other: &ArgHead) -> bool {
         match self {
             ArgHead::Any => true,
-            ArgHead::Named(a) => matches!(other, ArgHead::Named(b) if a.names(b)),
-            ArgHead::Reducible { class, .. } => {
-                class.iter().any(|a| matches!(other, ArgHead::Named(b) if a.names(b)))
-            }
+            _ => self.names().iter().any(|a| matches!(other, ArgHead::Named(b) if a.names(b))),
         }
     }
 
     /// Whether it matches without unfolding anything: the head written is the
-    /// statement's.
+    /// statement's. Each of several is as written: which one a statement has
+    /// is the types', and nothing was unfolded to find it.
     pub fn as_written(&self, other: &ArgHead) -> bool {
         match self {
             ArgHead::Reducible { written, .. } => {

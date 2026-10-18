@@ -32,6 +32,12 @@ pub trait DeclRepo {
     /// 315 430 against 148 610 constants for the `Eq` rows of Mathlib with a
     /// product. Ask [`DeclRepo::get_many`] for a row with everything.
     fn find(&self, query: &Query) -> Result<Vec<Decl>>;
+    /// Whether the query matches anything: what a diagnosis asks of each part
+    /// of a query that found nothing, and of each way of changing it. The
+    /// default lists the rows; a store that can stop at the first should.
+    fn any(&self, query: &Query) -> Result<bool> {
+        Ok(!self.find(&Query { limit: 1, ..query.clone() })?.is_empty())
+    }
     /// Sources whose otherwise matching rows have no nested expression. A
     /// type or literal query must ask for a refresh instead of omitting them.
     fn missing_term_sources(&self, query: &Query) -> Result<Vec<SourceId>> {

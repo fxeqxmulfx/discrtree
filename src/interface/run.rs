@@ -15,7 +15,7 @@ use crate::application::rdeps::Rdeps;
 use crate::application::ship::Fetch;
 use crate::application::show::{Show, Shown};
 use crate::application::status::{self, Status};
-use crate::domain::decl::{self, DeclKind};
+use crate::domain::decl::{self, ArgHead, DeclKind};
 use crate::domain::name::{DeclName, ModuleName};
 use crate::domain::pattern;
 use crate::domain::query::{Power, Query, Spelling};
@@ -306,7 +306,7 @@ impl App {
     }
 
     fn find(&self, args: &FindArgs) -> Result<()> {
-        self.check_source(&query_of(args, &BTreeMap::new())?)?;
+        self.check_source(&query_of(args, &pattern::Known::default())?)?;
         let parsed = args.pattern.as_deref().map(pattern::parse);
         if let Some(p) = &parsed
             && !p.unknown.is_empty()
@@ -331,7 +331,7 @@ impl App {
             && let Some((p, parsed)) = args.pattern.as_deref().zip(parsed)
         {
             eprintln!(
-                "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}{}",
+                "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}{}{}",
                 parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
                 parsed.query.shape.args.len(),
                 parsed.operator.map_or(String::new(), |o| format!(", operator `{o}`")),
@@ -345,6 +345,20 @@ impl App {
                     .coerced
                     .iter()
                     .map(|(written, read)| format!(", `{written}` as `{read}`"))
+                    .collect::<String>(),
+                // And a head only the types could say is each it can be.
+                parsed
+                    .query
+                    .shape
+                    .args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, a)| match a {
+                        ArgHead::Either(names) => {
+                            Some(format!(", argument {} as {}", i + 1, one_of(names)))
+                        }
+                        _ => None,
+                    })
                     .collect::<String>(),
                 match parsed.hypotheses {
                     0 => String::new(),
@@ -1195,25 +1209,34 @@ fn decl_name(arg: &str) -> Result<DeclName> {
     }
 }
 
+/// `a`, `a or b`, `a, b or c`, and past three, how many more.
+fn one_of(names: &[DeclName]) -> String {
+    let shown: Vec<String> = names.iter().take(3).map(|n| format!("`{n}`")).collect();
+    match (shown.split_last(), names.len()) {
+        (Some((last, [])), _) => last.clone(),
+        (Some((last, init)), 2 | 3) => format!("{} or {last}", init.join(", ")),
+        (_, n) => format!("{} or {} more", shown.join(", "), n.saturating_sub(3)),
+    }
+}
+
 /// The command line as a domain query, asked of this index, and the pattern
 /// as it was read. The index says which constants the pattern applies return
-/// a bundled map: see [`find::bundled_maps`].
+/// a bundled map, and what `↑` can apply: see [`find::known`].
 fn query_against(repo: &dyn DeclRepo, args: &FindArgs) -> Result<(Query, Option<pattern::Parsed>)> {
-    let maps = match &args.pattern {
-        Some(p) => find::bundled_maps(repo, p)?,
-        None => BTreeMap::new(),
+    let known = match &args.pattern {
+        Some(p) => find::known(repo, p)?,
+        None => pattern::Known::default(),
     };
-    let parsed = args.pattern.as_deref().map(|p| pattern::parse_with(p, &maps));
-    Ok((query_of(args, &maps)?, parsed))
+    let parsed = args.pattern.as_deref().map(|p| pattern::parse_with(p, &known));
+    Ok((query_of(args, &known)?, parsed))
 }
 
 /// The command line as a domain query. A pattern supplies the shape, read
-/// knowing how many arguments each of `maps` takes before it returns a
-/// bundled map; the explicit flags refine it, and win where both say
-/// something.
-fn query_of(a: &FindArgs, maps: &BTreeMap<DeclName, usize>) -> Result<Query> {
+/// knowing what `known` says of what it applies; the explicit flags refine
+/// it, and win where both say something.
+fn query_of(a: &FindArgs, known: &pattern::Known) -> Result<Query> {
     let mut q = match &a.pattern {
-        Some(p) => pattern::parse_with(p, maps).query,
+        Some(p) => pattern::parse_with(p, known).query,
         None => Query::new(),
     };
     if a.name.is_some() {
@@ -1422,7 +1445,8 @@ mod tests {
 
     #[test]
     fn a_pattern_becomes_a_shape_query() {
-        let q = query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &BTreeMap::new()).unwrap();
+        let q =
+            query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &pattern::Known::default()).unwrap();
         assert_eq!(q.shape.concl.as_ref().map(|c| c.as_str()), Some("LE.le"));
         assert_eq!(q.shape.args.len(), 2);
     }
@@ -1432,12 +1456,12 @@ mod tests {
         // Not a convenience: a text row has no conclusion head symbol, so
         // including one would drop the condition instead of failing it.
         assert!(
-            query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &BTreeMap::new())
+            query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &pattern::Known::default())
                 .unwrap()
                 .elaborated_only
         );
         assert!(
-            !query_of(&args(&["dt", "find", "--name", "exp"]), &BTreeMap::new())
+            !query_of(&args(&["dt", "find", "--name", "exp"]), &pattern::Known::default())
                 .unwrap()
                 .elaborated_only
         );
@@ -1457,7 +1481,7 @@ mod tests {
                 "--limit",
                 "5",
             ]),
-            &BTreeMap::new(),
+            &pattern::Known::default(),
         )
         .unwrap();
         assert_eq!(q.module.as_deref(), Some("Mathlib.Analysis"));
@@ -1471,31 +1495,38 @@ mod tests {
     fn kind_takes_a_list_and_refuses_a_word_that_is_not_a_kind() {
         let q = query_of(
             &args(&["dt", "find", "--kind", "def,structure,abbrev", "--kind", "rec"]),
-            &BTreeMap::new(),
+            &pattern::Known::default(),
         )
         .unwrap();
         let kinds: Vec<&str> = q.kind.iter().map(DeclKind::as_str).collect();
         assert_eq!(kinds, vec!["def", "structure", "rec"], "`abbrev` is a def, said once");
 
-        let err = query_of(&args(&["dt", "find", "--kind", "def,lemmas"]), &BTreeMap::new())
-            .unwrap_err()
-            .to_string();
+        let err =
+            query_of(&args(&["dt", "find", "--kind", "def,lemmas"]), &pattern::Known::default())
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("no kind `lemmas`"), "{err}");
         assert!(err.contains("theorem, def, structure"), "{err}");
     }
 
     #[test]
     fn a_query_with_no_conditions_is_recognised_as_empty() {
-        assert!(query_of(&args(&["dt", "find"]), &BTreeMap::new()).unwrap().is_empty());
+        assert!(query_of(&args(&["dt", "find"]), &pattern::Known::default()).unwrap().is_empty());
         // A name of every name is no condition either.
         assert!(
-            query_of(&args(&["dt", "find", "--name", "*"]), &BTreeMap::new()).unwrap().is_empty()
+            query_of(&args(&["dt", "find", "--name", "*"]), &pattern::Known::default())
+                .unwrap()
+                .is_empty()
         );
         assert!(
-            query_of(&args(&["dt", "find", "--name", ".*"]), &BTreeMap::new()).unwrap().is_empty()
+            query_of(&args(&["dt", "find", "--name", ".*"]), &pattern::Known::default())
+                .unwrap()
+                .is_empty()
         );
         assert!(
-            !query_of(&args(&["dt", "find", "--name", "a*"]), &BTreeMap::new()).unwrap().is_empty()
+            !query_of(&args(&["dt", "find", "--name", "a*"]), &pattern::Known::default())
+                .unwrap()
+                .is_empty()
         );
     }
 }
