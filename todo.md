@@ -31,6 +31,66 @@ types, any application whose head is not a function constant, like
 all three spellings above find `fderiv_apply_one_eq_deriv`. Failing that, the
 miss names the fix: "an applied bundled map is `DFunLike.coe f x` in a pattern".
 
+Fixed in 0.67.0. Lean applies a bundled map through `DFunLike.coe` and prints
+the application without it, with parentheses round the map when the map is
+itself an application: `(fderiv 𝕜 f x) 1` is `DFunLike.coe (fderiv 𝕜 f x) 1`,
+and the row is keyed under that head. The pattern was `fderiv` applied to four
+arguments, which nothing is. `⇑` was read as `_`, which made the side `_ 1`,
+with the `1` first where the row has it second, after the map.
+
+A pattern is now read as Lean elaborates it. An application in parentheses and
+applied again is the coercion, as Lean prints it, and so is `⇑`. Without
+either, the index decides: a constant applied to more arguments than its type
+has explicit parameters, whose result is a type with a `DFunLike`, `FunLike` or
+`EquivLike` instance, is applied through `DFunLike.coe` past the ones it takes.
+`fderiv` takes three and returns `ContinuousLinearMap`, and `Equiv.swap` takes
+two and returns `Equiv.Perm`, which is `Equiv` unfolded. `Matrix.diagonal d i j`
+stays one application, since `Matrix` has no such instance: a matrix is a
+function. Notation applied, `(f + g) x`, is read as it was and matches both
+`Pi.add_apply` and `ContinuousLinearMap.add_apply`; `⇑(f + g) x` matches the
+second. `-v` says which reading was taken. On a copy of the project indexed by
+dt 0.60.0, whose rows have no numeral values, so with `_` for the `1`, each
+spelling finds the lemma and nothing else:
+
+    $ dt -v find 'fderiv _ _ _ _ = deriv _ _'
+    dt: `fderiv _ _ _ _ = deriv _ _` read as conclusion Eq, 2 argument(s), operator `=`, `fderiv _ _ _ _` as `DFunLike.coe (fderiv _ _ _) _`, --uses fderiv
+    fderiv_apply_one_eq_deriv  theorem  Mathlib.Analysis.Calculus.Deriv.Basic
+      ∀ …, (fderiv 𝕜 f x) 1 = deriv f x
+    1 result(s)
+
+With the `1`, the three spellings are tested against the rows the report's
+index has for the lemma, `fderiv`, `deriv` and `ContinuousLinearMap.funLike`,
+in SQLite, in memory and from the dump. `Equiv.swap a b a = b` finds
+`Equiv.swap_apply_left` second, where it found nothing.
+
+A pattern pays one lookup for each constant it applies, and up to three more
+for each one it applies past what its type takes. `Real.exp _ ≤ Real.exp _`
+takes 7.7 ms of CPU against 7.4, `Matrix.diagonal d i j = _`, which looks for
+instances `Matrix` does not have, 32.4 against 30.5, and
+`fderiv _ _ _ _ = deriv _ _` 47.4 where its miss took 687.0: medians of 25 runs
+alternating with a 0.66.0 build.
+
+Not done:
+
+- A field applied is read as before. `e.symm (e x) = x` is `.symm` applied to
+  `e` and `e x`, and finds nothing. Whether `e.symm` is a map is for the type
+  of `e` to say, since `Equiv.symm` returns one and `Ne.symm` a proof that is
+  applied directly, and a pattern has no types.
+- A coerced side is keyed by `DFunLike.coe` and its map only by `--uses`, so a
+  map that many statements mention ranks low: `⇑e.symm (e x) = x` finds
+  `Equiv.symm_apply_apply` 58th of 3317, and `Equiv.symm e (e x) = x` 39th of
+  1407.
+- `⇑` and parentheses are always `DFunLike.coe`. A type with a coercion of its
+  own, as `PartialHomeomorph` has in `toFun'`, prints as `↑e x` and is read as
+  before, with `↑` as `_`. Parentheses Lean would not print, as in
+  `(Nat.Coprime a) b`, are read as a coercion too.
+- `fderiv _ _ _ v w` is one coercion applied to `v` and `w`. Where the map's
+  values are maps again, Lean nests a second one. The heads are the same either
+  way, and only a numeral or an ascription among `v w` sees the difference.
+- The miss the `⇑` spelling got, `every condition matches on its own; drop
+  one`, is worded as it was. Its conditions are the parts of the query, there
+  the shape, `--uses fderiv` and the value of `1`, not hypotheses.
+
 ## A stale project index answers `no match` and `dt status` calls it current
 
 Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking

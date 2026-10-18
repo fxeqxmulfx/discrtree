@@ -306,8 +306,7 @@ impl App {
     }
 
     fn find(&self, args: &FindArgs) -> Result<()> {
-        let query = query_of(args)?;
-        self.check_source(&query)?;
+        self.check_source(&query_of(args, &BTreeMap::new())?)?;
         let parsed = args.pattern.as_deref().map(pattern::parse);
         if let Some(p) = &parsed
             && !p.unknown.is_empty()
@@ -326,11 +325,13 @@ impl App {
                  stripped, so a lambda matches any argument"
             );
         }
+        let mut repo = self.repo()?;
+        let (mut query, parsed) = query_against(repo.as_ref(), args)?;
         if self.verbose
             && let Some((p, parsed)) = args.pattern.as_deref().zip(parsed)
         {
             eprintln!(
-                "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}",
+                "dt: `{p}` read as conclusion {}, {} argument(s){}{}{}{}{}",
                 parsed.query.shape.concl.as_ref().map_or("_", |c| c.as_str()),
                 parsed.query.shape.args.len(),
                 parsed.operator.map_or(String::new(), |o| format!(", operator `{o}`")),
@@ -338,6 +339,13 @@ impl App {
                     true => String::new(),
                     false => format!(", `{}` as `_`", parsed.variables.join("`, `")),
                 },
+                // A map applied is keyed by the coercion it is applied
+                // through, and the rows answer the pattern read that way.
+                parsed
+                    .coerced
+                    .iter()
+                    .map(|(written, read)| format!(", `{written}` as `{read}`"))
+                    .collect::<String>(),
                 match parsed.hypotheses {
                     0 => String::new(),
                     n => format!(", {n} hypothesis/es read as conditions"),
@@ -353,7 +361,6 @@ impl App {
                 },
             );
         }
-        let mut repo = self.repo()?;
         let build = LakeBuild::read(&self.cfg);
         let mut hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
         // Asked before anything is printed, because the answer changes: the
@@ -364,6 +371,9 @@ impl App {
             && self.refresh_for_search(repo.as_ref(), &query, args.refresh)
         {
             repo = self.repo()?;
+            // Read again: a map the pattern applies may be one of the rows
+            // handed over.
+            query = query_against(repo.as_ref(), args)?.0;
             hits = Find { repo: repo.as_ref(), build: &build }.run(&query)?;
         }
         // On stderr, and before the rows: the answer below is to a question
@@ -1185,11 +1195,25 @@ fn decl_name(arg: &str) -> Result<DeclName> {
     }
 }
 
-/// The command line as a domain query. A pattern supplies the shape; the
-/// explicit flags refine it, and win where both say something.
-fn query_of(a: &FindArgs) -> Result<Query> {
+/// The command line as a domain query, asked of this index, and the pattern
+/// as it was read. The index says which constants the pattern applies return
+/// a bundled map: see [`find::bundled_maps`].
+fn query_against(repo: &dyn DeclRepo, args: &FindArgs) -> Result<(Query, Option<pattern::Parsed>)> {
+    let maps = match &args.pattern {
+        Some(p) => find::bundled_maps(repo, p)?,
+        None => BTreeMap::new(),
+    };
+    let parsed = args.pattern.as_deref().map(|p| pattern::parse_with(p, &maps));
+    Ok((query_of(args, &maps)?, parsed))
+}
+
+/// The command line as a domain query. A pattern supplies the shape, read
+/// knowing how many arguments each of `maps` takes before it returns a
+/// bundled map; the explicit flags refine it, and win where both say
+/// something.
+fn query_of(a: &FindArgs, maps: &BTreeMap<DeclName, usize>) -> Result<Query> {
     let mut q = match &a.pattern {
-        Some(p) => pattern::parse(p).query,
+        Some(p) => pattern::parse_with(p, maps).query,
         None => Query::new(),
     };
     if a.name.is_some() {
@@ -1398,7 +1422,7 @@ mod tests {
 
     #[test]
     fn a_pattern_becomes_a_shape_query() {
-        let q = query_of(&args(&["dt", "find", "Real.exp _ ≤ _"])).unwrap();
+        let q = query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &BTreeMap::new()).unwrap();
         assert_eq!(q.shape.concl.as_ref().map(|c| c.as_str()), Some("LE.le"));
         assert_eq!(q.shape.args.len(), 2);
     }
@@ -1407,23 +1431,34 @@ mod tests {
     fn asking_for_a_shape_restricts_the_search_to_elaborated_rows() {
         // Not a convenience: a text row has no conclusion head symbol, so
         // including one would drop the condition instead of failing it.
-        assert!(query_of(&args(&["dt", "find", "Real.exp _ ≤ _"])).unwrap().elaborated_only);
-        assert!(!query_of(&args(&["dt", "find", "--name", "exp"])).unwrap().elaborated_only);
+        assert!(
+            query_of(&args(&["dt", "find", "Real.exp _ ≤ _"]), &BTreeMap::new())
+                .unwrap()
+                .elaborated_only
+        );
+        assert!(
+            !query_of(&args(&["dt", "find", "--name", "exp"]), &BTreeMap::new())
+                .unwrap()
+                .elaborated_only
+        );
     }
 
     #[test]
     fn explicit_flags_refine_a_pattern() {
-        let q = query_of(&args(&[
-            "dt",
-            "find",
-            "_ ≤ _",
-            "--in",
-            "Mathlib.Analysis",
-            "--uses",
-            "Real.exp,Real.log",
-            "--limit",
-            "5",
-        ]))
+        let q = query_of(
+            &args(&[
+                "dt",
+                "find",
+                "_ ≤ _",
+                "--in",
+                "Mathlib.Analysis",
+                "--uses",
+                "Real.exp,Real.log",
+                "--limit",
+                "5",
+            ]),
+            &BTreeMap::new(),
+        )
         .unwrap();
         assert_eq!(q.module.as_deref(), Some("Mathlib.Analysis"));
         assert_eq!(q.uses.len(), 2);
@@ -1434,22 +1469,33 @@ mod tests {
     /// was taken as a kind no row has.
     #[test]
     fn kind_takes_a_list_and_refuses_a_word_that_is_not_a_kind() {
-        let q = query_of(&args(&["dt", "find", "--kind", "def,structure,abbrev", "--kind", "rec"]))
-            .unwrap();
+        let q = query_of(
+            &args(&["dt", "find", "--kind", "def,structure,abbrev", "--kind", "rec"]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let kinds: Vec<&str> = q.kind.iter().map(DeclKind::as_str).collect();
         assert_eq!(kinds, vec!["def", "structure", "rec"], "`abbrev` is a def, said once");
 
-        let err = query_of(&args(&["dt", "find", "--kind", "def,lemmas"])).unwrap_err().to_string();
+        let err = query_of(&args(&["dt", "find", "--kind", "def,lemmas"]), &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no kind `lemmas`"), "{err}");
         assert!(err.contains("theorem, def, structure"), "{err}");
     }
 
     #[test]
     fn a_query_with_no_conditions_is_recognised_as_empty() {
-        assert!(query_of(&args(&["dt", "find"])).unwrap().is_empty());
+        assert!(query_of(&args(&["dt", "find"]), &BTreeMap::new()).unwrap().is_empty());
         // A name of every name is no condition either.
-        assert!(query_of(&args(&["dt", "find", "--name", "*"])).unwrap().is_empty());
-        assert!(query_of(&args(&["dt", "find", "--name", ".*"])).unwrap().is_empty());
-        assert!(!query_of(&args(&["dt", "find", "--name", "a*"])).unwrap().is_empty());
+        assert!(
+            query_of(&args(&["dt", "find", "--name", "*"]), &BTreeMap::new()).unwrap().is_empty()
+        );
+        assert!(
+            query_of(&args(&["dt", "find", "--name", ".*"]), &BTreeMap::new()).unwrap().is_empty()
+        );
+        assert!(
+            !query_of(&args(&["dt", "find", "--name", "a*"]), &BTreeMap::new()).unwrap().is_empty()
+        );
     }
 }

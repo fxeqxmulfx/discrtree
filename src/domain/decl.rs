@@ -631,6 +631,109 @@ fn balanced(s: &str, open: char, close: char) -> Option<usize> {
     None
 }
 
+/// How many arguments a printed type takes explicitly before what it returns:
+/// the names of each `(a b : α)` and each bare domain of an arrow, and none of
+/// the `{α : Type}`, `[Monoid α]` and `⦃x : α⦄` the elaborator fills in.
+/// `None` where its brackets do not balance, or a `∀` binds with notation --
+/// `∀ x ∈ s,` -- which this does not count.
+///
+/// An arrow is one only with a space either side, as Lean prints it between
+/// two types. A bundled map's is glued to what follows it, so `fderiv` takes
+/// three, `𝕜`, `f` and `x`, and returns `E →L[𝕜] F`, which a fourth argument
+/// is applied to through a coercion. `Matrix.diagonal` takes one and returns
+/// `Matrix n n α`, which is a function, and applies to two more directly.
+pub fn explicit_arity(ty: &str) -> Option<usize> {
+    let mut rest = ty.trim_start();
+    let mut count = 0;
+    loop {
+        if let Some(after) = rest.strip_prefix('∀') {
+            let (n, body) = forall_arity(after)?;
+            count += n;
+            rest = body.trim_start();
+            continue;
+        }
+        match spaced(rest, "→")? {
+            Some(at) => {
+                count += domain_arity(rest[..at].trim_end());
+                rest = rest[at + "→".len()..].trim_start();
+            }
+            None => return Some(count),
+        }
+    }
+}
+
+/// The explicit binders a `∀` opens with, counted, and what follows its comma.
+fn forall_arity(after: &str) -> Option<(usize, &str)> {
+    let mut count = 0;
+    let mut rest = after;
+    loop {
+        rest = rest.trim_start();
+        let open = rest.chars().next()?;
+        if open == ',' {
+            return Some((count, &rest[1..]));
+        }
+        match closing(open) {
+            Some(close) => {
+                let end = balanced(rest, open, close)?;
+                count += domain_arity(&rest[..end]);
+                rest = &rest[end..];
+            }
+            // `∀ x y,`, and not the `∈` of `∀ x ∈ s,`.
+            None => {
+                let end = rest.find(|c: char| c.is_whitespace() || ",()[]{}⦃⦄".contains(c))?;
+                if !rest.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                    return None;
+                }
+                count += 1;
+                rest = &rest[end..];
+            }
+        }
+    }
+}
+
+/// How many explicit arguments one domain of a printed type is: the names
+/// of `(a b : α)`, one for `(E → F)`, for a subtype `{ x // 0 < x }` and for
+/// any type written bare, and none for a binder in any other bracket.
+fn domain_arity(domain: &str) -> usize {
+    let Some(open) = domain.chars().next() else { return 1 };
+    let Some(close) = closing(open) else { return 1 };
+    if balanced(domain, open, close) != Some(domain.len()) {
+        return 1;
+    }
+    let inside = &domain[open.len_utf8()..domain.len() - close.len_utf8()];
+    match open {
+        '(' => spaced(inside, ":")
+            .flatten()
+            .map_or(1, |colon| inside[..colon].split_whitespace().count()),
+        '{' if spaced(inside, "//").flatten().is_some() => 1,
+        _ => 0,
+    }
+}
+
+/// Where `symbol` is first written outside every bracket of `s` with
+/// whitespace either side of it, as Lean prints an arrow between two types
+/// and the colon of a binder. `None` where the brackets of `s` do not balance.
+fn spaced(s: &str, symbol: &str) -> Option<Option<usize>> {
+    let mut depth = 0usize;
+    let mut found = None;
+    for (at, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' | '⦃' | '⟨' => depth += 1,
+            ')' | ']' | '}' | '⦄' | '⟩' => depth = depth.checked_sub(1)?,
+            _ if depth == 0 && found.is_none() && s[at..].starts_with(symbol) => {
+                let before = s[..at].chars().next_back();
+                let after = s[at + symbol.len()..].chars().next();
+                if before.is_some_and(char::is_whitespace) && after.is_some_and(char::is_whitespace)
+                {
+                    found = Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,5 +981,43 @@ mod tests {
             says("(μ : Measure G) :\n  mulConv μ f = g"),
             "(μ : Measure G) : mulConv μ f = g"
         );
+    }
+
+    /// The types as Mathlib prints them. A bundled map's arrow is glued to
+    /// what follows it, and is no binder: what `fderiv` returns takes its
+    /// argument through a coercion, and what `Matrix.diagonal` returns, a
+    /// function, takes two directly.
+    #[test]
+    fn a_type_takes_its_explicit_binders_and_the_domains_of_its_arrows() {
+        let fderiv = "(𝕜 : Type u_4) →\n  [inst : NontriviallyNormedField 𝕜] →\n    \
+                      {E : Type u_5} →\n      [inst_1 : AddCommGroup E] →\n        \
+                      {F : Type u_6} → [inst_6 : TopologicalSpace F] → (E → F) → E → E →L[𝕜] F";
+        for (ty, arity) in [
+            (fderiv, 3),
+            ("{α : Sort u} → {β : Sort v} → α ≃ β → β ≃ α", 1),
+            ("{α : Sort u_1} → [DecidableEq α] → α → α → Equiv.Perm α", 2),
+            (
+                "{n : Type u_3} → {α : Type v} → [DecidableEq n] → [Zero α] → (n → α) → Matrix n n α",
+                1,
+            ),
+            ("{α : Type u} → Set α", 0),
+            ("{α : Sort u} → {β : Sort v} → {δ : Sort w} → (β → δ) → (α → β) → α → δ", 3),
+            (
+                "{ι : Type u_1} → {M : ι → Type u_4} → [(i : ι) → Zero (M i)] → [DecidableEq ι] → \
+                 (i : ι) → M i → (j : ι) → M j",
+                3,
+            ),
+            ("{α : Type u_1} → {M : Type u_4} → [inst : Zero M] → α → M → α →₀ M", 2),
+            ("∀ {α : Type u} (a b : α), a = b → b = a", 3),
+            ("ℝ → ℝ", 1),
+            ("{ x // 0 < x } → ℝ", 1),
+            ("{f : { x // 0 < x }} → ℝ", 0),
+            ("∀ x y, p x y", 2),
+        ] {
+            assert_eq!(explicit_arity(ty), Some(arity), "{ty}");
+        }
+        // Brackets that never close, and a binder this does not count.
+        assert_eq!(explicit_arity("(𝕜 : Type → ℝ"), None);
+        assert_eq!(explicit_arity("∀ x ∈ s, p x"), None);
     }
 }

@@ -1,9 +1,10 @@
 //! `dt find` — shape search, the main mode, plus `dt dup`.
 
 use crate::application::ports::{Build, DeclRepo, Missing, SourceFiles};
-use crate::domain::decl::{ArgHead, Decl, DeclKind, Shape};
+use crate::domain::decl::{self, ArgHead, Decl, DeclKind, Shape};
 use crate::domain::lean_text;
 use crate::domain::name::{DeclName, ModuleName};
+use crate::domain::pattern;
 use crate::domain::query::{self, NameQuery, Power, Query};
 use crate::domain::source::SourceId;
 use crate::error::{Result, bail};
@@ -1007,6 +1008,59 @@ impl Find<'_> {
         out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
         Ok(out)
     }
+}
+
+/// The classes an instance of says a type is a bundled map, applied through
+/// [`pattern::COERCION`]: `ContinuousLinearMap.funLike`, `Equiv.instEquivLike`.
+const BUNDLED: &[&str] = &["DFunLike", "FunLike", "EquivLike"];
+
+/// The constants a pattern applies to more terms than they take, where what
+/// they return is a bundled map, each with how many they take: `fderiv` and
+/// three for `fderiv _ _ _ 1 = deriv _ _`. See [`pattern::parse_with`].
+///
+/// What a constant returns is the conclusion head of its row, and the count is
+/// read off its type. `Matrix.diagonal` returns a `Matrix`, which no instance
+/// says is a map, and `Matrix.diagonal d i j` applies a function: it stays as
+/// it was written.
+pub fn bundled_maps(repo: &dyn DeclRepo, pattern: &str) -> Result<BTreeMap<DeclName, usize>> {
+    let mut out = BTreeMap::new();
+    let mut known: BTreeMap<DeclName, bool> = BTreeMap::new();
+    for (name, applied) in pattern::applications(pattern) {
+        let Some(d) = repo.get(&name)?.filter(|d| d.elaborated) else { continue };
+        let Some(takes) = decl::explicit_arity(&d.ty).filter(|n| *n < applied) else { continue };
+        let Some(returns) = d.shape.concl else { continue };
+        let bundled = match known.get(&returns) {
+            Some(b) => *b,
+            None => {
+                let b = is_bundled(repo, &returns)?;
+                known.insert(returns, b);
+                b
+            }
+        };
+        if bundled {
+            out.insert(name, takes);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether an instance of one of [`BUNDLED`] is stated for `ty`, under any of
+/// its names once reducible definitions are unfolded: `Equiv.Perm` is an
+/// `Equiv`, and its instance is `Equiv`'s.
+fn is_bundled(repo: &dyn DeclRepo, ty: &DeclName) -> Result<bool> {
+    let class = repo.reducible_class(ty)?;
+    let arg = match class.len() > 1 {
+        true => ArgHead::Reducible { written: ty.clone(), class },
+        false => ArgHead::Named(ty.clone()),
+    };
+    for like in BUNDLED {
+        let shape = Shape::new(Some(DeclName::new(*like)), vec![arg.clone()]);
+        let probe = Query { shape, elaborated_only: true, limit: 1, ..Query::new() };
+        if !repo.find(&probe)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The sources a query could possibly be answered from, when it says.

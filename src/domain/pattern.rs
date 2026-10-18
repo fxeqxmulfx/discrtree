@@ -11,6 +11,7 @@ use crate::domain::name::DeclName;
 use crate::domain::numeral::{self, Scientific};
 use crate::domain::query::{Power, Query, Spelling};
 use crate::domain::term::Term;
+use std::collections::BTreeMap;
 
 /// Notation to head symbol, with Lean's own binding strength and whether it
 /// associates to the left: the loosest notation on a side is its outermost
@@ -240,6 +241,10 @@ pub struct Parsed {
     /// were asked for. Empty when the pattern became a text search: nothing
     /// was dropped there, the whole of it is what is searched for.
     pub unknown: Vec<String>,
+    /// Applications read as a bundled map applied, each as it was written and
+    /// as it was read: `(fderiv _ _ _) 1` as `DFunLike.coe (fderiv _ _ _) 1`.
+    /// See [`coerced`].
+    pub coerced: Vec<(String, String)>,
 }
 
 /// Parse a pattern such as `Real.exp _ ≤ _` or `Finset.sum _ _ = _`.
@@ -254,13 +259,22 @@ pub struct Parsed {
 /// A field -- `l.length` -- is `.length`, in whichever namespace has one,
 /// applied to `_`.
 pub fn parse(pattern: &str) -> Parsed {
-    let mut p = read(pattern);
+    parse_with(pattern, &BTreeMap::new())
+}
+
+/// [`parse`], knowing of each constant in `maps` how many arguments it takes
+/// before what it returns is a bundled map: with `fderiv` taking three,
+/// `fderiv _ _ _ 1` applies that map to `1`, as `(fderiv _ _ _) 1` writes
+/// it. Only the index knows, and [`applications`] says what to ask it.
+pub fn parse_with(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
+    let mut p = read(pattern, maps);
     p.query.pattern_uses = p.query.uses.clone();
     p
 }
 
-fn read(pattern: &str) -> Parsed {
-    let (mut lexemes, lambdas) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
+fn read(pattern: &str, maps: &BTreeMap<DeclName, usize>) -> Parsed {
+    let (lexemes, lambdas) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
+    let (mut lexemes, coerced) = coerced(lexemes, maps);
     lexemes = group_prefixes(lexemes);
     // Repeated factors retain their identity before explicit binders become
     // wildcards: `∀ id : Nat, id * id` is still a square. Field receivers
@@ -382,6 +396,7 @@ fn read(pattern: &str) -> Parsed {
                     // lambda and all.
                     lambdas: Vec::new(),
                     unknown: Vec::new(),
+                    coerced: Vec::new(),
                 };
             }
         },
@@ -419,7 +434,7 @@ fn read(pattern: &str) -> Parsed {
         }
     }
     query.inside = inside(&all, &written, &query.uses);
-    Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown }
+    Parsed { query, operator, variables, lambdas, hypotheses: hypotheses.len(), unknown, coerced }
 }
 
 /// Lean's `!=` returns Bool, while a standalone ASCII inequality has also
@@ -711,6 +726,257 @@ fn lambda_depths(tokens: &[String]) -> Vec<usize> {
             }
         })
         .collect()
+}
+
+/// The constant a bundled map is applied through. `fderiv 𝕜 f x` is a
+/// continuous linear map, which is no function, and `(fderiv 𝕜 f x) 1` is
+/// `DFunLike.coe (fderiv 𝕜 f x) 1` once elaborated, as `⇑f` is `DFunLike.coe
+/// f` in 99.5% of the rows of Mathlib that print one.
+pub const COERCION: &str = "DFunLike.coe";
+
+/// Each bundled map applied made the application of [`COERCION`] it
+/// elaborates to, and each such application as it was written and as it was
+/// read.
+///
+/// Lean prints the coercion as `⇑`, and leaves it out where the map is
+/// applied, putting the map in parentheses: `(fderiv 𝕜 f x) 1`. It prints
+/// nothing else so -- `f a b` is never `(f a) b` -- and so a name applied in
+/// parentheses, and applied again, is read as a map applied. Notation in
+/// parentheses is not: `(f + g) x` adds two functions as often as two maps.
+/// Written without the parentheses, `fderiv _ _ _ 1` is the same
+/// application, and only the index can say that `fderiv` takes three
+/// arguments and returns a map: `maps` has how many each such constant takes.
+///
+/// Keyed by its head as it was written, the application was `fderiv` applied
+/// to four arguments, which no row has, and the search was `no match`.
+fn coerced(
+    lexemes: Vec<String>,
+    maps: &BTreeMap<DeclName, usize>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    if maps.is_empty() && !lexemes.iter().any(|t| t == "⇑" || t == "(") {
+        return (lexemes, Vec::new());
+    }
+    let mut tokens = lexemes.clone();
+    // Which lexeme each token is, `None` for one put in here.
+    let mut origin: Vec<Option<usize>> = (0..tokens.len()).map(Some).collect();
+    // Each application read anew: the first and last lexeme it was written
+    // with, and what it was read as.
+    let mut readings: Vec<(usize, usize, String)> = Vec::new();
+    let mut depth = depths(&tokens);
+    // From the right, so that what an application is applied to has been read
+    // when it is: `((fderiv _ _ _) v) w` applies two maps.
+    for i in (0..tokens.len()).rev() {
+        let span = if tokens[i] == "⇑" {
+            let Some(operand) = (i + 1..tokens.len()).find(|k| tokens[*k] != SPACE) else {
+                continue;
+            };
+            let Some(end) = term_end(&tokens, &depth, operand) else { continue };
+            // `⇑f x` applies the map, and `g ⇑f` hands it to `g` as one term.
+            let wrapped = !applies(&tokens, &depth, i);
+            if wrapped {
+                insert(&mut tokens, &mut origin, end, &[")"]);
+            }
+            tokens[i] = COERCION.to_string();
+            if operand == i + 1 {
+                insert(&mut tokens, &mut origin, i + 1, &[SPACE]);
+            }
+            if wrapped {
+                insert(&mut tokens, &mut origin, i, &["("]);
+            }
+            None
+        } else if tokens[i] == "(" && applies(&tokens, &depth, i) {
+            let Some(close) = (i + 1..tokens.len()).find(|k| depth[*k] <= depth[i]) else {
+                continue;
+            };
+            let Some(last) = applied(&tokens, &depth, close + 1).last().map(|r| r.end) else {
+                continue;
+            };
+            if tokens[close] != ")"
+                || term_end(&tokens, &depth, i) != Some(close + 1)
+                || !applied_name(&tokens, &depth, i + 1, close)
+            {
+                continue;
+            }
+            insert(&mut tokens, &mut origin, i, &[COERCION, SPACE]);
+            Some(i..last + 2)
+        } else if let Some(takes) =
+            applied_constant(&tokens, &depth, i).and_then(|c| maps.get(&c).copied())
+        {
+            let args = applied(&tokens, &depth, i + 1);
+            if args.len() <= takes {
+                continue;
+            }
+            let last = args[args.len() - 1].end;
+            if takes == 0 {
+                insert(&mut tokens, &mut origin, i, &[COERCION, SPACE]);
+                Some(i..last + 2)
+            } else {
+                insert(&mut tokens, &mut origin, args[takes - 1].end, &[")"]);
+                insert(&mut tokens, &mut origin, i, &[COERCION, SPACE, "("]);
+                Some(i..last + 4)
+            }
+        } else {
+            continue;
+        };
+        if let Some(span) = span {
+            let written: Vec<usize> = origin[span.clone()].iter().flatten().copied().collect();
+            if let (Some(first), Some(last)) = (written.first(), written.last()) {
+                readings.push((*first, *last, tokens[span].concat()));
+            }
+        }
+        depth = depths(&tokens);
+    }
+    // An application read inside another is said by the reading of that one.
+    let said = readings
+        .iter()
+        .filter(|(a, b, _)| !readings.iter().any(|(c, d, _)| (c, d) != (a, b) && c <= a && b <= d))
+        .rev()
+        .map(|(a, b, read)| (lexemes[*a..=*b].concat(), read.clone()))
+        .collect();
+    (tokens, said)
+}
+
+/// `new` put in at `at`, as tokens nobody wrote.
+fn insert(tokens: &mut Vec<String>, origin: &mut Vec<Option<usize>>, at: usize, new: &[&str]) {
+    tokens.splice(at..at, new.iter().map(|t| (*t).to_string()));
+    origin.splice(at..at, new.iter().map(|_| None));
+}
+
+/// Each constant a pattern applies in the place of a function, with the most
+/// terms it is applied to anywhere in it: what the index is asked about, to
+/// tell `fderiv _ _ _ 1`, which applies the map `fderiv` returns, from
+/// `Matrix.diagonal _ _ _`, which applies a function. See [`parse_with`].
+pub fn applications(pattern: &str) -> BTreeMap<DeclName, usize> {
+    let (lexemes, _) = strip_lambdas(expand_ranges(expand_arrays(lex(pattern))));
+    let (tokens, _) = coerced(lexemes, &BTreeMap::new());
+    let depth = depths(&tokens);
+    let mut out: BTreeMap<DeclName, usize> = BTreeMap::new();
+    for i in 0..tokens.len() {
+        let Some(c) = applied_constant(&tokens, &depth, i) else { continue };
+        let n = applied(&tokens, &depth, i + 1).len();
+        if n > 0 {
+            let most = out.entry(c).or_default();
+            *most = (*most).max(n);
+        }
+    }
+    out
+}
+
+/// Whether the term at `i` is in the place of a function: first in its group
+/// or after notation, and not an argument of a term before it. `⇑`, `↑` and
+/// `@` take what follows them as it is.
+fn applies(tokens: &[String], depth: &[usize], i: usize) -> bool {
+    let Some(j) = tokens[..i].iter().rposition(|t| t != SPACE) else { return true };
+    depth[j + 1] > depth[j]
+        || !(ends_term(&tokens[j]) || matches!(tokens[j].as_str(), "⇑" | "↑" | "@"))
+}
+
+/// The terms written one after another from `from`: what the term before it
+/// is applied to, where that is in the place of a function.
+fn applied(tokens: &[String], depth: &[usize], from: usize) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut at = from;
+    while let Some(start) = (at..tokens.len()).find(|k| tokens[*k] != SPACE)
+        && let Some(end) = term_end(tokens, depth, start)
+    {
+        out.push(start..end);
+        at = end;
+    }
+    out
+}
+
+/// Where the term written from `i` ends, one past its last token, if one
+/// starts there: a name, a `_`, a literal, a bracket and what it encloses, or
+/// what `⇑` or `↑` coerces, with what is written against it -- `x⁻¹`,
+/// `(l ++ m).length`, `l[i]`. The lexemes still have their spaces, which
+/// tell `l[i]` from `f [i]`.
+fn term_end(tokens: &[String], depth: &[usize], i: usize) -> Option<usize> {
+    let t = tokens[i].as_str();
+    // One past where the group opening at `at` closes.
+    let group = |at: usize| {
+        (at + 1..tokens.len()).find(|k| depth[*k] <= depth[at]).map_or(tokens.len(), |k| k + 1)
+    };
+    let closer = BRACKETS
+        .iter()
+        .find(|(o, ..)| *o == t)
+        .map(|(_, c, _)| *c)
+        .or_else(|| GROUPS.iter().find(|(o, _)| *o == t).map(|(_, c)| *c));
+    let mut end = match closer {
+        Some(close) => {
+            let opens = depth.get(i + 1).is_some_and(|d| *d > depth[i])
+                || tokens.get(i + 1).is_some_and(|next| closes(next, close));
+            if !opens {
+                return None;
+            }
+            group(i)
+        }
+        None if matches!(t, "⇑" | "↑") => {
+            let operand = (i + 1..tokens.len()).find(|k| tokens[*k] != SPACE)?;
+            term_end(tokens, depth, operand)?
+        }
+        None if t == "_"
+            || is_literal(t)
+            || (is_ident(t)
+                && !t.starts_with('.')
+                && !CONDITIONAL.contains(&t)
+                && !BINDERS.contains(&t)) =>
+        {
+            i + 1
+        }
+        None => return None,
+    };
+    loop {
+        match tokens.get(end).map(String::as_str) {
+            Some(p) if is_postfix(p) || (p.starts_with('.') && p.len() > 1) => end += 1,
+            Some("[") => end = group(end),
+            _ => return Some(end),
+        }
+    }
+}
+
+/// The constant at `i`, if it is one in the place of a function: a name that
+/// is no variable, field or keyword, with nothing written against it.
+fn applied_constant(tokens: &[String], depth: &[usize], i: usize) -> Option<DeclName> {
+    let t = tokens[i].as_str();
+    let named = is_ident(t)
+        && !t.starts_with('.')
+        && !is_field(t)
+        && !is_variable(t)
+        && !CONDITIONAL.contains(&t)
+        && !BINDERS.contains(&t)
+        && !SORTS.contains(&t)
+        && t != COERCION;
+    (named && applies(tokens, depth, i) && term_end(tokens, depth, i) == Some(i + 1))
+        .then(|| DeclName::new(t))
+}
+
+/// Whether the tokens from `from` up to `close` are a name applied and nothing
+/// else, or a field written on a term: `fderiv 𝕜 f x`, `e.symm`. Not `⇑f`
+/// once read, which is the map already: `(⇑f) x` applies it once.
+fn applied_name(tokens: &[String], depth: &[usize], from: usize, close: usize) -> bool {
+    let Some(head) = (from..close).find(|k| tokens[*k] != SPACE) else { return false };
+    let name = tokens[head].as_str();
+    if !is_ident(name)
+        || name.starts_with('.')
+        || [CONDITIONAL, BINDERS, SORTS].iter().any(|words| words.contains(&name))
+    {
+        return false;
+    }
+    let Some(end) = term_end(tokens, depth, head) else { return false };
+    let args = applied(tokens, depth, end);
+    let last = (from..close).rfind(|k| tokens[*k] != SPACE).unwrap_or(head);
+    args.last().map_or(end, |r| r.end) == last + 1
+        && match args.len() {
+            0 => end == head + 1 && is_field(name),
+            1 => name != COERCION,
+            _ => true,
+        }
+}
+
+/// Whether a word is a field written on a term, `e.symm` or `_.symm`, rather
+/// than a name in a namespace. See [`is_receiver`].
+fn is_field(t: &str) -> bool {
+    t.split_once('.').is_some_and(|(word, _)| word == "_" || is_receiver(word))
 }
 
 /// The pattern cut into names and symbols, with a [`SPACE`] wherever it had
@@ -2778,7 +3044,6 @@ mod tests {
         let p = parse("l.Sublist (l ++ m)");
         assert_eq!(p.query.shape.concl, Some(DeclName::new(".Sublist")));
         assert_eq!(p.query.shape.args, vec![arg("_"), arg("HAppend.hAppend")]);
-        assert_eq!(parse("(Nat.Coprime a) b").query.shape.args.len(), 2);
         assert_eq!(parse("Nat.Coprime (a) b").query.shape.args.len(), 2);
         // A lambda is reported as written, and what is in it is not read.
         let p = parse("List.map (fun i => l[i].length) _ = _");
@@ -2926,5 +3191,107 @@ mod tests {
         let p = parse("Fin 3 → MeasurableSpace (EuclideanSpace ℝ (Fin 3))");
         assert_eq!(p.query.uses, vec![DeclName::new("Fin"), DeclName::new("Real")]);
         assert_eq!(p.query.inside, vec![vec![DeclName::new("Real")]]);
+    }
+
+    fn reading(written: &str, read: &str) -> (String, String) {
+        (written.to_string(), read.to_string())
+    }
+
+    /// The report: `fderiv_apply_one_eq_deriv` is `(fderiv 𝕜 f x) 1 = deriv f
+    /// x`, and as `dt` prints it, with the `⇑` Lean leaves out, or without
+    /// the parentheses, the pattern was `fderiv` applied to four arguments,
+    /// which no row is. A bundled map is applied through `DFunLike.coe`.
+    #[test]
+    fn a_bundled_map_applied_is_applied_through_its_coercion() {
+        let elaborated = parse("DFunLike.coe (fderiv _ _ _) 1 = deriv _ _");
+        assert_eq!(elaborated.query.shape.args, vec![arg(COERCION), arg("deriv")]);
+        assert!(elaborated.coerced.is_empty(), "{:?}", elaborated.coerced);
+        for pattern in ["(fderiv _ _ _) 1 = deriv _ _", "⇑(fderiv _ _ _) 1 = deriv _ _"] {
+            assert_eq!(parse(pattern).query, elaborated.query, "{pattern}");
+        }
+        assert_eq!(
+            parse("(fderiv _ _ _) 1 = deriv _ _").coerced,
+            [reading("(fderiv _ _ _) 1", "DFunLike.coe (fderiv _ _ _) 1")]
+        );
+        // `⇑` is the coercion as written, and says nothing new.
+        assert!(parse("⇑(fderiv _ _ _) 1 = deriv _ _").coerced.is_empty());
+        // Without the parentheses, the index says where the map ends.
+        let maps = BTreeMap::from([(DeclName::new("fderiv"), 3)]);
+        let p = parse_with("fderiv _ _ _ 1 = deriv _ _", &maps);
+        assert_eq!(p.query, elaborated.query);
+        assert_eq!(p.coerced, [reading("fderiv _ _ _ 1", "DFunLike.coe (fderiv _ _ _) 1")]);
+        assert_eq!(parse("fderiv _ _ _ 1 = deriv _ _").query.shape.args[0], arg("fderiv"));
+        // A map that takes nothing is applied as it is.
+        let maps = BTreeMap::from([(DeclName::new("MeasureTheory.volume"), 0)]);
+        let p = parse_with("MeasureTheory.volume s = _", &maps);
+        assert_eq!(p.query, parse("DFunLike.coe MeasureTheory.volume s = _").query);
+        // One coercion is applied once, and a map a map returns is applied
+        // through a coercion of its own.
+        assert_eq!(parse("(⇑f) x = _").query, parse("DFunLike.coe f x = _").query);
+        let p = parse("((fderiv _ _ _) v) w = _");
+        assert_eq!(p.query, parse("DFunLike.coe (DFunLike.coe (fderiv _ _ _) v) w = _").query);
+        assert_eq!(
+            p.coerced,
+            [reading("((fderiv _ _ _) v) w", "DFunLike.coe (DFunLike.coe (fderiv _ _ _) v) w")]
+        );
+        assert_eq!(parse("(Equiv.swap a b) a = b").query.shape.args[0], arg(COERCION));
+        assert_eq!(parse("(e.symm) x = _").query.shape.args[0], arg(COERCION));
+        // `⇑f` handed to a function is one argument of it.
+        let p = parse("Continuous ⇑f");
+        assert_eq!(p.query.shape.args, vec![arg(COERCION)]);
+        assert!(p.query.uses.is_empty(), "{:?}", p.query.uses);
+    }
+
+    /// Lean prints parentheses round a function only to apply a coercion,
+    /// and notation is a function as often as a map: `(f + g) x` is
+    /// `Pi.add_apply` and `ContinuousLinearMap.add_apply` both.
+    #[test]
+    fn what_is_no_map_applied_is_read_as_it_is_written() {
+        for pattern in [
+            "Matrix.diagonal _ _ _ = _",
+            "(f + g) x = _",
+            "(f ∘ g) x = _",
+            "l.Sublist l'",
+            "g (f a) b = _",
+            "(Real.exp x) ≤ y",
+            "(f) x = _",
+            "Filter.Tendsto (fun x => (f x) y) _ _",
+            "List.sum #[a, b].toList = _",
+        ] {
+            let p = parse(pattern);
+            assert!(p.coerced.is_empty(), "{pattern}: {:?}", p.coerced);
+            assert!(!p.query.shape.heads().chain(&p.query.uses).any(|n| n.as_str() == COERCION));
+        }
+        // A constant the index has not called a map is a function, however
+        // much it is applied to.
+        let maps = BTreeMap::from([(DeclName::new("fderiv"), 3)]);
+        assert_eq!(
+            parse_with("Matrix.diagonal _ _ _ = _", &maps),
+            parse("Matrix.diagonal _ _ _ = _")
+        );
+        assert!(parse_with("fderiv _ _ _ = _", &maps).coerced.is_empty());
+        assert!(parse_with("@fderiv _ _ _ _ = _", &maps).coerced.is_empty());
+    }
+
+    /// What the index is asked about: each constant in the place of a
+    /// function, and the most it is applied to.
+    #[test]
+    fn a_pattern_applies_each_constant_to_the_most_it_is_written_with() {
+        let applied = |pattern: &str| -> Vec<(String, usize)> {
+            applications(pattern).into_iter().map(|(n, k)| (n.to_string(), k)).collect()
+        };
+        assert_eq!(
+            applied("fderiv _ _ _ 1 = deriv _ _"),
+            [("deriv".to_string(), 2), ("fderiv".to_string(), 4)]
+        );
+        // In parentheses it is the map, and what applies it is the coercion.
+        assert_eq!(applied("(fderiv _ _ _) 1 = _"), [("fderiv".to_string(), 3)]);
+        assert_eq!(applied("fderiv _ _ _ = fderiv _ _ _ v"), [("fderiv".to_string(), 4)]);
+        // An argument is not applied, nor a field, a variable or a lambda.
+        assert_eq!(
+            applied("Filter.Tendsto (fun x => fderiv _ _ x 1) l (nhds e.symm)"),
+            [("Filter.Tendsto".to_string(), 3), ("nhds".to_string(), 1)]
+        );
+        assert!(applied("@fderiv _ _ _ _ _ _ _ = f x").is_empty());
     }
 }

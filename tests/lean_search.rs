@@ -1,6 +1,6 @@
 mod support;
 
-use discrtree::application::find::Find;
+use discrtree::application::find::{self, Find};
 use discrtree::application::index;
 use discrtree::application::ports::{DeclRepo, DeclSink, NoBuild};
 use discrtree::domain::decl::{Decl, DeclKind};
@@ -895,6 +895,109 @@ root = "SearchFixture"
     let output = run(&["find", "--name", "succ_add", "--limit", &usize::MAX.to_string()]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("SearchFixture.succ_add"));
+}
+
+/// Rows of Mathlib at d13f23b as dt 0.65.0 indexed them (Lean 4.34.1,
+/// lean/dump.lean format 4), written back as dump rows: bundled maps, the
+/// instances that make them functions, functions applied to more than they
+/// are written with, and statements of each applied.
+fn coe_fixture() -> Vec<Decl> {
+    include_str!("fixtures/coe-search.jsonl")
+        .lines()
+        .map(|line| Decl::from(serde_json::from_str::<Row>(line).unwrap()))
+        .collect()
+}
+
+/// The report: `fderiv_apply_one_eq_deriv` is `(fderiv 𝕜 f x) 1 = deriv f x`
+/// as Lean prints it, and was found by none of the ways it is written. Lean
+/// applies a bundled map through `DFunLike.coe`; which constants return one
+/// is the index's to say.
+#[test]
+fn an_applied_bundled_map_is_found_as_it_is_printed_in_every_repository() {
+    let rows = coe_fixture();
+    let fake = FakeRepo { decls: rows.clone() };
+    let jsonl = jsonl::JsonlRepo::from_decls(rows.clone());
+    let db = database(&rows);
+    for repo in [&fake as &dyn DeclRepo, &jsonl, &db] {
+        let maps = |text: &str| -> Vec<(String, usize)> {
+            let maps = find::bundled_maps(repo, text).unwrap();
+            maps.into_iter().map(|(name, takes)| (name.to_string(), takes)).collect()
+        };
+        let found = |text: &str| {
+            let maps = find::bundled_maps(repo, text).unwrap();
+            let q = Query { limit: 100, ..pattern::parse_with(text, &maps).query };
+            let hits = Find { repo, build: &NoBuild }.run(&q).unwrap();
+            hits.rows.iter().map(|d| d.name.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(maps("fderiv _ _ _ 1 = deriv _ _"), [("fderiv".to_string(), 3)]);
+        for text in [
+            "(fderiv _ _ _) 1 = deriv _ _",
+            "fderiv _ _ _ 1 = deriv _ _",
+            "⇑(fderiv _ _ _) 1 = deriv _ _",
+            "DFunLike.coe (fderiv _ _ _) 1 = deriv _ _",
+        ] {
+            let names = found(text);
+            assert!(names.contains(&"fderiv_apply_one_eq_deriv".into()), "{text}: {names:?}");
+        }
+        // A permutation is an equivalence, and an equivalence is `EquivLike`.
+        assert_eq!(maps("Equiv.swap a b a = b"), [("Equiv.swap".to_string(), 2)]);
+        for text in ["Equiv.swap a b a = b", "(Equiv.swap _ _) _ = _"] {
+            let names = found(text);
+            assert!(names.contains(&"Equiv.swap_apply_left".into()), "{text}: {names:?}");
+        }
+        // A matrix is a function, applied to its entries directly.
+        assert!(maps("Matrix.diagonal d i j = _").is_empty());
+        let names = found("Matrix.diagonal d i j = _");
+        assert!(names.contains(&"Matrix.diagonal_apply".into()), "{names:?}");
+        // Notation applied is either, as it was, until `⇑` says which.
+        let names = found("(f + g) x = f x + g x");
+        assert!(names.contains(&"Pi.add_apply".into()), "{names:?}");
+        assert!(names.contains(&"ContinuousLinearMap.add_apply".into()), "{names:?}");
+        let names = found("⇑(f + g) x = ⇑f x + ⇑g x");
+        assert!(names.contains(&"ContinuousLinearMap.add_apply".into()), "{names:?}");
+        assert!(!names.contains(&"Pi.add_apply".into()), "{names:?}");
+    }
+}
+
+#[test]
+fn the_cli_reads_an_applied_bundled_map_through_its_coercion() {
+    let dir = TempDir::new("coe-cli");
+    dir.write("raw/mathlib.jsonl", include_str!("fixtures/coe-search.jsonl"));
+    dir.write(
+        "discrtree.toml",
+        r#"
+[project]
+namespace = "Coe"
+src = "."
+imports = "Coe.lean"
+vendor = "Vendor"
+[index]
+db = "index.db"
+raw = "raw"
+[[source]]
+name = "mathlib"
+kind = "local"
+path = "."
+root = "Mathlib"
+"#,
+    );
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_dt")).args(args).current_dir(dir.path()).output().unwrap()
+    };
+    let output = run(&["index"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for (pattern, read) in [
+        ("(fderiv _ _ _) 1 = deriv _ _", "`(fderiv _ _ _) 1` as `DFunLike.coe (fderiv _ _ _) 1`"),
+        ("fderiv _ _ _ 1 = deriv _ _", "`fderiv _ _ _ 1` as `DFunLike.coe (fderiv _ _ _) 1`"),
+        ("⇑(fderiv _ _ _) 1 = deriv _ _", "read as conclusion Eq, 2 argument(s)"),
+    ] {
+        let output = run(&["--verbose", "find", pattern]);
+        let (out, err) =
+            (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{pattern}: {err}");
+        assert!(out.contains("fderiv_apply_one_eq_deriv"), "{pattern}: {out}");
+        assert!(err.contains(read), "{pattern}: {err}");
+    }
 }
 
 #[test]

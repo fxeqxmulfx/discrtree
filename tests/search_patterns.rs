@@ -233,9 +233,16 @@ fn iff_contains_unparenthesized_implications() {
 
 #[test]
 fn coercions_do_not_inherit_the_heads_of_their_operands() {
-    for text in ["↑0 = 0", "↑x.toNat = 0", "↑(Nat.succ _) = 0", "⇑f = 0"] {
+    for text in ["↑0 = 0", "↑x.toNat = 0", "↑(Nat.succ _) = 0"] {
         let parsed = pattern::parse(text);
         assert_eq!(parsed.query.shape.args[0], ArgHead::Any, "{text}");
+        assert!(parsed.unknown.is_empty(), "{text}");
+    }
+    // `⇑` is one coercion, a bundled map's to a function, and is headed by
+    // the constant it elaborates to whatever it coerces.
+    for text in ["⇑f = 0", "⇑(Nat.succ _) = 0"] {
+        let parsed = pattern::parse(text);
+        assert_eq!(parsed.query.shape.args[0], ArgHead::parse("DFunLike.coe"), "{text}");
         assert!(parsed.unknown.is_empty(), "{text}");
     }
     assert!(pattern::parse("↑(Nat.succ _) = 0").query.uses.contains(&"Nat.succ".into()));

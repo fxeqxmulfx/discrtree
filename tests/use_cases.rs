@@ -1541,10 +1541,16 @@ fn the_help_says_the_things_that_matter() {
     // The pattern language exists nowhere else: without an example in the help
     // it can only be discovered by guessing, one failed invocation at a time.
     // So is the `*` of `--name`, which a name typed from memory has to have
-    // and a regular expression spells `.*`.
-    for expected in
-        ["Real.exp _ ≤ _", "--elaborated", "`dt status` lists them", "'mem_*_finite'", "`.*`"]
-    {
+    // and a regular expression spells `.*`, and a map applied as Lean prints
+    // it, which elaborates to a head nothing prints.
+    for expected in [
+        "Real.exp _ ≤ _",
+        "--elaborated",
+        "`dt status` lists them",
+        "'mem_*_finite'",
+        "`.*`",
+        "`(fderiv _ _ _) 1`",
+    ] {
         assert!(find.contains(expected), "`dt find --help` must mention {expected}:\n{find}");
     }
 }

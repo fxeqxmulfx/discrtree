@@ -305,6 +305,31 @@ applied patterns fix the first arguments of their head. Array literals `#[…]`,
 quoted strings and characters, and decimal scientific literals are also read
 as Lean terms; operators inside a quoted literal do not affect the search.
 
+A map applied is read as Lean elaborates it. `fderiv 𝕜 f x` is a continuous
+linear map rather than a function, and Lean applies it through a coercion that
+it does not print: `(fderiv 𝕜 f x) 1` is `DFunLike.coe (fderiv 𝕜 f x) 1`, and
+the index has the statement under `DFunLike.coe`. In a pattern, an application
+in parentheses and applied again is the coercion, as `⇑` is. So are the
+arguments past the ones a constant takes, when the index has the constant
+returning a `FunLike` type: `fderiv` takes three and returns `E →L[𝕜] F`. All
+three spellings find the lemma, and `-v` says how the pattern was read:
+
+```
+$ dt -v find 'fderiv _ _ _ 1 = deriv _ _'
+dt: `fderiv _ _ _ 1 = deriv _ _` read as conclusion Eq, 2 argument(s), operator `=`,
+    `fderiv _ _ _ 1` as `DFunLike.coe (fderiv _ _ _) 1`, --uses fderiv
+fderiv_apply_one_eq_deriv  theorem  Mathlib.Analysis.Calculus.Deriv.Basic
+  ∀ …, (fderiv 𝕜 f x) 1 = deriv f x
+```
+
+A constant that returns a function is applied directly, as Lean applies it:
+`Matrix.diagonal d i j` is one application, because a matrix is a function.
+Notation applied may be either. `(f + g) x` matches `Pi.add_apply`, which adds
+functions, and `ContinuousLinearMap.add_apply`, which adds maps; `⇑(f + g) x`
+matches only the second. Parentheses are the one mark of the coercion that Lean
+prints, so a pattern that writes them where Lean would not, as in
+`(Nat.Coprime a) b`, asks for a coercion all the same.
+
 Numeric literals constrain their value at the position where they are written:
 `dt find 'ENNReal.ofReal _ = 1'` finds `ENNReal.ofReal_one`, and excludes
 `ENNReal.ofReal_zero`. This also applies to nested arguments and exponents.
