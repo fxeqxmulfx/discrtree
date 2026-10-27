@@ -2,6 +2,37 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A key `dt` does not know is accepted without a word
+
+Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer: a
+`workspace = "../sub"` line, which 0.68.0 did not know, changed nothing and
+said nothing (the entry below). The same in 0.69.0, which knows the key, with
+it misspelled, in the toy `main` of the entry below:
+
+    [[source]]
+    name      = "sub"
+    kind      = "local"
+    path      = "../sub"
+    workspce  = "../sub"
+    root      = "Sub"
+
+    $ dt --config discrtree-typo.toml dump sub
+    …/dtws/main/.discrtree-ws/jsonl/scripts/dump_sub.lean:20:0: error: unknown module prefix 'Sub'
+
+    No directory 'Sub' or file 'Sub.olean' in the search path entries:
+    …/dtws/main/.lake/build/lib/lean
+    /home/misha/.elan/toolchains/leanprover--lean4---v4.35.0/lib/lean
+    /home/misha/.elan/toolchains/leanprover--lean4---v4.35.0/lib/lean
+    dt: lake env lean failed for source `sub` (exit 1); the script is at …/dtws/main/.discrtree-ws/jsonl/scripts/dump_sub.lean
+
+Every table of `discrtree.toml` takes any key, and one that is not a field is
+dropped. The failure then shows up wherever the missing setting matters, here
+a minute later and as a Lean error about a module prefix, with nothing pointing
+back at the line.
+
+The right output: `dt` refuses the file and names the key, its line, and the
+keys that table takes.
+
 ## A library built in a Lake workspace of its own cannot be dumped
 
 Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer, indexing
