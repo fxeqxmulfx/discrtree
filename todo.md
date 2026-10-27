@@ -2,6 +2,61 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A text source whose Lean package is a subdirectory of its repository is misnamed or not fetched
+
+Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer, trying
+openai/math as a text source first. Its Lean package is the `lean/` directory of
+the repository (`lean/lakefile.lean`, `lean/OAI/…`), beside `preprints/` and a
+README. Toys with that layout, each command with `--config` of its file:
+
+With `path` at the checkout, every module is named from the checkout's top:
+
+    [[source]]
+    name = "probe2"
+    kind = "git"
+    path = "corpus2"            # corpus2/README.md, corpus2/lean/OAI/…
+
+    $ dt scan probe2
+    probe2: 103 declarations scanned [text]
+    $ dt find --name WidthAtMost
+    OAI.Algorithms.SubexponentialSAT.SAT.WidthAtMost  [text]  def  lean.OAI.Algorithms.SubexponentialSAT.SAT
+
+With `path` at the package, `dt fetch` clones the whole repository there. Into
+the subdirectory of a checkout it cannot; into a fresh directory it puts the
+package one level further down:
+
+    [[source]]
+    name = "existing"
+    kind = "git"
+    url  = "file://…/upstream"   # README.md, lean/OAI/…
+    rev  = "main"
+    path = "clone/lean"         # clone/ is a checkout of upstream
+
+    [[source]]
+    name = "fresh"              # the same, with path = "fresh/lean"
+
+    $ dt fetch existing -v
+    dt: git clone --filter=blob:none --no-checkout --branch main file://…/upstream …/clone/lean
+    dt: git clone --filter=blob:none --no-checkout --branch main file://…/upstream …/clone/lean failed: fatal: destination path '…/clone/lean' already exists and is not an empty directory.
+    $ dt fetch fresh -v
+    fresh: …/fresh/lean at c76ed824b38ab6755ea572f1b7315d4dcb3af3f0
+    $ find fresh -maxdepth 3 -not -path '*/.git/*'
+    fresh
+    fresh/lean
+    fresh/lean/.git
+    fresh/lean/lean
+    fresh/lean/lean/OAI
+    fresh/lean/README.md
+
+No module is called `lean.OAI.Algorithms.SubexponentialSAT.SAT`, so the row's
+module is no `import` line. A compiled source has no such problem, since its
+module names come from Lean, and since 0.69.0 a library with a lakefile of its
+own can be one; the text route still has none.
+
+The right output: a git source can say where its package sits inside the
+checkout, so that `dt fetch` clones and updates the checkout and the scan names
+modules from the package, `OAI.Algorithms.SubexponentialSAT.SAT`.
+
 ## A key `dt` does not know is accepted without a word
 
 Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer: a
