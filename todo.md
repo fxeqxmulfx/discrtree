@@ -2,6 +2,39 @@
 
 Shortcomings found while using `dt` on real work. Newest first.
 
+## A library built in a Lake workspace of its own cannot be dumped
+
+Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer, indexing
+openai/math compiled. Its Lean library is a Lake workspace of its own, pinned to
+Lean v4.34.1 and to its own Mathlib, and the project is on v4.35.0. The same
+with two toy workspaces, `sub` on v4.34.1 and `main` on v4.35.0, from `main`,
+whose config has the `sub` source:
+
+    [[source]]
+    name      = "sub"
+    kind      = "local"
+    path      = "../sub"
+    workspace = "../sub"
+    root      = "Sub"
+
+    $ dt --config discrtree-ws.toml dump sub
+    ./.discrtree-ws/jsonl/scripts/dump_sub.lean:20:0: error: unknown module prefix 'Sub'
+
+    No directory 'Sub' or file 'Sub.olean' in the search path entries:
+    …/dtws/main/.lake/build/lib/lean
+    /home/misha/.elan/toolchains/leanprover--lean4---v4.35.0/lib/lean
+    /home/misha/.elan/toolchains/leanprover--lean4---v4.35.0/lib/lean
+    dt: lake env lean failed for source `sub` (exit 1); the script is at ./.discrtree-ws/jsonl/scripts/dump_sub.lean
+
+Every dump runs `lake env lean` in the project root, whose toolchain and search
+path cannot load an `.olean` another toolchain wrote, and every local source is
+stamped by the project's build. The `workspace` line is not a key `dt` knows,
+and was accepted without a word. The only route was a second `discrtree.toml`
+inside the other workspace, writing into the same index.
+
+The right output: a source names the workspace that builds it, its dump runs
+`lake env lean` there, and it is stale when that workspace's build moves.
+
 ## An applied continuous linear map, written as `dt` prints it, matches nothing
 
 Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking
