@@ -33,6 +33,17 @@ back at the line.
 The right output: `dt` refuses the file and names the key, its line, and the
 keys that table takes.
 
+Fixed in 0.70.0. Every table refuses a key it does not take, before anything
+runs. The three `discrtree.toml` files on this machine take none. The same
+config:
+
+    $ dt --config discrtree-typo.toml dump sub
+    dt: config: TOML parse error at line 23, column 1
+       |
+    23 | workspce  = "../sub"
+       | ^^^^^^^^
+    unknown field `workspce`, expected one of `name`, `kind`, `path`, `root`, `modules`, `url`, `rev`, `sparse`, `exclude`, `license`, `attribution`, `elaborated`, `importable`, `workspace`
+
 ## A library built in a Lake workspace of its own cannot be dumped
 
 Found 2026-10-27, dt 0.68.0, in /home/misha/lean_projects/transformer, indexing

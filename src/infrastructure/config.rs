@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 
 pub const FILE_NAME: &str = "discrtree.toml";
 
+/// Every table refuses a key it does not take. A misspelled one was dropped,
+/// and the setting it meant was then missed where it mattered: a `workspce`
+/// line surfaced a minute later as a Lean error about a module prefix.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub project: Project,
     #[serde(default)]
@@ -26,6 +30,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Project {
     #[serde(default = "dot")]
     pub root: PathBuf,
@@ -40,6 +45,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Index {
     #[serde(default = "default_db")]
     pub db: PathBuf,
@@ -81,6 +87,7 @@ impl From<Kind> for SourceKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Source {
     pub name: String,
     pub kind: Kind,
@@ -607,6 +614,26 @@ license = "Apache-2.0"
             );
             let err = Config::parse(&text, Path::new("/p")).unwrap_err().to_string();
             assert!(err.contains("only a compiled `local`"), "{kind}: got {err}");
+        }
+    }
+
+    /// A key no table takes is refused by name, with the keys that table does
+    /// take, rather than dropped: a misspelled `workspace` dumped the source in
+    /// the project and failed there, a minute later, as a Lean error.
+    #[test]
+    fn a_key_no_table_takes_is_refused_by_name() {
+        let typo = SAMPLE.to_string() + &ELSEWHERE.replace("workspace", "workspce");
+        let err = Config::parse(&typo, Path::new("/p")).unwrap_err().to_string();
+        assert!(err.contains("unknown field `workspce`"), "got: {err}");
+        assert!(err.contains("`workspace`"), "the keys it takes are named: {err}");
+        let elsewhere = [
+            format!("bogus = 1\n{SAMPLE}"),
+            SAMPLE.replacen("[project]\n", "[project]\nbogus = 1\n", 1),
+            format!("{SAMPLE}\n[index]\nbogus = 1\n"),
+        ];
+        for text in elsewhere {
+            let err = Config::parse(&text, Path::new("/p")).unwrap_err().to_string();
+            assert!(err.contains("unknown field `bogus`"), "got: {err}");
         }
     }
 }

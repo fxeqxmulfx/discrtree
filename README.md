@@ -774,6 +774,10 @@ dt index
 or in the `workspace` a source names, because only the elaborator can read
 `.olean` files. Everything after that is one Rust binary.
 
+A key `discrtree.toml` does not take is an error that names it, its line and
+the keys its table takes: dropped, a misspelled `workspace` surfaced a minute
+later as a Lean error about a module prefix.
+
 ## Tests
 
 `cargo test --offline` checks search against a committed dump of the small Lean
