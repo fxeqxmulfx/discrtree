@@ -115,6 +115,13 @@ pub struct Source {
     pub elaborated: Option<bool>,
     #[serde(default)]
     pub importable: Option<bool>,
+    /// The Lake workspace a `local` source is built in, when it is not the
+    /// project's own: a checkout with a `lakefile` and a `lean-toolchain` of its
+    /// own, such as a library pinned to another Lean or another Mathlib. The
+    /// project's `lake env lean` cannot load that build, so the dump runs
+    /// there, and the source is current exactly while that build is.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
 }
 
 fn dot() -> PathBuf {
@@ -135,8 +142,12 @@ impl Source {
         self.elaborated.unwrap_or(SourceKind::from(self.kind).default_elaborated())
     }
 
+    /// Not by default for a source built in a workspace of its own: an
+    /// `import` line of this project resolves against this project's build,
+    /// which does not hold that one.
     pub fn importable(&self) -> bool {
-        self.importable.unwrap_or(SourceKind::from(self.kind).default_importable())
+        self.importable
+            .unwrap_or(SourceKind::from(self.kind).default_importable() && self.workspace.is_none())
     }
 
     /// The module a dump of this source imports.
@@ -216,12 +227,30 @@ impl Config {
             if s.kind == Kind::Git && s.url.is_none() && s.path.is_none() {
                 bail!("{FILE_NAME}: source `{}` needs a `url` or a `path`", s.name);
             }
+            if s.workspace.is_some() && !(s.kind == Kind::Local && s.elaborated()) {
+                bail!(
+                    "{FILE_NAME}: source `{}` names a `workspace`, which only a compiled `local` \
+                     source has: the package that workspace builds, stamped by its build. A \
+                     `lake` or `core` source is read through the project's own manifest and \
+                     toolchain, and a text source is never built",
+                    s.name
+                );
+            }
         }
         Ok(())
     }
 
     pub fn root(&self) -> PathBuf {
         absolute(&self.base, &self.project.root)
+    }
+
+    /// Where `lake env lean` runs to dump `s`: the workspace it is built in,
+    /// which is the project's own unless it names another.
+    pub fn lake_root(&self, s: &Source) -> PathBuf {
+        match &s.workspace {
+            Some(w) => self.resolve(w),
+            None => self.root(),
+        }
     }
 
     pub fn resolve(&self, p: &Path) -> PathBuf {
@@ -536,5 +565,48 @@ license = "Apache-2.0"
         let core = c.source("core").unwrap();
         assert_eq!(core.root_module().as_deref(), Some("Init"));
         assert_eq!(core.module_prefixes(), ["Init"]);
+    }
+
+    const ELSEWHERE: &str = "\n[[source]]\nname = \"oai\"\nkind = \"local\"\n\
+                             path = \"third_party/m/lean\"\nworkspace = \"third_party/m/lean\"\n\
+                             root = \"OAI\"\n";
+
+    /// A library pinned to another Lean is built in a workspace of its own
+    /// and dumped there; every other source is still dumped in the project.
+    #[test]
+    fn a_local_source_built_in_its_own_workspace_is_dumped_there() {
+        let c = Config::parse(&(SAMPLE.to_string() + ELSEWHERE), Path::new("/p")).unwrap();
+        let oai = c.source("oai").unwrap();
+        assert_eq!(c.lake_root(oai), Path::new("/p/./third_party/m/lean"));
+        assert_eq!(c.lake_root(c.source("project").unwrap()), Path::new("/p/."));
+        assert_eq!(c.lake_root(c.source("mathlib").unwrap()), Path::new("/p/."));
+        // Compiled, and not importable: the project's build does not hold it,
+        // so an `import` line naming it would not resolve.
+        assert!(oai.elaborated() && !oai.importable());
+        assert!(c.source("project").unwrap().importable());
+        let text = SAMPLE.to_string() + ELSEWHERE + "importable = true\n";
+        let c = Config::parse(&text, Path::new("/p")).unwrap();
+        assert!(c.source("oai").unwrap().importable(), "an override still wins");
+    }
+
+    /// Only a compiled `local` source is stamped by a build, so only it can be
+    /// stamped by another workspace's. A `lake` or `core` source is pinned by
+    /// the project's own manifest or toolchain, which would then be read for
+    /// a package that neither describes.
+    #[test]
+    fn a_workspace_on_any_other_source_is_rejected() {
+        let others = [
+            ("lake", "root = \"M\"\n"),
+            ("core", ""),
+            ("git", "url = \"x\"\n"),
+            ("local", "elaborated = false\n"),
+        ];
+        for (kind, rest) in others {
+            let text = format!(
+                "{SAMPLE}\n[[source]]\nname = \"w\"\nkind = \"{kind}\"\n{rest}workspace = \"w\"\n"
+            );
+            let err = Config::parse(&text, Path::new("/p")).unwrap_err().to_string();
+            assert!(err.contains("only a compiled `local`"), "{kind}: got {err}");
+        }
     }
 }

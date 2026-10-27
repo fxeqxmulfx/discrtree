@@ -35,6 +35,38 @@ inside the other workspace, writing into the same index.
 The right output: a source names the workspace that builds it, its dump runs
 `lake env lean` there, and it is stale when that workspace's build moves.
 
+Fixed in 0.69.0. A `local` source may name a `workspace`, resolved against the
+project root. Its dump runs there, and it is stamped by that workspace's
+`.lake/build/lib` rather than the project's, so a rebuild of either moves its
+own sources only. A file saved since its build is reported with `lake build` in
+that workspace. It is not importable unless it says so, a search that misses
+does not read it again, and `dt dup` compares a file with the project's own
+source, not with it. A `workspace` on any other source is an error: a `lake` or
+`core` source is pinned by the project's manifest or toolchain. The script and
+the output path handed to `lake` are absolute, since `lake` now runs somewhere
+other than `dt`: with a relative `--config` the dump failed with `no such file
+or directory` for its own script. The same toy, from `main`:
+
+    $ dt --config discrtree-ws.toml dump sub
+    discrtree: 3 declarations on 3 threads
+    discrtree: 3 declarations written to …/dtws/main/.discrtree-ws/jsonl/sub.jsonl
+    sub: dumped to ./.discrtree-ws/jsonl/sub.jsonl
+    $ dt --config discrtree-ws.toml find 'double _ = 2 * _'
+    dt: `double` read as `_` — no constant in the index is called that
+    Sub.double_eq_two_mul  theorem  Sub.A
+      ∀ (n : Nat), Sub.double n = 2 * n
+    1 result(s)
+
+After a file of `sub` is saved and before it is built, and after `lake build` in
+`sub`:
+
+    $ dt --config discrtree-ws.toml refresh
+    dt: `sub` is behind its source files: 1 newer than the build and declaring names the index does not hold; rows are missing — `lake build` in ./../sub, then `dt refresh sub`
+    nothing to read again: every build is the one it was indexed from
+    $ dt --config discrtree-ws.toml status
+    main           local   true         true                    1  just now yes     build 427c616
+    sub            local   true         false                   3  just now no      build c083d90 (now 021525e, stale)
+
 ## An applied continuous linear map, written as `dt` prints it, matches nothing
 
 Found 2026-10-18, dt 0.65.0, in /home/misha/lean_projects/transformer, looking

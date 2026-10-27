@@ -55,6 +55,7 @@ cosmetic:
 | --- | --- | --- | --- |
 | `lake` (Mathlib, a dependency) | yes | yes | shape search, exact dependencies |
 | `local` (your own `src/`) | yes | yes | shape search, exact dependencies |
+| `local` with a `workspace` (a library built elsewhere) | yes | no | shape search, exact dependencies |
 | `git` (a corpus fetched as text) | no | no | name, text, module and `--uses` search |
 
 An elaborated row came out of Lean: its type is the elaborated one, its
@@ -697,6 +698,37 @@ namespace root is `Int`, neither derives from the other, and a name is all
 proves about; namespaces the two libraries share heavily (`Function`, `Set`) are
 left out, because an explanation that fits every missing name explains nothing.
 
+## A library built in a workspace of its own
+
+Some corpora the project cannot build at all. A library pinned to another Lean,
+or to another Mathlib, has its own `lean-toolchain` and `lake-manifest.json`,
+and an `.olean` one toolchain wrote is unreadable to another: the project's
+`lake env lean` answers `unknown module prefix` for it. Such a library is
+built where it lives, and its source is a `local` one that says so:
+
+```toml
+[[source]]
+name      = "openai-math"
+kind      = "local"
+path      = "third_party/openai-math/lean"   # its .lean files
+workspace = "third_party/openai-math/lean"   # its lakefile
+root      = "OAI"
+```
+
+Its dump runs `lake env lean` in that workspace, with its toolchain and its
+packages, and its revision is that workspace's build: `dt status` calls it stale
+once that build moves, a file saved since is reported with `lake build` in that
+directory, and `dt refresh` dumps it there again. It is not importable unless
+it says so, since an `import` line resolves against the project's build, which
+does not hold it; `dt add` copies from it instead. A search that misses does
+not read it again on its own, as it does the project: it is rebuilt when
+somebody bumps it, and reading it takes minutes. Its rows mention the constants
+of the Mathlib it was built against, which need not be the project's.
+
+Only a compiled `local` source takes a `workspace`. A `lake` or `core` source
+is pinned by the project's own manifest or toolchain, which say nothing about
+a package of another workspace.
+
 ## The dump runs on every core
 
 Indexing Mathlib is a minute. Dumping it was twenty-five, on one core out of
@@ -739,8 +771,8 @@ dt index
 ```
 
 `dt dump` needs `elan` on `PATH` and runs `lake env lean` in the project root,
-because only the elaborator can read `.olean` files. Everything after that is
-one Rust binary.
+or in the `workspace` a source names, because only the elaborator can read
+`.olean` files. Everything after that is one Rust binary.
 
 ## Tests
 

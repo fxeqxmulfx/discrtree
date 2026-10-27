@@ -54,7 +54,11 @@ impl Elaborator for LakeElaborator {
         if let Some(parent) = spec.out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let script = self.work_dir.join(format!("dump_{}.lean", spec.source));
+        // Both paths go to a process that runs in `project_root`, which is
+        // not where `dt` runs when the source is built in a workspace of its
+        // own: there a relative path names a file that does not exist.
+        let script = std::path::absolute(self.work_dir.join(format!("dump_{}.lean", spec.source)))?;
+        let out = std::path::absolute(&spec.out)?;
         std::fs::write(&script, splice_imports(DUMP_LEAN, &spec.root)?)?;
 
         if self.verbose {
@@ -69,7 +73,7 @@ impl Elaborator for LakeElaborator {
             .arg("lean")
             .arg(&script)
             .current_dir(&self.project_root)
-            .env("DISCRTREE_OUT", &spec.out)
+            .env("DISCRTREE_OUT", &out)
             .env("DISCRTREE_SOURCE", spec.source.as_str())
             .env("DISCRTREE_MODULES", spec.modules.join(","))
             .env("DISCRTREE_DEPS", if spec.with_deps { "1" } else { "0" })

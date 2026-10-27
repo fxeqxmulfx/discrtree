@@ -60,12 +60,17 @@ impl OnDisk {
             .filter(|s| s.kind == Kind::Git)
             .map(|s| (SourceId::new(s.name.clone()), cfg.source_dir(s)))
             .collect();
-        // One build tree, however many local sources name it. `lake build`
-        // writes the whole project into it, so a local source is stale exactly
-        // when the project has been rebuilt since it was dumped — which is the
-        // same fact for all of them.
-        let lib = cfg.root().join(BUILD_LIB);
-        let builds = of_kind(Kind::Local).into_iter().map(|id| (id, lib.clone())).collect();
+        // One build tree per workspace, however many local sources name it.
+        // `lake build` writes the whole workspace into it, so a local source is
+        // stale exactly when its workspace has been rebuilt since it was dumped
+        // — which is the same fact for all of the project's own. A source
+        // built in a workspace of its own has that workspace's tree.
+        let builds = cfg
+            .sources
+            .iter()
+            .filter(|s| s.kind == Kind::Local)
+            .map(|s| (SourceId::new(s.name.clone()), cfg.lake_root(s).join(BUILD_LIB)))
+            .collect();
         let toolchain = cfg.toolchain();
         let toolchains = of_kind(Kind::Core)
             .into_iter()
@@ -626,5 +631,46 @@ kind = "core"
         assert_eq!(project, build_stamp(&root.join(BUILD_LIB)));
         assert!(project.is_some(), "the project build is a revision like any other");
         assert_eq!(revs.current(&SourceId::new("mathlib")).unwrap().as_deref(), Some("0df444a3"));
+    }
+
+    /// A local source built in a workspace of its own is stamped by that
+    /// workspace's build: rebuilding it moves that source and not the
+    /// project, and a file ahead of it is rebuilt where it is built.
+    #[test]
+    fn a_local_source_built_in_its_own_workspace_gets_that_build() {
+        let root = scratch("dt-revisions-workspace");
+        let other = root.join("third_party/m/lean");
+        olean(&root.join(BUILD_LIB), "lean/T.olean", "aa");
+        olean(&other.join(BUILD_LIB), "lean/OAI.olean", "aa");
+        let cfg = Config::parse(
+            &format!(
+                "[project]\nroot = \"{}\"\nsrc = \"src\"\nnamespace = \"T\"\n\
+                 imports = \"src/T.lean\"\nvendor = \"src/T/Vendor\"\n\
+                 [[source]]\nname = \"project\"\nkind = \"local\"\npath = \"src\"\nroot = \"T\"\n\
+                 [[source]]\nname = \"oai\"\nkind = \"local\"\npath = \"third_party/m/lean\"\n\
+                 workspace = \"third_party/m/lean\"\nroot = \"OAI\"\n",
+                root.display()
+            ),
+            Path::new("/unused"),
+        )
+        .unwrap();
+        let (project, oai) = (SourceId::new("project"), SourceId::new("oai"));
+        let revs = OnDisk::read(&cfg);
+        let was_project = revs.current(&project).unwrap();
+        let was_oai = revs.current(&oai).unwrap();
+        assert_eq!(was_project, build_stamp(&root.join(BUILD_LIB)));
+        assert_eq!(was_oai, build_stamp(&other.join(BUILD_LIB)));
+        assert!(was_oai.is_some());
+
+        olean(&other.join(BUILD_LIB), "lean/OAI/Count.olean", "bb");
+        let revs = OnDisk::read(&cfg);
+        assert_eq!(revs.current(&project).unwrap(), was_project, "the project was not rebuilt");
+        assert_ne!(revs.current(&oai).unwrap(), was_oai);
+
+        std::fs::create_dir_all(other.join("OAI")).unwrap();
+        std::fs::write(other.join("OAI/Sat.lean"), "theorem sat : 1 = 1 := rfl\n").unwrap();
+        let ahead = revs.unbuilt(&oai).unwrap();
+        assert_eq!(ahead.project, other, "`lake build` runs in its own workspace");
+        assert!(ahead.modules.contains_key(&ModuleName::new("OAI.Sat")));
     }
 }

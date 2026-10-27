@@ -536,9 +536,16 @@ impl App {
         flag || self.cfg.index.refresh_on_miss
     }
 
-    /// Every rebuilt local source in the query's reach, read again and
-    /// indexed, for a search that would otherwise report a miss. `true` when
-    /// one of them was, so the caller knows to ask its question again.
+    /// Whether `id` is compiled by the project's own `lake build`, rather
+    /// than in a workspace of its own.
+    fn built_here(&self, id: &SourceId) -> bool {
+        self.cfg.source(id.as_str()).is_ok_and(|s| s.workspace.is_none())
+    }
+
+    /// Every rebuilt local source of the project's own build in the query's
+    /// reach, read again and indexed, for a search that would otherwise
+    /// report a miss. `true` when one of them was, so the caller knows to ask
+    /// its question again.
     ///
     /// Everything this says goes to stderr. The rows on stdout are the answer;
     /// a refresh that happened on the way to them is not part of it. A refresh
@@ -551,11 +558,19 @@ impl App {
     /// exactly that.
     fn refresh_for_search(&self, repo: &dyn DeclRepo, query: &Query, asked: bool) -> bool {
         let revs = OnDisk::read(&self.cfg);
-        let Ok(among) = status::refreshable(repo, &revs, &self.workspace.sources, query) else {
+        let Ok(mut among) = status::refreshable(repo, &revs, &self.workspace.sources, query) else {
             return false;
         };
+        // Not a source built in a workspace of its own: that one is a pinned
+        // package, rebuilt when somebody bumps it and minutes to read, and its
+        // stale line already names the refresh.
+        among.retain(|id| self.built_here(id));
         if among.is_empty() && asked {
-            let local = self.workspace.sources.iter().filter(|s| s.kind == SourceKind::Local);
+            let local = self
+                .workspace
+                .sources
+                .iter()
+                .filter(|s| s.kind == SourceKind::Local && self.built_here(&s.id));
             for s in local.filter(|s| query.source.as_ref().is_none_or(|asked| *asked == s.id)) {
                 let was = repo.provenance(&s.id).ok().flatten();
                 let built = revs.current(&s.id).ok().flatten();
@@ -589,11 +604,7 @@ impl App {
         };
         let revs = OnDisk::read(&self.cfg);
         let read_at = revs.current(id)?;
-        let lean = LakeElaborator {
-            project_root: self.cfg.root(),
-            work_dir: self.cfg.raw_dir().join("scripts"),
-            verbose: self.verbose,
-        };
+        let lean = self.elaborator(s)?;
         let path = index::dump_source(
             &s.meta(),
             &root_module,
@@ -652,12 +663,14 @@ impl App {
         Ok(())
     }
 
+    /// Against the project's own source: the file is under `src`, and a local
+    /// source built in another workspace is another package's.
     fn dup(&self, file: &std::path::Path, threshold: f32) -> Result<()> {
         let local = self
             .cfg
             .sources
             .iter()
-            .find(|s| s.kind == config::Kind::Local)
+            .find(|s| s.kind == config::Kind::Local && s.workspace.is_none())
             .map(|s| SourceId::new(s.name.clone()))
             .unwrap_or_else(|| SourceId::new("project"));
         let module = self.module_of(file);
@@ -702,23 +715,40 @@ impl App {
 
     // ---- building the index ---------------------------------------------
 
-    fn dump(&self, source: Option<&str>, with_deps: bool) -> Result<()> {
-        let root = self.cfg.root();
+    /// The elaborator for `s`: `lake env lean` in the workspace that builds
+    /// it, which is the project's own unless the source names another. One
+    /// workspace's `lake env` sees its own toolchain and packages and no
+    /// other's, so a source built elsewhere is dumped where it is built.
+    fn elaborator(&self, s: &config::Source) -> Result<LakeElaborator> {
+        let root = self.cfg.lake_root(s);
         if !lake::is_lake_project(&root) {
-            bail!(
-                "{} is not a Lake project, so there is nothing to elaborate; \
-                 set `project.root` in {}",
-                root.display(),
-                config::FILE_NAME
-            )
+            match s.workspace {
+                Some(_) => bail!(
+                    "{} is not a Lake project, so `{}` cannot be elaborated there; \
+                     set its `workspace` in {} to the directory with its lakefile",
+                    root.display(),
+                    s.name,
+                    config::FILE_NAME
+                ),
+                None => bail!(
+                    "{} is not a Lake project, so there is nothing to elaborate; \
+                     set `project.root` in {}",
+                    root.display(),
+                    config::FILE_NAME
+                ),
+            }
         }
-        let lean = LakeElaborator {
+        Ok(LakeElaborator {
             project_root: root,
             work_dir: self.cfg.raw_dir().join("scripts"),
             verbose: self.verbose,
-        };
+        })
+    }
+
+    fn dump(&self, source: Option<&str>, with_deps: bool) -> Result<()> {
         for s in self.select(source, |s| s.elaborated())? {
             let Some(root_module) = s.root_module() else { continue };
+            let lean = self.elaborator(s)?;
             let out = self.cfg.jsonl_path(s);
             let path = index::dump_source(
                 &s.meta(),
